@@ -34,10 +34,10 @@ export default function CollectorControl() {
     <span className={`collector-dot${status.running ? " running" : ""}`} aria-hidden="true" />
     <span title={error || status.error || (status.running ? "关闭窗口或退出应用后继续采集，登录后自动启动" : label)}>{error ? "后台采集操作失败" : label}</span>
     <HelpTip label="同步与保留" align="end">
-      打开用量页、切回应用和刷新时都会增量更新请求；图表按请求发生时间统计，不按同步时间绘图。
-      <p>后台保留是可选项：关闭应用后继续监听变化，保留可能被外部程序删除的日志用量。未变化的文件不会重新解析。</p>
-      <p>关闭后台不影响使用时同步。应用内删除会先保存计量；从未读取且已被外部删除的记录无法补回。</p>
-      {signingRequired && <p>当前安装包不支持退出后的后台采集。该功能需要带开发者签名的版本；打开应用时仍会正常同步。</p>}
+      {signingRequired ? <>使用应用时自动更新用量。<p>此版本不支持退出后的后台采集。</p></> : <>
+        用量会自动更新。开启后台保留后，退出应用也会继续记录。
+        <p>外部删除前尚未保存的用量无法找回。</p>
+      </>}
     </HelpTip>
     {!signingRequired && <button disabled={busy} onClick={() => void change()} aria-label={approval ? "打开后台采集系统设置" : status.desired ? "暂停后台采集" : "开启后台采集"} title={approval ? "打开系统设置授权" : status.desired ? "暂停后台采集" : "开启后台采集"}>
       <UiIcon icon={approval ? Settings : status.desired ? Pause : Play} />

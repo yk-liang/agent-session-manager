@@ -129,8 +129,12 @@ try {
   await page.getByRole('status').getByText('1 个会话未能搜索',{exact:true}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.fail=true);
   await search.fill('失败查询');
-  await page.getByText('正文搜索失败，可刷新重试',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'重试搜索',exact:true}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.fail=false);
+  const beforeRetry = await page.evaluate(()=>window.__SEARCH_TEST__.calls.length);
+  await page.getByRole('button',{name:'重试搜索',exact:true}).click();
+  await page.waitForFunction(count=>window.__SEARCH_TEST__.calls.length>count,beforeRetry);
+  await page.getByRole('button',{name:'重试搜索',exact:true}).waitFor({state:'detached'});
   await search.fill('目标针');
   await page.locator('.session-search-snippet').waitFor();
   assert.deepEqual(errors,[]);

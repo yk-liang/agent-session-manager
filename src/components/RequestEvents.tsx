@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { ChevronDown, Copy, LoaderCircle } from "lucide-react";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { ChevronDown, LoaderCircle } from "lucide-react";
+import CopyButton from "./CopyButton";
+import { useDelayedBusy } from "../useDelayedBusy";
 import * as api from "../api";
 import type { AgentInfo, EventPage, EventQuery, RequestEvent } from "../types";
 import { dateKey, firstDate, formatTokens, type UsagePeriod } from "../usageView";
@@ -27,6 +28,8 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState<EventPage | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingFeedback, setLoadingFeedback] = useState(false);
+  const showLoading = useDelayedBusy(loading && loadingFeedback);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -39,10 +42,10 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
   };
   const queryKey = JSON.stringify(query);
   const activeQuery = useRef("");
-  const load = async (append: boolean, filter: EventQuery = query) => {
+  const load = async (append: boolean, filter: EventQuery = query, feedback = true) => {
     const call = ++serial.current;
     const generation = api.nextEventGeneration();
-    setLoading(true); setError("");
+    setLoading(true); setLoadingFeedback(feedback); setError("");
     try {
       const result = await api.readRequestEvents({ ...filter, ...(append && page?.nextCursor && { cursor: page.nextCursor }) }, generation);
       if (serial.current !== call) return;
@@ -56,24 +59,21 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
     }
   };
   useEffect(() => {
-    if (activeQuery.current !== queryKey) { setPage(null); setExpanded(null); setNotice(""); }
+    const changed = activeQuery.current !== queryKey;
+    if (changed) { setPage(null); setExpanded(null); setNotice(""); }
     activeQuery.current = queryKey;
-    void load(false, JSON.parse(queryKey) as EventQuery);
+    // 自动补入请求时保留当前表格；用户切换筛选或首次读取才需要加载提示。
+    void load(false, JSON.parse(queryKey) as EventQuery, changed || page === null);
     return () => { ++serial.current; void api.cancelRequestEvents().catch(() => {}); };
     // 翻页状态不触发重新加载；筛选、日期或已完成的采集轮次才刷新第一页。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryKey, revision]);
-  const copy = async (session: string) => {
-    try { await writeText(session); setNotice("已复制完整会话 ID"); }
-    catch { setNotice("复制失败，可以展开详情选择会话 ID"); }
-  };
   const names = new Map(agents.map(a => [a.id, a.displayName]));
   return <section className="usage-section request-events" aria-label="请求事件">
     <div className="request-heading">
       <div className="request-title"><h2>请求事件</h2><HelpTip label="请求事件">
-        本机日志已记录的模型调用。流式分块和继承历史会合并去重；新数据自动补入，删除原会话后仍保留。
-        <p>TPS = 输出 Token（含思考）÷ 整个请求耗时，不是纯生成阶段的速度。“≈”表示按事件边界估算；首 Token 若来自 Codex 整轮计时会单独标注。</p>
-        <p>“—”表示未记录，不能视为 0；累计差额可能覆盖多次请求，不显示 TPS。成本只展示日志记录的美元金额，不套用估算价格。失败事件也可能是连接或工具错误。</p>
+        TPS = 输出 Token（含思考）÷ 请求总耗时。
+        <p>“≈”为估算，“—”为未记录；展开行可看详情。</p>
       </HelpTip><span className="request-count">{syncing && !page?.total ? "同步中" : `${page ? formatTokens(page.total) : "—"} 条`}</span></div>
       <div className="request-filters">
         <span className="usage-select"><select aria-label="请求 Agent" value={agent} onChange={e => onAgentChange(e.target.value)}><option value="all">全部 Agent</option>{agents.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
@@ -112,14 +112,14 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
             <td className="numeric"><span>{output}</span>{event.reasoningRecorded && <small>思考 {formatTokens(event.reasoningTokens)}</small>}</td>
             <td className="numeric" title="日志记录的美元成本">{r.costUsd == null ? "—" : `$${r.costUsd.toFixed(6)}`}</td>
             <td className="request-project"><span title={r.project ?? undefined}>{project || "未记录"}</span>{r.project && <small title={r.project}>{shortPath(r.project)}</small>}</td>
-            <td><button className="request-session" onClick={() => void copy(event.session)} title={event.session} aria-label={`复制会话 ID ${event.session}`}><code>{event.session}</code><UiIcon icon={Copy} size={12} /></button></td>
+            <td><CopyButton className="request-session" value={event.session} title={event.session} label={`复制会话 ID ${event.session}`} onCopied={() => setNotice("")} onError={() => setNotice("复制失败，可以展开详情选择会话 ID")}><code>{event.session}</code></CopyButton></td>
           </tr>{expanded === event.id && <tr className="request-detail-row"><td colSpan={13}><EventDetail event={event} /></td></tr>}</Fragment>;
         })}
       </tbody></table>}
-      {!page?.events.length && !error && <div className="request-empty">{loading ? "正在读取请求事件…" : syncing ? "正在同步历史请求，完成后会自动显示" : "当前筛选下没有请求事件"}</div>}
+      {!page?.events.length && !error && <div className="request-empty">{loading ? "正在读取请求事件…" : syncing ? "正在读取历史请求…" : "当前筛选下没有请求事件"}</div>}
     </div>
     {error && <div className="request-error" role="alert">读取失败：{error}<button onClick={() => void load(false)}>重试</button></div>}
-    <div className="request-footer"><span role="status">{notice}</span><span>{loading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && (!syncing || page.total > 0) && `已加载 ${formatTokens(page.events.length)} / ${formatTokens(page.total)} 条`}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void load(true)}>加载更多</button>}</div>
+    <div className="request-footer"><span role="status">{notice}</span><span>{showLoading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && (!syncing || page.total > 0) && `已加载 ${formatTokens(page.events.length)} / ${formatTokens(page.total)} 条`}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void load(true)}>加载更多</button>}</div>
   </section>;
 }
 
@@ -135,5 +135,5 @@ function EventDetail({ event }: { event: RequestEvent }) {
     ["耗时口径", r.timing ? timingNames[r.timing] : null],
     ["首 Token", r.ttftMs == null ? null : `${duration(r.ttftMs)}（${r.ttftScope === "turn" ? "整轮" : "请求"}）`],
   ];
-  return <div className="request-detail"><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value == null || value === "" ? "未记录" : value}</dd></div>)}</dl>{event.partial && <p>此记录的计量可能不完整，缺失字段没有按 0 补齐。</p>}</div>;
+  return <div className="request-detail"><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value == null || value === "" ? "未记录" : value}</dd></div>)}</dl>{event.partial && <p>部分用量未记录。</p>}</div>;
 }

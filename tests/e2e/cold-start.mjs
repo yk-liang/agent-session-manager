@@ -50,10 +50,10 @@ try {
   await page.waitForFunction(() => window.__COLD__.active === 'qoder');
   await page.locator('.usage-sync-status').waitFor();
   assert.equal(await page.locator('.usage-stat strong').first().textContent(), '—');
-  await page.getByText('正在同步历史请求，完成后会自动显示', { exact: true }).waitFor();
+  await page.getByText('正在读取历史请求…', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '开启后台采集', exact: true }).count(), 0);
   await page.getByRole('button', { name: '同步与保留说明', exact: true }).click();
-  assert.ok((await page.getByRole('tooltip').textContent()).includes('带开发者签名的版本'));
+  assert.ok((await page.getByRole('tooltip').textContent()).includes('此版本不支持退出后的后台采集'));
   await page.keyboard.press('Escape');
   const emitProgress = (phase, done, total) => page.evaluate(({ phase, done, total }) => {
     const s = window.__COLD__;
@@ -86,8 +86,9 @@ try {
   await page.evaluate(() => { window.__COLD__.ready = true; window.__COLD__.release(); });
   await page.waitForFunction(() => window.__COLD__.active === 'claude');
   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
-  assert.equal(await page.locator('.usage-sync-status').count(), 1, 'finished sources should display before the entire import completes');
+  assert.equal(await page.locator('.usage-sync-status').count(), 0, 'once saved results are available, remaining sources update quietly');
   await assertLayout();
+  await page.locator('.usage-trend').screenshot({ path: path.join(artifactDir, 'usage-chart-large-values.png') });
   await page.evaluate(() => { window.__COLD__.failSummary = true; window.__COLD__.failEvents = true; });
   await page.getByRole('button', { name: '今日', exact: true }).click();
   await page.locator('.usage-query-error').waitFor(); await page.locator('.request-error').waitFor();

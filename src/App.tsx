@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FolderOpen, RefreshCw } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import UiIcon from "./components/UiIcon";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
@@ -40,7 +39,7 @@ export default function App() {
   const [showEmpty, setShowEmpty] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [usageLoading, setUsageLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
   const [pendingBatch, setPendingBatch] = useState<{ agent: AgentInfo; sessions: SessionMeta[] } | null>(null);
@@ -96,8 +95,6 @@ export default function App() {
     if (tab === "config" && activity.dirty) { setConfigNavigation({ label, action }); return; }
     action();
   };
-
-  const refresh = () => protectConfig(() => setRefreshKey((key) => key + 1), "刷新配置");
 
   useEffect(() => {
     api
@@ -165,6 +162,7 @@ export default function App() {
     const reload = async () => {
       scheduler.setBusy(true);
       setLoading(true);
+      setCatalogError(null);
       setPendingBatch(null);
       let refinement: Promise<unknown> | undefined;
       try {
@@ -201,14 +199,14 @@ export default function App() {
         // 首屏已可操作；调度器仍等待统计完成，把这段 I/O 计入自动刷新的时间预算。
         await refinement;
       } catch (e) {
-        if (!cancelled) showToast(String(e), true);
+        if (!cancelled) setCatalogError(String(e));
       } finally {
         if (!cancelled) setLoading(false);
         scheduler.setBusy(false);
       }
     };
     const stopObserving = observeSessionChanges(selectedAgent, scheduler, () => {
-      if (!cancelled) showToast("自动监听暂不可用，切回应用或点击刷新仍可更新。", true);
+      if (!cancelled) showToast("自动监听暂不可用，切回应用时会再次检查更新。", true);
     });
     void reload();
     return () => {
@@ -388,15 +386,11 @@ export default function App() {
           <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={deleting}>用量</button>
         </nav>
         <div className="topbar-actions">
-          <button className="button-with-icon" onClick={refresh} disabled={loading || deleting || tab === "usage" && usageLoading}>
-            <UiIcon icon={RefreshCw} />
-            {loading || tab === "usage" && usageLoading ? "刷新中…" : "刷新"}
-          </button>
           {tab !== "usage" && currentAgent?.dataDir && (
             <button
               className="button-with-icon"
               onClick={() =>
-                openPath(currentAgent.dataDir!).catch((e) => showToast(`打开数据目录失败: ${e}`, true))
+                api.openDataDir(currentAgent.id).catch((e) => showToast(`打开数据目录失败: ${e}`, true))
               }
               title={`在访达中打开 ${currentAgent.displayName} 数据目录`}
             >
@@ -433,12 +427,15 @@ export default function App() {
             onDeleteSelected={requestBatchDelete}
             deleting={deleting}
             loading={loading}
+            loadError={catalogError}
+            onRetryLoad={() => setRefreshKey(key => key + 1)}
             progress={batchProgress}
             failures={batchFailures}
             searchHits={contentSearch.hits}
             searchPending={contentSearch.pending}
             searchSkipped={contentSearch.skipped}
             searchError={contentSearch.error}
+            onRetrySearch={contentSearch.retry}
             showPaths={selectedProject === null}
             hiddenPathSessionKeys={hiddenPathKeys}
             displayRoots={groupHints}
@@ -476,6 +473,7 @@ export default function App() {
               agent={selectedAgent}
               displayName={currentAgent?.displayName ?? selectedAgent}
               refreshKey={refreshKey}
+              onRetry={() => protectConfig(() => setRefreshKey(key => key + 1), "重新读取配置")}
               toast={showToast}
               onActivityChange={onConfigActivity}
             />
@@ -483,7 +481,7 @@ export default function App() {
             <div className="placeholder">选择一个 Agent 查看配置</div>
           )}
         </ResizableLayout>
-      ) : <UsagePanel agents={agents} refreshKey={refreshKey} onBusyChange={setUsageLoading} />}
+      ) : <UsagePanel agents={agents} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存修改？" message={`继续${configNavigation.label}会放弃尚未写入文件的草稿。你也可以取消，返回编辑器保存。`} confirmLabel="放弃修改并继续" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

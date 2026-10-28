@@ -591,7 +591,7 @@ assert.ok((await page.locator(".batch-status").textContent()).includes("0 / 3"))
 assert.ok(await page.getByRole("button", { name: "完成", exact: true }).isDisabled());
 assert.ok(await page.locator('.search-box input[type="search"]').isDisabled());
 assert.ok(await page.locator(".show-empty-toggle input").isDisabled());
-assert.ok(await page.locator(".topbar-actions button", { hasText: "刷新" }).isDisabled());
+assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).count(), 0);
 assert.ok(await page.locator(".tabs button", { hasText: "配置" }).isDisabled());
 assert.ok(await page.locator(".sidebar .agent-item", { hasText: "Claude Code" }).isDisabled());
 assert.ok(await page.locator(".sidebar-projects-header button").isDisabled());
@@ -607,7 +607,7 @@ await page.evaluate(() => {
   window.__PENDING_DELETES__.shift()();
 });
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
-await page.locator(".toast.error", { hasText: "mock catalog refresh failure" }).waitFor();
+await page.locator(".catalog-error", { hasText: "mock catalog refresh failure" }).waitFor();
 assert.equal(await page.locator(".session-card").count(), 2);
 assert.equal(await page.locator(".session-card input:checked").count(), 1);
 assert.ok((await page.locator(".sidebar-projects-header").textContent()).includes("2 个会话"));

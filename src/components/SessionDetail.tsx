@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import CopyButton from "./CopyButton";
 import UiIcon from "./UiIcon";
 import ViewToggle from "./ViewToggle";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -429,15 +430,6 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
     }
   };
 
-  const copySessionId = async () => {
-    try {
-      await writeText(meta.sessionId);
-      toast("已复制会话 ID");
-    } catch (error) {
-      toast(`复制会话 ID 失败：${String(error)}`, true);
-    }
-  };
-
   const resume = async (fork: boolean) => {
     try {
       await api.resumeInTerminal(agent.id, meta.sessionId, meta.cwd ?? undefined, fork);
@@ -469,11 +461,10 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
       <div className="detail-header">
         <div className="detail-title">{meta.title || "(无标题)"}</div>
         <div className="detail-meta">
-          <button className="session-id" onClick={copySessionId} aria-label={`复制会话 ID：${meta.sessionId}`} title="点击复制完整会话 ID">
+          <CopyButton key={sessionKey(meta)} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="点击复制完整会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
-            <UiIcon icon={Copy} size={12} className="copy-id-icon" />
-          </button>
+          </CopyButton>
           {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${fullTime(meta.firstTs)} ~ ${fullTime(meta.lastTs)}`}>
             {fullTime(meta.lastTs)}
           </time>}
@@ -496,7 +487,7 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
             <span className="view-toggles">
               <ViewToggle label="工具调用" checked={showTools} onChange={setShowTools} />
               <ViewToggle label="思考过程" checked={showThinking} onChange={setShowThinking} />
-              {hasContext && <ViewToggle label="上下文" checked={showContext} onChange={setShowContext} title="查看日志中自动记录的运行指令、环境和压缩摘要等；仅在当前会话含有这些记录时显示" />}
+              {hasContext && <ViewToggle label="上下文" checked={showContext} onChange={setShowContext} title="查看系统指令、环境信息和压缩摘要" />}
               <ViewToggle label="Markdown" checked={renderMarkdown} onChange={changeMarkdown} />
             </span>
           )}

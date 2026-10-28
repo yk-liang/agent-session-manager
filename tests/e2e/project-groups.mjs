@@ -78,12 +78,12 @@ try {
 
   await page.getByRole("searchbox").fill("");
   await page.evaluate(()=>window.__GROUP_TEST__.ids=[]);
-  await page.getByRole("button",{name:"刷新",exact:true}).click();
+  await page.locator(".agent-item.active").click();
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===4);
   assert.equal(await group.count(),0);
   assert.equal(await page.locator(".sidebar-projects-header .project-item.active").count(),1);
   await page.evaluate(()=>window.__GROUP_TEST__.ids=["a","b"]);
-  await page.getByRole("button",{name:"刷新",exact:true}).click();
+  await page.locator(".agent-item.active").click();
   await group.waitFor();await group.click();
   assert.equal(await page.locator(".session-card").count(),2);
   pass("membership refresh restores directory grouping and clears a vanished virtual selection");

@@ -89,7 +89,8 @@ try {
   await page.locator(".session-card", { hasText: "Created while background" }).waitFor({ timeout: 8000 });
   pass("backgrounding stops the watcher and scanning; returning to the application catches changes missed while away");
 
-  await page.getByRole("button", { name: "刷新", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).count(), 0);
+  await page.locator('.session-list[aria-busy="false"]').waitFor();
   await page.getByRole("button", { name: "批量管理", exact: true }).click();
   await page.locator(".session-card input[type=checkbox]").first().check();
   before = await count();

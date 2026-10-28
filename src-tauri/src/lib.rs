@@ -100,6 +100,16 @@ async fn list_agents() -> Result<Vec<AgentInfo>, String> {
     run_backend(|| Ok(agents::list_agents())).await
 }
 
+#[tauri::command]
+async fn open_data_dir(agent: String) -> Result<(), String> {
+    run_backend(move || {
+        let path = agents::data_directory(&agent)?;
+        tauri_plugin_opener::open_path(path, None::<&str>)
+            .map_err(|error| format!("无法打开文件管理器：{error}"))
+    })
+    .await
+}
+
 static USAGE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static EVENT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static SUMMARY_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -476,6 +486,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             refine_catalog, cancel_catalog_refinement, read_tool_payload,
             list_agents,
+            open_data_dir,
             catalog,
             sync_request_events, read_usage_summary, cancel_usage_summary,
             read_request_events,

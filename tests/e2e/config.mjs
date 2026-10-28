@@ -16,7 +16,10 @@ let checks = 0;
 const pass = (label) => { checks++; console.log(`PASS ${checks}: ${label}`); };
 const file = (key) => page.locator(`.config-file[data-file-key="${key}"]`);
 const agent = async (name) => { await page.locator(".sidebar").getByRole("button", { name, exact: true }).click(); await page.locator(".config-file").first().waitFor(); };
-const refresh = async () => { await page.locator(".topbar-actions").getByRole("button", { name: "刷新", exact: true }).click(); };
+const refresh = async () => {
+  const retry = page.getByRole("button", { name: "重试读取", exact: true });
+  if (await retry.count()) await retry.click(); else await page.locator(".sidebar .agent-item.active").click();
+};
 const beforeUnloadBlocked = () => page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
 const discard = () => page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).getByRole("button", { name: "放弃修改并继续", exact: true }).click();
 const nativeExit = () => page.evaluate(() => window.__CONFIG_TEST__.emit("config-exit-requested"));

@@ -19,6 +19,7 @@ interface Props {
   agent: string;
   displayName: string;
   refreshKey: number;
+  onRetry: () => void;
   toast: (msg: string, isError?: boolean) => void;
   onActivityChange: (activity: ConfigActivity) => void;
 }
@@ -29,6 +30,7 @@ export default function ConfigPanel({
   agent,
   displayName,
   refreshKey,
+  onRetry,
   toast,
   onActivityChange,
 }: Props) {
@@ -97,7 +99,7 @@ export default function ConfigPanel({
       } catch (e) {
         if (gen === reloadGen.current) {
           setLoadFailed(true);
-          setNotice({ text: `无法刷新配置：${String(e)}`, error: true });
+          setNotice({ text: `无法读取配置：${String(e)}`, error: true });
         }
         return false;
       } finally {
@@ -108,7 +110,7 @@ export default function ConfigPanel({
   );
 
   useEffect(() => {
-    void reload(true);
+    void reload(true).then(loaded => { if (loaded) setNotice(null); });
     return () => {
       reloadGen.current++;
     };
@@ -138,7 +140,7 @@ export default function ConfigPanel({
         refreshed
           ? null
           : {
-              text: `${key} 已保存，但无法重新读取状态；请刷新后重试。`,
+              text: `${key} 已保存，但无法重新读取状态。`,
               error: true,
             },
       );
@@ -188,7 +190,7 @@ export default function ConfigPanel({
       setNotice(
         refreshed
           ? null
-          : { text: "已保存，状态刷新失败；请刷新后重试。", error: true },
+          : { text: "已保存，但无法重新读取状态。", error: true },
       );
       toast(preview.kind === "profile" ? "配置已应用" : "备份已恢复");
     } catch (e) {
@@ -238,7 +240,7 @@ export default function ConfigPanel({
           </div>
         )}
         <p className="hint">
-          {loading ? "加载中…" : "读取失败，请使用顶部刷新重试。"}
+          {loading ? "加载中…" : <button onClick={onRetry}>重试读取</button>}
         </p>
       </div>
     );
@@ -339,13 +341,14 @@ export default function ConfigPanel({
           role={notice.error ? "alert" : "status"}
         >
           {notice.text}
-          <button
+          {loadFailed && <button onClick={onRetry} disabled={working}>重试读取</button>}
+          {!loadFailed && <button
             className="notice-dismiss"
             aria-label="关闭提示"
             onClick={() => setNotice(null)}
           >
             <UiIcon icon={X} />
-          </button>
+          </button>}
         </div>
       )}
       {workspace.warnings.length > 0 && (
@@ -362,8 +365,7 @@ export default function ConfigPanel({
           <div className="config-heading-label">
             <h2 id="profiles-title">配置方案</h2>
             <HelpTip label="配置方案">
-              将当前用户配置保存为方案，切换前可查看差异。项目设置或启动参数可能覆盖这些配置，修改后
-              CLI 可能需要重新加载。
+              保存和切换用户配置。项目设置或启动参数可能覆盖它；切换后可能需重启 Agent。
             </HelpTip>
           </div>
           {workspace.profiles.length === 0 && !saveOpen && (
@@ -453,7 +455,7 @@ export default function ConfigPanel({
           <div className="config-heading-label">
             <h2 id="files-title">配置文件</h2>
             <HelpTip label="配置文件">
-              编辑后保存。存在语法错误或检测到外部修改时，会保留草稿并提示。
+              格式错误或外部修改会阻止保存，草稿会保留。
             </HelpTip>
           </div>
           {!validFiles && <span className="config-badge amber">格式有误</span>}
@@ -495,8 +497,7 @@ export default function ConfigPanel({
               </button>
             </h2>
             <HelpTip label="备份" above>
-              修改前自动备份，恢复前可查看差异。可恢复一次操作前的全部文件，最多显示最近
-              100 条。
+              修改前自动备份，可恢复单个文件或整次操作。
             </HelpTip>
           </div>
           {workspace.backups.length === 0 && (

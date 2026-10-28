@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, LoaderCircle } from "lucide-react";
 import * as api from "../api";
 import { AutoRefreshScheduler } from "../autoRefresh";
+import { useDelayedBusy } from "../useDelayedBusy";
 import { observeSessionChanges } from "../sessionWatch";
 import { dateKey, formatTokens, formatUsageField, modelTotals, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
 import type { AgentInfo, UsageSummary, UsageSyncProgress } from "../types";
@@ -16,11 +17,13 @@ import { ModelLabel } from "./SessionModel";
 const snapshots = new Map<string, UsageSummary>();
 const periods: [UsagePeriod, string][] = [["today", "今日"], ["week", "近 7 天"], ["month", "近 30 天"], ["all", "全部"]];
 
-export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agents: AgentInfo[]; refreshKey: number; onBusyChange: (busy: boolean) => void }) {
+export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [queryError, setQueryError] = useState("");
   const [queryLoading, setQueryLoading] = useState(true);
-  const [syncedAt, setSyncedAt] = useState<number | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  // 首轮完成后的 0 也是已知结果，后续同步不能让它退回加载占位。
+  const [hasSynced, setHasSynced] = useState(false);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
   const [period, setPeriod] = useState<UsagePeriod>("month");
@@ -33,6 +36,8 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
   const [progress, setProgress] = useState<UsageSyncProgress | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const busy = pending.size > 0;
+  // 大块进度提示结束即收起，避免同步完成后仍保留过时的阶段文字。
+  const showSync = useDelayedBusy(busy, 300, 0);
   useEffect(() => {
     if (!busy) return;
     const started = performance.now(); setElapsed(0);
@@ -60,15 +65,14 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
     const generation = api.nextUsageGeneration();
     const refresh = async () => {
       if (disposed) return;
-      onBusyChange(true); scheduler.setBusy(true); setPending(new Set(sources));
+      scheduler.setBusy(true); setPending(new Set(sources));
       try {
         // 源依次扫描，界面逐个显示；避免五份大历史同时争用磁盘和 CPU。
         for (const id of sources) {
           if (disposed) break;
           setProgress({ agent: id, phase: "waiting", checkedFiles: 0, totalFiles: null });
           try {
-            const synced = await api.syncRequestEvents(id, generation);
-            if (!disposed) setSyncedAt(synced.updatedAt);
+            await api.syncRequestEvents(id, generation);
             if (!disposed) setErrors(current => { const next = new Map(current); next.delete(id); return next; });
           } catch (error) {
             if (!disposed) setErrors(current => new Map(current).set(id, String(error)));
@@ -81,12 +85,12 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
           }
         }
       } finally {
-        if (!disposed) { onBusyChange(false); scheduler.setBusy(false); setProgress(null); }
+        if (!disposed) { scheduler.setBusy(false); setProgress(null); setHasSynced(true); }
       }
     };
     const scheduler = new AutoRefreshScheduler(() => refresh());
     scheduler.setBusy(true);
-    setPending(new Set(sources)); onBusyChange(true);
+    setPending(new Set(sources));
     setWatchError(false);
     const stop = observeSessionChanges("usage", scheduler, () => { if (!disposed) setWatchError(true); });
     const subscription = listen<{ generation: number; progress: UsageSyncProgress }>("usage-sync-progress", ({ payload }) => {
@@ -94,11 +98,11 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
     }).catch(() => null);
     void subscription.then(() => { if (!disposed) void refresh(); });
     return () => {
-      disposed = true; stop(); scheduler.dispose(); onBusyChange(false);
+      disposed = true; stop(); scheduler.dispose();
       void subscription.then(off => off?.()).catch(() => {});
       void api.cancelUsage().catch(() => {});
     };
-  }, [ids, refreshKey, onBusyChange]);
+  }, [ids, retryKey]);
 
   const queryKey = JSON.stringify(summaryQuery(period, now));
   useEffect(() => {
@@ -119,7 +123,7 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
   const scopedRows = allRows.filter(r => agent === "all" || r.agent === agent);
   const rows = scopedRows.filter(r => model === "all" || r.model === model);
   const totals = sumTokens(rows);
-  const available = summary !== null && (!busy || allRows.length > 0);
+  const available = summary !== null && (hasSynced || !busy || allRows.length > 0);
   const scopedHealth = Object.entries(summary?.health ?? {}).filter(([id]) => agent === "all" || id === agent).map(([, h]) => h);
   const partial = scopedHealth.some(h => h.partial) || rows.some(r => r.partial) || !!queryError ||
     agents.some(a => (agent === "all" || a.id === agent) && errors.has(a.id));
@@ -128,29 +132,28 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
   const series = usageSeries(rows, period, now);
   const value = (number: number) => available ? formatTokens(number) : "—";
   const changeAgent = (id: string) => { setAgent(id); setModel("all"); setExpanded(false); };
-  const warnings = scopedHealth.flatMap(h => h.warnings);
-  if (watchError) warnings.push("自动监听暂不可用，切回应用或点击刷新仍可检查更新。");
+  // 已有记录时安静地补入变化；只有尚无可展示数据的历史导入才显示进度。
+  const showImportProgress = showSync && busy && !available;
   const activeName = agents.find(a => a.id === progress?.agent)?.displayName;
   const phaseNames = { waiting: "等待同步", discovering: "查找历史日志", reading: "读取历史日志", indexing: "整理请求记录", complete: "同步完成" };
   return <main className="usage-page">
     <div className="usage-content">
       <div className="usage-heading">
         <div className="usage-heading-title"><h1>Token 用量</h1><HelpTip label="Token 统计">
-          直接汇总已保存请求的模型和 usage，按请求发生时间分桶；打开用量页、切回应用或刷新时增量同步。删除会话后仍保留已保存用量，缓存与思考细分不重复相加。
-          <p>缺失分项显示“未提供”；≥ 表示只记录了部分调用的该分项。缓存和思考明细仅汇总日志有提供的字段。</p>
-          {partial && <p>部分历史缺少计量或存在格式差异，当前结果可能不完整。</p>}
-          {(agent === "all" || agent === "qoder") && summary?.health.qoder?.partial && <p>Qoder 缓存与输入的关系尚未确认，总量仅计已记录输入和输出。</p>}
-          {[...new Set(warnings)].map(w => <p key={w}>{w}</p>)}
-          {errors.size > 0 && <p>部分来源同步失败，已保存请求仍可统计；点击顶部刷新重试。</p>}
+          按请求时间统计，已保存用量不随会话删除。
+          <p>“≥”为已知下限；“未提供”不等于 0。</p>
+          {partial && <p>部分记录不完整，统计可能有偏差。</p>}
+          {watchError && <p>自动更新暂不可用，切回应用会重试。</p>}
         </HelpTip>{partial && available && <span className="usage-partial">部分统计</span>}</div>
-        <div className="usage-heading-status"><CollectorControl /><div className="usage-update">{busy ? <><UiIcon icon={LoaderCircle} className="usage-spin" />正在同步请求</> : syncedAt != null ? `已同步 ${new Date(syncedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "本地已保存记录"}</div></div>
+        <div className="usage-heading-status"><CollectorControl /></div>
       </div>
-      {busy && <div className="usage-sync-status" role="status">
+      {showImportProgress && <div className="usage-sync-status" role="status">
         <span><UiIcon icon={LoaderCircle} className="usage-spin" /><strong>{activeName ? `${activeName} · ${phaseNames[progress!.phase]}` : "准备同步历史请求"}</strong>
           {progress?.totalFiles != null && <span>已检查 {formatTokens(progress.checkedFiles)} / {formatTokens(progress.totalFiles)} 个文件</span>}<span>已用时 {elapsed} 秒</span></span>
-        <p>{available ? "正在显示已保存的用量，后续记录会在同步完成后补入。" : "正在同步本机历史日志，首次读取或数据较多时可能需要几分钟。"}可以切换页面，已保存的进度会保留。</p>
+        <p>首次读取可能较慢，可继续使用其他页面。</p>
       </div>}
       {queryError && <div className="usage-query-error" role="alert">用量查询失败：{queryError}<button onClick={() => setEventsRevision(n => n + 1)}>重试查询</button></div>}
+      {errors.size > 0 && <div className="usage-sync-error" role="alert">部分来源暂时无法更新，已保存记录仍可查看。<button disabled={busy} onClick={() => setRetryKey(key => key + 1)}>重试同步</button></div>}
       <div className="usage-filters">
         <div className="usage-periods" role="group" aria-label="统计时间">
           {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} className={period === id ? "active" : ""} onClick={() => setPeriod(id)}>{label}</button>)}
@@ -166,7 +169,7 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
       <section className="usage-section usage-trend"><h2>{period === "today" ? "每小时趋势" : "每日趋势"}<small className="usage-time-basis">按请求发生时间 · 本地时区</small></h2>
         {available ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{queryError ? "暂时无法读取用量，请重试查询" : busy ? "正在同步历史用量…" : queryLoading ? "正在读取已保存用量…" : "此时间范围暂无记录"}</div>}
       </section>
-      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={busy} onAgentChange={changeAgent} onModelChange={setModel} />
+      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={busy && !available} onAgentChange={changeAgent} onModelChange={setModel} />
       <div className="usage-breakdowns">
         <section className="usage-section"><h2>按 Agent</h2><div className="usage-agent-list">
           {agents.map(a => {
@@ -174,7 +177,7 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
             const total = sumTokens(agentRows);
             return <button key={a.id} className={`usage-agent-row${agent === a.id ? " selected" : ""}`} aria-pressed={agent === a.id} onClick={() => changeAgent(agent === a.id ? "all" : a.id)}>
               <span className="usage-agent-name"><AgentIcon agent={a.id} />{a.displayName}</span>
-              <span className="usage-agent-value" title={summary?.health[a.id]?.partial ? "部分统计" : undefined}>{pending.has(a.id) && <UiIcon icon={LoaderCircle} className="usage-spin" />}{summary && (!pending.has(a.id) || agentRows.length > 0) ? formatTokens(total.totalTokens) : "—"}</span>
+              <span className="usage-agent-value" title={summary?.health[a.id]?.partial ? "部分统计" : undefined}>{showImportProgress && pending.has(a.id) && <UiIcon icon={LoaderCircle} className="usage-spin" />}{summary && (hasSynced || !pending.has(a.id) || agentRows.length > 0) ? formatTokens(total.totalTokens) : "—"}</span>
               {errors.has(a.id) && !pending.has(a.id) && <span className="usage-source-error">同步失败：{errors.get(a.id)}</span>}
             </button>;
           })}
@@ -193,12 +196,25 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
 }
 
 function UsageChart({ points, hourly }: { points: UsagePoint[]; hourly: boolean }) {
+  const container = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  useLayoutEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const measure = () => setContainerWidth(element.clientWidth);
+    const observer = new ResizeObserver(measure);
+    measure();
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const max = Math.max(1, ...points.map(p => p.totalTokens));
-  const width = 930, left = 56, top = 14, base = 172, height = base - top;
+  // 直接使用 CSS 像素布局，窗口变化时重排图形，不缩放 SVG 内的文字。
+  const left = 56, right = 24, width = Math.max(0, containerWidth - left - right);
+  const top = 14, base = 172, height = base - top;
   const step = width / Math.max(1, points.length), barWidth = Math.max(1, step * .7);
   const y = (n: number) => base - n / max * height;
   const ticks = [...new Set((hourly ? [0, 6, 12, 18, points.length - 1] : [0, Math.floor((points.length - 1) / 2), points.length - 1]).filter(i => i >= 0 && i < points.length))];
-  return <div className="usage-chart"><svg viewBox="0 0 1000 202" role="img" aria-label={`${points.length} ${hourly ? "小时" : "天"}的输入与输出 Token 趋势`} preserveAspectRatio="none">
+  return <div className="usage-chart" ref={container}><svg role="img" aria-label={`${points.length} ${hourly ? "小时" : "天"}的输入与输出 Token 趋势`}>
     {[0, .5, 1].map(r => <g key={r}><line x1={left} x2={left + width} y1={y(max * r)} y2={y(max * r)} className="usage-grid-line" /><text x={left - 9} y={y(max * r) + 4} textAnchor="end">{formatTokens(max * r, true)}</text></g>)}
     {points.map((p, i) => {
       const x = left + i * step + (step - barWidth) / 2;

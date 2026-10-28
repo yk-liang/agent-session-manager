@@ -52,7 +52,8 @@ try {
   const qoder = page.locator(".agent-item", { hasText: "Qoder CLI" });
   const codex = page.locator(".agent-item", { hasText: "Codex" });
   const cards = page.locator(".session-card");
-  const refresh = page.getByRole("button", { name: "刷新", exact: true });
+  const reload = () => page.locator(".agent-item.active").click();
+  const waitLoaded = () => page.locator('.session-list[aria-busy="false"]').waitFor();
   const project = page.locator('.sidebar-project-list .project-item[title="/tmp/source"]');
   const assertProjectDetail = async (phase) => {
     assert.equal(await project.and(page.locator(".active")).count(), 1, `${phase}: project selection must survive`);
@@ -82,25 +83,25 @@ try {
   await page.evaluate(() => { window.__CACHE_TEST__.add(); window.__CACHE_TEST__.release("qoder"); });
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 2);
   await page.evaluate(() => window.__CACHE_TEST__.release("codex"));
-  await refresh.waitFor();
+  await waitLoaded();
   assert.equal(await cards.filter({ hasText: "Codex question" }).count(), 0);
   pass("rapid switching coalesces scans, background refresh adds new sessions, and stale Agent responses cannot replace the active list");
 
   await project.click();
   await cards.filter({ hasText: /^Qoder question/ }).click();
   await page.locator(".detail-title").waitFor();
-  await refresh.click();
+  await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await assertProjectDetail("cached refresh pending");
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder", true));
-  await refresh.waitFor();
-  await page.locator(".toast.error").waitFor();
+  await waitLoaded();
+  await page.locator(".catalog-error").waitFor();
   assert.equal(await cards.count(), 2);
   await assertProjectDetail("cached refresh failed");
-  await refresh.click();
+  await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
-  await refresh.waitFor();
+  await waitLoaded();
   assert.equal(await cards.filter({ hasText: "Qwen readable name" }).count(), 2);
   await assertProjectDetail("cached refresh retried");
   pass("refresh failure retains project, detail and cached list; retry retains readable model names");
@@ -110,15 +111,15 @@ try {
   await assertProjectDetail("uncached empty-session filter pending");
   assert.equal(await cards.count(), 2);
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder", true));
-  await refresh.waitFor();
+  await waitLoaded();
   await assertProjectDetail("uncached empty-session filter failed");
   assert.equal(await cards.count(), 2);
-  await refresh.click();
+  await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await assertProjectDetail("uncached empty-session filter retry pending");
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 3);
-  await refresh.waitFor();
+  await waitLoaded();
   await assertProjectDetail("uncached empty-session filter loaded");
   pass("first empty-session filter preserves project and detail during loading, failure and successful retry");
 
@@ -128,7 +129,7 @@ try {
   await assertProjectDetail("cached filter switch pending");
   assert.equal(await cards.count(), 2);
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
-  await refresh.waitFor();
+  await waitLoaded();
   await assertProjectDetail("cached filter switch loaded");
   pass("empty-session filters use separate snapshots and switch back without losing project or detail");
 
@@ -142,7 +143,7 @@ try {
   await cards.filter({ hasText: "New Qoder question" }).waitFor();
   assert.equal(await cards.count(), 1);
   await page.evaluate(() => { window.__CACHE_TEST__.release("qoder"); window.__CACHE_TEST__.release("codex"); });
-  await refresh.waitFor();
+  await waitLoaded();
   assert.equal(await cards.count(), 1);
   pass("deletion evicts both cached filters immediately and switching cannot revive the deleted card");
 
@@ -159,10 +160,10 @@ try {
   assert.equal(await cards.count(), 0);
   assert.equal(await page.locator(".detail-actions").count(), 0);
   await page.evaluate(() => window.__CACHE_TEST__.release("codex", true));
-  await refresh.waitFor();
+  await waitLoaded();
   assert.equal(await cards.count(), 0);
   assert.equal(await page.locator(".detail-actions").count(), 0);
-  await refresh.click();
+  await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "codex"));
   assert.equal(await page.locator(".detail-actions").count(), 0);
   await page.evaluate(() => window.__CACHE_TEST__.release("codex"));
@@ -176,22 +177,22 @@ try {
   assert.equal(await cards.filter({ hasText: "Codex question" }).count(), 0);
   assert.equal(await page.locator(".detail-actions").count(), 0);
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
-  await refresh.waitFor();
+  await waitLoaded();
   await page.getByLabel("显示空会话").uncheck();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
-  await refresh.waitFor();
+  await waitLoaded();
   pass("uncached Agent loading, failure, retry and late responses never expose the previous Agent's cards or actions");
 
   await project.click();
   await cards.filter({ hasText: "New Qoder question" }).click();
   await page.locator(".detail-title").waitFor();
-  await refresh.click();
+  await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   assert.equal(await project.and(page.locator(".active")).count(), 1);
   assert.equal(await page.locator(".detail-title").textContent(), "New Qoder question");
   await page.evaluate(() => { window.__CACHE_TEST__.rows.qoder = []; window.__CACHE_TEST__.release("qoder"); });
-  await refresh.waitFor();
+  await waitLoaded();
   await page.locator(".sidebar-projects-header .project-item.active").waitFor();
   assert.equal(await cards.count(), 0);
   assert.equal(await project.count(), 0);
@@ -209,7 +210,7 @@ try {
   await assertProjectDetail("first successful filter pending");
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 2);
-  await refresh.waitFor();
+  await waitLoaded();
   await assertProjectDetail("first successful filter loaded");
   assert.deepEqual(errors, []);
   pass("first filter success also preserves project and detail in a fresh workspace; no browser runtime errors");

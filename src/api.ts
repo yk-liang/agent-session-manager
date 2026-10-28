@@ -15,6 +15,7 @@ import type {
 } from "./types";
 
 export const listAgents = () => invoke<AgentInfo[]>("list_agents");
+export const openDataDir = (agent: string) => invoke<void>("open_data_dir", { agent });
 
 let usageGeneration = Date.now();
 export const nextUsageGeneration = () => ++usageGeneration;

@@ -24,7 +24,7 @@ try {
    static now() { return fixture.now; }
   };
   const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
-  const state = window.__USAGE__ = { fixture, calls: [], holdSync: true, syncResolvers: [], releaseSync: null, holdSummary: null, releaseSummary: null, failSync: null, failSummary: false, collector: { desired: false, running: false, authorization: 'disabled' } };
+  const state = window.__USAGE__ = { fixture, calls: [], syncRounds: 0, holdSync: true, syncResolvers: [], releaseSync: null, holdSummary: null, releaseSummary: null, failSync: null, failSummary: false, collector: { desired: false, running: false, authorization: 'disabled' } };
   window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
    state.calls.push({ cmd, args });
    if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, supportsFastCatalog: false, dataDir: null, deletePolicy: 'trash' }));
@@ -34,6 +34,7 @@ try {
    if (cmd === 'sync_request_events') {
     if (state.holdSync) { await new Promise(resolve => { state.syncResolvers.push(resolve); state.releaseSync = () => { state.holdSync = false; state.syncResolvers.splice(0).forEach(r => r()); }; }); }
     if (state.failSync === args.agent) throw Error('Read failed');
+    if (args.agent === 'codex') ++state.syncRounds;
     return { updatedAt: Date.now(), checkedFiles: 100, changedFiles: 0, bytesRead: 0 };
    }
    if (cmd === 'read_usage_summary') {
@@ -60,7 +61,9 @@ try {
  const waitTotal = n => page.waitForFunction(n => document.querySelector('.usage-stat strong')?.textContent.replace(/[^0-9]/g, '') === n, n);
  await waitTotal('1100');
  await page.getByText('按需同步', { exact: true }).waitFor();
- await page.getByText('正在同步请求', { exact: true }).waitFor();
+ await page.waitForTimeout(400);
+ assert.equal(await page.locator('.usage-sync-status').count(), 0, 'saved results should update quietly');
+ assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 0);
  const syncCalls = await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'sync_request_events').length);
  await page.getByRole('button', { name: '今日', exact: true }).click(); await waitTotal('660');
  assert.equal(await page.locator('.usage-bucket').count(), 24);
@@ -78,15 +81,15 @@ try {
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'sync_request_events').length), syncCalls);
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'read_usage').length), 0);
  await page.evaluate(() => window.__USAGE__.releaseSync());
- const waitSynced = () => page.waitForFunction(() => document.querySelector('.usage-update')?.textContent.includes('已同步'));
- await waitSynced();
+ const waitSynced = round => page.waitForFunction(round => window.__USAGE__.syncRounds >= round, round);
+ await waitSynced(1);
  console.log(`PASS: persisted results render during sync; request-time hourly/daily buckets, filters and table totals agree; filters never reread logs (${engine})`);
 
  await page.evaluate(() => window.__USAGE__.failSync = 'claude');
- await page.getByRole('button', { name: '刷新', exact: true }).click();
- await page.locator('.usage-source-error').waitFor(); await waitSynced(); assert.equal(await total(), '2090');
+ await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); });
+ await page.locator('.usage-source-error').waitFor(); await waitSynced(2); assert.equal(await total(), '2090');
  await page.evaluate(() => window.__USAGE__.failSync = null);
- await page.getByRole('button', { name: '刷新', exact: true }).click(); await waitSynced();
+ await page.getByRole('button', { name: '重试同步', exact: true }).click(); await waitSynced(3);
  await page.waitForFunction(() => !document.querySelector('.usage-source-error'));
  await page.evaluate(() => window.__USAGE__.holdSummary = 'today');
  await page.getByRole('button', { name: '今日', exact: true }).click();
@@ -107,17 +110,37 @@ try {
  await page.getByRole('button', { name: '暂停后台采集', exact: true }).click();
  await page.getByText('按需同步', { exact: true }).waitFor();
  await page.getByRole('button', { name: '同步与保留说明', exact: true }).click();
- assert.ok((await page.getByRole('tooltip').textContent()).includes('不按同步时间绘图'));
+ assert.ok((await page.getByRole('tooltip').textContent()).includes('开启后台保留后，退出应用也会继续记录'));
  await page.keyboard.press('Escape');
  await page.getByRole('button', { name: '今日', exact: true }).click(); await waitTotal('660');
- for (const width of [960, 1280, 1600]) {
+ let labelSizes;
+ for (const width of [960, 1280, 1600, 2200, 1280]) {
   await page.setViewportSize({ width, height: 900 });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  await page.waitForFunction(() => {
+   const svg = document.querySelector('.usage-chart svg');
+   const grid = svg?.querySelector('.usage-grid-line');
+   if (!grid) return false;
+   const rightGap = svg.getBoundingClientRect().right - grid.getBoundingClientRect().right;
+   return rightGap >= 16 && rightGap <= 32;
+  });
+  const labels = await page.locator('.usage-chart svg text').evaluateAll(elements => elements.map(el => {
+   const box = el.getBoundingClientRect(), svg = el.ownerSVGElement.getBoundingClientRect(), matrix = el.getScreenCTM();
+   return { text: el.textContent, width: box.width, height: box.height, scaleX: matrix.a, scaleY: matrix.d,
+    contained: box.left >= svg.left - 1 && box.right <= svg.right + 1 && box.top >= svg.top - 1 && box.bottom <= svg.bottom + 1 };
+  }));
+  for (const label of labels) {
+   assert.ok(Math.abs(label.scaleX - 1) < .01 && Math.abs(label.scaleY - 1) < .01, `chart text is scaled at ${width}: ${JSON.stringify(label)}`);
+   assert.ok(label.contained, `chart label clips at ${width}: ${label.text}`);
+  }
+  if (labelSizes) for (const [i, label] of labels.entries()) {
+   assert.ok(Math.abs(label.width - labelSizes[i].width) < .5 && Math.abs(label.height - labelSizes[i].height) < .5, `font dimensions changed at ${width}`);
+  } else labelSizes = labels;
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.screenshot({ path: path.join(artifactDir, 'usage-hourly.png') });
  await page.getByRole('button', { name: '会话', exact: true }).click();
  assert.ok(await page.evaluate(() => window.__USAGE__.calls.some(c => c.cmd === 'cancel_usage_summary')));
  assert.deepEqual(errors, []);
- console.log(`PASS: optional background retention is independent of stats; 960/1280/1600 layouts and no runtime errors (${engine})`);
+ console.log(`PASS: background retention stays independent; chart labels keep their size and proportions at 960/1280/1600/2200 and after shrinking (${engine})`);
 } finally { await browser?.close(); rmSync(privateDir, { recursive: true, force: true }); }

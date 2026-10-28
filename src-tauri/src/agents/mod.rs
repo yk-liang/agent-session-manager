@@ -324,6 +324,32 @@ pub fn find_source(id: &str) -> Result<Box<dyn AgentSource>, String> {
         .ok_or_else(|| format!("未知的 agent: {id}"))
 }
 
+/// 只接受 Agent 身份，由同一个 Adapter 解析数据根，避免前端传任意打开路径。
+/// 隐藏目录、自定义目录和符号链接均受支持，不依赖会跳过点目录的 $HOME/** 通配规则。
+pub fn data_directory(agent: &str) -> Result<PathBuf, String> {
+    let path = find_source(agent)?
+        .data_dir()
+        .ok_or("该 Agent 没有配置数据目录")?;
+    existing_directory(path)
+}
+
+fn existing_directory(path: PathBuf) -> Result<PathBuf, String> {
+    let resolved = path.canonicalize().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => format!("数据目录不存在：{}", path.display()),
+        std::io::ErrorKind::PermissionDenied => {
+            format!("系统拒绝访问数据目录，请检查该目录的访问权限：{}", path.display())
+        }
+        _ => format!("无法访问数据目录 {}：{error}", path.display()),
+    })?;
+    let metadata = resolved
+        .metadata()
+        .map_err(|error| format!("无法读取数据目录信息：{error}"))?;
+    if !metadata.is_dir() {
+        return Err(format!("数据目录路径不是文件夹：{}", path.display()));
+    }
+    Ok(resolved)
+}
+
 /// IPC 仅传递不透明令牌；实际定位及完整性校验由登记该令牌的 Adapter 完成。
 pub fn read_tool_payload(token: &str) -> Result<serde_json::Value, String> {
     all_sources()
@@ -423,6 +449,46 @@ pub fn run_in_terminal(_cmd: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_directory_accepts_hidden_custom_and_linked_directories() {
+        let fixture = tempfile::tempdir().unwrap();
+        for relative in [
+            ".codex", ".local/share/opencode", ".claude", ".qoder", ".pi/agent",
+            "custom/数据 ' [目录]",
+        ] {
+            let path = fixture.path().join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            assert_eq!(
+                existing_directory(path.clone()).unwrap(),
+                path.canonicalize().unwrap()
+            );
+        }
+        let link = fixture.path().join("linked-root");
+        let target = fixture.path().join("custom/数据 ' [目录]");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            existing_directory(link).unwrap(),
+            target.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn data_directory_rejects_missing_paths_files_and_unregistered_agents() {
+        let fixture = tempfile::tempdir().unwrap();
+        let missing = fixture.path().join("missing");
+        assert!(existing_directory(missing.clone()).unwrap_err().contains("不存在"));
+        assert!(
+            !missing.exists(),
+            "opening must not create an empty data directory"
+        );
+        let file = fixture.path().join("config.json");
+        std::fs::write(&file, "{}").unwrap();
+        assert!(existing_directory(file.clone()).unwrap_err().contains("不是文件夹"));
+        for value in ["unknown", "/tmp", "../codex", file.to_str().unwrap()] {
+            assert!(data_directory(value).unwrap_err().contains("未知的 agent"));
+        }
+    }
 
     struct FixtureSource(std::sync::atomic::AtomicUsize);
     impl AgentSource for FixtureSource {

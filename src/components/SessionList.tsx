@@ -21,12 +21,15 @@ interface Props {
   onDeleteSelected: () => void;
   deleting: boolean;
   loading: boolean;
+  loadError: string | null;
+  onRetryLoad: () => void;
   progress: { completed: number; total: number } | null;
   failures: SessionDeleteFailure[];
   searchHits: Map<string, ConversationSearchHit>;
   searchPending: boolean;
   searchSkipped: number;
   searchError: string | null;
+  onRetrySearch: () => void;
   showPaths: boolean;
   hiddenPathSessionKeys?: ReadonlySet<string>;
   displayRoots?: ReadonlyMap<string, string | null>;
@@ -48,12 +51,15 @@ export default function SessionList({
   onDeleteSelected,
   deleting,
   loading,
+  loadError,
+  onRetryLoad,
   progress,
   failures,
   searchHits,
   searchPending,
   searchSkipped,
   searchError,
+  onRetrySearch,
   showPaths,
   hiddenPathSessionKeys,
   displayRoots,
@@ -61,7 +67,7 @@ export default function SessionList({
   const selectedCount = new Set(sessions.filter((s) => checkedKeys.has(sessionKey(s))).map(sessionKey)).size;
   const allSelected = sessions.length > 0 && sessions.every((s) => checkedKeys.has(sessionKey(s)));
   return (
-    <div className="session-list">
+    <div className="session-list" aria-busy={loading}>
       <div className="search-box">
         <div className="session-search-field">
           <UiIcon icon={Search} size={16} className="search-icon" />
@@ -80,9 +86,10 @@ export default function SessionList({
         </div>
         {(searchPending || searchSkipped > 0 || searchError) && (
           <div className={`search-status${searchSkipped || searchError ? " warning" : ""}`} role="status" title={searchError ?? undefined}>
-            {searchPending ? "正在搜索对话…" : searchError ? "正文搜索失败，可刷新重试" : `${searchSkipped} 个会话未能搜索`}
+            {searchPending ? "正在搜索对话…" : searchError ? <>正文搜索失败 <button onClick={onRetrySearch} disabled={deleting}>重试搜索</button></> : `${searchSkipped} 个会话未能搜索`}
           </div>
         )}
+        {loadError && <div className="catalog-error" role="alert"><span>读取会话失败：{loadError}</span><button onClick={onRetryLoad} disabled={deleting || loading}>重试读取</button></div>}
         <div className="session-list-options">
           <label className="toggle show-empty-toggle">
             <input

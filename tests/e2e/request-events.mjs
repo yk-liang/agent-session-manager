@@ -27,9 +27,10 @@ try {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
     const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', pi: 'Pi' };
-    const state = window.__EVENTS__ = { fixture, calls: [], fail: false, delay: false, release: null, revision: '1' };
+    const state = window.__EVENTS__ = { fixture, calls: [], fail: false, failCopy: false, delay: false, release: null, revision: '1' };
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
+      if (cmd === 'plugin:clipboard-manager|write_text' && state.failCopy) throw Error('Clipboard unavailable');
       if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, supportsFastCatalog: false, dataDir: null, deletePolicy: 'trash' }));
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: true, running: true, authorization: 'enabled' };
@@ -91,8 +92,14 @@ try {
   await failed.locator('.request-expand').click();
   assert.ok((await table.locator('.request-detail').textContent()).includes('503'));
   assert.ok((await table.locator('.request-detail').textContent()).includes('未记录'));
+  await page.evaluate(() => { window.__EVENTS__.failCopy = true; });
   await table.locator('.request-session').click();
-  await page.getByText('已复制完整会话 ID', { exact: true }).waitFor();
+  await page.getByText('复制失败，可以展开详情选择会话 ID', { exact: true }).waitFor();
+  assert.equal(await table.locator('.request-session').getAttribute('data-copied'), 'false');
+  await page.evaluate(() => { window.__EVENTS__.failCopy = false; });
+  await table.locator('.request-session').click();
+  await table.locator('.request-session[data-copied="true"] .lucide-check').waitFor();
+  assert.equal(await page.getByText('复制失败，可以展开详情选择会话 ID', { exact: true }).count(), 0);
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(c => c.cmd.includes('clipboard') && c.args.text === 'session-one')));
   await page.getByLabel('请求模型', { exact: true }).selectOption('claude-sonnet');
   await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();

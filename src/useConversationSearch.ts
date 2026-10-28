@@ -9,10 +9,11 @@ export function useConversationSearch(
   sessions: SessionMeta[],
   enabled: boolean,
 ) {
+  const [retryKey, setRetryKey] = useState(0);
   // 状态绑定到不可变的查询上下文，旧 Agent、项目或关键词的结果不参与当前列表。
   const context = useMemo(
-    () => ({ agent, query: query.trim(), sessions, enabled }),
-    [agent, query, sessions, enabled],
+    () => ({ agent, query: query.trim(), sessions, enabled, retryKey }),
+    [agent, query, sessions, enabled, retryKey],
   );
   const [state, setState] = useState<{
     context: typeof context;
@@ -64,6 +65,7 @@ export function useConversationSearch(
     [current],
   );
   return {
+    retry: () => setRetryKey(key => key + 1),
     hits,
     pending:
       enabled && !!agent && !!context.query && sessions.length > 0 && !current,
