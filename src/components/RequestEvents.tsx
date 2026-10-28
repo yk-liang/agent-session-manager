@@ -15,6 +15,7 @@ interface Props {
   agent: string;
   model: string;
   revision: number;
+  syncing?: boolean;
   onAgentChange: (agent: string) => void;
   onModelChange: (model: string) => void;
 }
@@ -22,7 +23,7 @@ const resultNames = { success: "成功", failed: "失败", unknown: "未记录" 
 const duration = (ms: number | null) => ms == null ? "—" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 const timingNames = { recorded: "日志记录耗时", observed: "请求与响应日志的时间差", estimated: "按相邻事件估算，可能包含调度、重试及工具等待" };
 
-export default function RequestEvents({ agents, period, now, agent, model, revision, onAgentChange, onModelChange }: Props) {
+export default function RequestEvents({ agents, period, now, agent, model, revision, syncing = false, onAgentChange, onModelChange }: Props) {
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState<EventPage | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,7 +74,7 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
         本机日志已记录的模型调用。流式分块和继承历史会合并去重；新数据自动补入，删除原会话后仍保留。
         <p>TPS = 输出 Token（含思考）÷ 整个请求耗时，不是纯生成阶段的速度。“≈”表示按事件边界估算；首 Token 若来自 Codex 整轮计时会单独标注。</p>
         <p>“—”表示未记录，不能视为 0；累计差额可能覆盖多次请求，不显示 TPS。成本只展示日志记录的美元金额，不套用估算价格。失败事件也可能是连接或工具错误。</p>
-      </HelpTip><span className="request-count">{page ? formatTokens(page.total) : "—"} 条</span></div>
+      </HelpTip><span className="request-count">{syncing && !page?.total ? "同步中" : `${page ? formatTokens(page.total) : "—"} 条`}</span></div>
       <div className="request-filters">
         <span className="usage-select"><select aria-label="请求 Agent" value={agent} onChange={e => onAgentChange(e.target.value)}><option value="all">全部 Agent</option>{agents.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
         <span className="usage-select"><select aria-label="请求模型" value={model} onChange={e => onModelChange(e.target.value)}><option value="all">全部模型</option>{[...new Set([...(page?.models ?? []), ...(model !== "all" ? [model] : [])])].map(m => <option key={m} value={m}>{m === "unknown" ? "未知模型" : m}</option>)}</select><UiIcon icon={ChevronDown} /></span>
@@ -82,7 +83,7 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
       </div>
     </div>
     <div className="request-table-wrap" tabIndex={0} role="region" aria-label="请求事件表，可横向滚动" aria-busy={loading}>
-      <table className="request-table"><colgroup>
+      {!!page?.events.length && <table className="request-table"><colgroup>
         <col style={{ width: 32 }} /><col style={{ width: 104 }} /><col style={{ width: 140 }} />
         <col style={{ width: 90 }} /><col style={{ width: 126 }} /><col style={{ width: 64 }} />
         <col style={{ width: 116 }} /><col style={{ width: 96 }} /><col style={{ width: 96 }} />
@@ -114,11 +115,11 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
             <td><button className="request-session" onClick={() => void copy(event.session)} title={event.session} aria-label={`复制会话 ID ${event.session}`}><code>{event.session}</code><UiIcon icon={Copy} size={12} /></button></td>
           </tr>{expanded === event.id && <tr className="request-detail-row"><td colSpan={13}><EventDetail event={event} /></td></tr>}</Fragment>;
         })}
-      </tbody></table>
-      {!page?.events.length && !error && <div className="request-empty">{loading ? "正在读取请求事件…" : "当前筛选下没有请求事件"}</div>}
+      </tbody></table>}
+      {!page?.events.length && !error && <div className="request-empty">{loading ? "正在读取请求事件…" : syncing ? "正在同步历史请求，完成后会自动显示" : "当前筛选下没有请求事件"}</div>}
     </div>
     {error && <div className="request-error" role="alert">读取失败：{error}<button onClick={() => void load(false)}>重试</button></div>}
-    <div className="request-footer"><span role="status">{notice}</span><span>{loading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && `已加载 ${formatTokens(page.events.length)} / ${formatTokens(page.total)} 条`}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void load(true)}>加载更多</button>}</div>
+    <div className="request-footer"><span role="status">{notice}</span><span>{loading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && (!syncing || page.total > 0) && `已加载 ${formatTokens(page.events.length)} / ${formatTokens(page.total)} 条`}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void load(true)}>加载更多</button>}</div>
   </section>;
 }
 

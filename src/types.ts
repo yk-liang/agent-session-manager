@@ -220,7 +220,7 @@ export interface UsageTokens {
 export interface CollectorStatus {
   desired: boolean;
   running: boolean;
-  authorization: "enabled" | "disabled" | "requiresApproval" | "unsupported" | "notBundled";
+  authorization: "enabled" | "disabled" | "requiresApproval" | "unsupported" | "notBundled" | "signingRequired";
   pid?: number;
   version?: string;
   error?: string;
@@ -251,6 +251,12 @@ export interface UsageSummary {
 }
 export interface UsageSummaryQuery { from?: number; to?: number; bounds: number[] }
 export interface UsageSync { updatedAt: number; checkedFiles: number; changedFiles: number; bytesRead: number }
+export interface UsageSyncProgress {
+  agent: string;
+  phase: "waiting" | "discovering" | "reading" | "indexing" | "complete";
+  checkedFiles: number;
+  totalFiles: number | null;
+}
 
 export interface RequestMetadata {
   requestId: string | null;

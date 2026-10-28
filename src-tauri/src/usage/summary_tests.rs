@@ -53,6 +53,10 @@ fn summary_upgrades_v2_without_deleted_sources_or_losing_events() {
     drop(store);
     fs::remove_file(source).unwrap();
     let mut upgraded = Store::open_with_ledger(None, Some(&path));
+    summary::sync_at("claude", &[dir.path().join("logs")], &mut upgraded, &|| {
+        false
+    })
+    .unwrap();
     let result = read(&mut upgraded, vec![]);
     assert_eq!(sum(&result), 110);
     assert!(!result.health["claude"].partial);
@@ -201,7 +205,7 @@ fn summary_deletion_flushes_new_events_without_forcing_full_history_read() {
     let db = &store.ledger().unwrap().db;
     assert_eq!(
         db.query_row("SELECT count(*) FROM usage_request_events", [], |r| r
-            .get::<_, u64>(0))
+            .get::<_, i64>(0))
             .unwrap(),
         2
     );

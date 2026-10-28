@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, LoaderCircle } from "lucide-react";
 import * as api from "../api";
 import { AutoRefreshScheduler } from "../autoRefresh";
 import { observeSessionChanges } from "../sessionWatch";
 import { dateKey, formatTokens, formatUsageField, modelTotals, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
-import type { AgentInfo, UsageSummary } from "../types";
+import type { AgentInfo, UsageSummary, UsageSyncProgress } from "../types";
 import AgentIcon from "./AgentIcon";
 import CollectorControl from "./CollectorControl";
 import RequestEvents from "./RequestEvents";
@@ -18,6 +19,7 @@ const periods: [UsagePeriod, string][] = [["today", "今日"], ["week", "近 7 �
 export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agents: AgentInfo[]; refreshKey: number; onBusyChange: (busy: boolean) => void }) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [queryError, setQueryError] = useState("");
+  const [queryLoading, setQueryLoading] = useState(true);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
@@ -28,6 +30,15 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
   const [now, setNow] = useState(() => new Date());
   const [watchError, setWatchError] = useState(false);
   const [eventsRevision, setEventsRevision] = useState(0);
+  const [progress, setProgress] = useState<UsageSyncProgress | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const busy = pending.size > 0;
+  useEffect(() => {
+    if (!busy) return;
+    const started = performance.now(); setElapsed(0);
+    const timer = setInterval(() => setElapsed(Math.floor((performance.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -54,6 +65,7 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
         // 源依次扫描，界面逐个显示；避免五份大历史同时争用磁盘和 CPU。
         for (const id of sources) {
           if (disposed) break;
+          setProgress({ agent: id, phase: "waiting", checkedFiles: 0, totalFiles: null });
           try {
             const synced = await api.syncRequestEvents(id, generation);
             if (!disposed) setSyncedAt(synced.updatedAt);
@@ -61,11 +73,15 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
           } catch (error) {
             if (!disposed) setErrors(current => new Map(current).set(id, String(error)));
           } finally {
-            if (!disposed) setPending(current => { const next = new Set(current); next.delete(id); return next; });
+            if (!disposed) {
+              setPending(current => { const next = new Set(current); next.delete(id); return next; });
+              // 每完成一个来源就展示它的已存记录，其他大历史继续同步。
+              setEventsRevision(n => n + 1);
+            }
           }
         }
       } finally {
-        if (!disposed) { onBusyChange(false); scheduler.setBusy(false); setEventsRevision(n => n + 1); }
+        if (!disposed) { onBusyChange(false); scheduler.setBusy(false); setProgress(null); }
       }
     };
     const scheduler = new AutoRefreshScheduler(() => refresh());
@@ -73,14 +89,21 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
     setPending(new Set(sources)); onBusyChange(true);
     setWatchError(false);
     const stop = observeSessionChanges("usage", scheduler, () => { if (!disposed) setWatchError(true); });
-    void refresh();
-    return () => { disposed = true; stop(); scheduler.dispose(); onBusyChange(false); void api.cancelUsage().catch(() => {}); };
+    const subscription = listen<{ generation: number; progress: UsageSyncProgress }>("usage-sync-progress", ({ payload }) => {
+      if (!disposed && payload.generation === generation) setProgress(payload.progress);
+    }).catch(() => null);
+    void subscription.then(() => { if (!disposed) void refresh(); });
+    return () => {
+      disposed = true; stop(); scheduler.dispose(); onBusyChange(false);
+      void subscription.then(off => off?.()).catch(() => {});
+      void api.cancelUsage().catch(() => {});
+    };
   }, [ids, refreshKey, onBusyChange]);
 
   const queryKey = JSON.stringify(summaryQuery(period, now));
   useEffect(() => {
     let disposed = false;
-    setSummary(snapshots.get(queryKey) ?? null); setQueryError("");
+    setSummary(snapshots.get(queryKey) ?? null); setQueryError(""); setQueryLoading(true);
     const generation = api.nextSummaryGeneration();
     void api.readUsageSummary(JSON.parse(queryKey), generation).then(value => {
       if (disposed) return;
@@ -88,15 +111,15 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
       snapshots.set(queryKey, normalized);
       while (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value!);
       setSummary(normalized);
-    }).catch(error => { if (!disposed) setQueryError(String(error)); });
+    }).catch(error => { if (!disposed) setQueryError(String(error)); })
+      .finally(() => { if (!disposed) setQueryLoading(false); });
     return () => { disposed = true; void api.cancelUsageSummary().catch(() => {}); };
   }, [queryKey, eventsRevision]);
   const allRows = summary?.rows ?? [];
   const scopedRows = allRows.filter(r => agent === "all" || r.agent === agent);
   const rows = scopedRows.filter(r => model === "all" || r.model === model);
   const totals = sumTokens(rows);
-  const available = summary !== null;
-  const busy = pending.size > 0;
+  const available = summary !== null && (!busy || allRows.length > 0);
   const scopedHealth = Object.entries(summary?.health ?? {}).filter(([id]) => agent === "all" || id === agent).map(([, h]) => h);
   const partial = scopedHealth.some(h => h.partial) || rows.some(r => r.partial) || !!queryError ||
     agents.some(a => (agent === "all" || a.id === agent) && errors.has(a.id));
@@ -107,6 +130,8 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
   const changeAgent = (id: string) => { setAgent(id); setModel("all"); setExpanded(false); };
   const warnings = scopedHealth.flatMap(h => h.warnings);
   if (watchError) warnings.push("自动监听暂不可用，切回应用或点击刷新仍可检查更新。");
+  const activeName = agents.find(a => a.id === progress?.agent)?.displayName;
+  const phaseNames = { waiting: "等待同步", discovering: "查找历史日志", reading: "读取历史日志", indexing: "整理请求记录", complete: "同步完成" };
   return <main className="usage-page">
     <div className="usage-content">
       <div className="usage-heading">
@@ -120,6 +145,11 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
         </HelpTip>{partial && available && <span className="usage-partial">部分统计</span>}</div>
         <div className="usage-heading-status"><CollectorControl /><div className="usage-update">{busy ? <><UiIcon icon={LoaderCircle} className="usage-spin" />正在同步请求</> : syncedAt != null ? `已同步 ${new Date(syncedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "本地已保存记录"}</div></div>
       </div>
+      {busy && <div className="usage-sync-status" role="status">
+        <span><UiIcon icon={LoaderCircle} className="usage-spin" /><strong>{activeName ? `${activeName} · ${phaseNames[progress!.phase]}` : "准备同步历史请求"}</strong>
+          {progress?.totalFiles != null && <span>已检查 {formatTokens(progress.checkedFiles)} / {formatTokens(progress.totalFiles)} 个文件</span>}<span>已用时 {elapsed} 秒</span></span>
+        <p>{available ? "正在显示已保存的用量，后续记录会在同步完成后补入。" : "正在同步本机历史日志，首次读取或数据较多时可能需要几分钟。"}可以切换页面，已保存的进度会保留。</p>
+      </div>}
       {queryError && <div className="usage-query-error" role="alert">用量查询失败：{queryError}<button onClick={() => setEventsRevision(n => n + 1)}>重试查询</button></div>}
       <div className="usage-filters">
         <div className="usage-periods" role="group" aria-label="统计时间">
@@ -134,9 +164,9 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
         {([["总 Token", value(totals.totalTokens)], ["输入 Token", available ? rows.length ? formatUsageField(totals, "input") : "0" : "—"], ["输出 Token", available ? rows.length ? formatUsageField(totals, "output") : "0" : "—"]] as const).map(([label, display]) => <div className="usage-stat" key={label}><span>{label}</span><strong title={available ? display === "未提供" ? "日志未提供该分项" : display.startsWith("≥") ? "部分记录缺少该分项，显示已记录下限" : `已记录 ${display} token` : undefined}>{display}</strong></div>)}
       </section>
       <section className="usage-section usage-trend"><h2>{period === "today" ? "每小时趋势" : "每日趋势"}<small className="usage-time-basis">按请求发生时间 · 本地时区</small></h2>
-        {available ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{busy && !available ? "正在读取用量…" : available ? "此时间范围暂无记录" : "暂无 Token 记录"}</div>}
+        {available ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{queryError ? "暂时无法读取用量，请重试查询" : busy ? "正在同步历史用量…" : queryLoading ? "正在读取已保存用量…" : "此时间范围暂无记录"}</div>}
       </section>
-      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} onAgentChange={changeAgent} onModelChange={setModel} />
+      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={busy} onAgentChange={changeAgent} onModelChange={setModel} />
       <div className="usage-breakdowns">
         <section className="usage-section"><h2>按 Agent</h2><div className="usage-agent-list">
           {agents.map(a => {
@@ -144,15 +174,15 @@ export default function UsagePanel({ agents, refreshKey, onBusyChange }: { agent
             const total = sumTokens(agentRows);
             return <button key={a.id} className={`usage-agent-row${agent === a.id ? " selected" : ""}`} aria-pressed={agent === a.id} onClick={() => changeAgent(agent === a.id ? "all" : a.id)}>
               <span className="usage-agent-name"><AgentIcon agent={a.id} />{a.displayName}</span>
-              <span className="usage-agent-value" title={summary?.health[a.id]?.partial ? "部分统计" : undefined}>{pending.has(a.id) && <UiIcon icon={LoaderCircle} className="usage-spin" />}{summary ? formatTokens(total.totalTokens) : "—"}</span>
-              {errors.has(a.id) && <span className="usage-source-error">读取失败</span>}
+              <span className="usage-agent-value" title={summary?.health[a.id]?.partial ? "部分统计" : undefined}>{pending.has(a.id) && <UiIcon icon={LoaderCircle} className="usage-spin" />}{summary && (!pending.has(a.id) || agentRows.length > 0) ? formatTokens(total.totalTokens) : "—"}</span>
+              {errors.has(a.id) && !pending.has(a.id) && <span className="usage-source-error">同步失败：{errors.get(a.id)}</span>}
             </button>;
           })}
         </div></section>
         <section className="usage-section usage-models"><h2>按模型</h2>
           {models.length > 0 ? <><table><thead><tr><th>模型</th><th>Token</th></tr></thead><tbody>
             {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><td><ModelLabel id={m.model} name={m.modelName} /></td><td title={m.partial ? "部分统计" : undefined}>{formatTokens(m.totalTokens)}</td></tr>)}
-          </tbody></table>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">暂无模型记录</div>}
+          </tbody></table>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">{queryError ? "模型用量暂不可用" : busy ? "等待历史用量同步" : "暂无模型记录"}</div>}
         </section>
       </div>
       <details className="usage-details"><summary>缓存与思考明细<UiIcon icon={ChevronDown} /></summary><div className="usage-detail-grid">

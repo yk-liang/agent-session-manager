@@ -23,6 +23,7 @@ npm test                           # 全部前端单元测试，Node 22+
 npm run test:rust                  # Rust 解析、用量和集成测试
 npm run test:e2e                   # 全部浏览器回归，默认 WebKit，自动启停测试服务器
 npm run test:e2e -- config usage   # 按文件名选择测试，不必手动启动 Vite
+npm run test:e2e -- cold-start     # 慢首次导入、进度、失败重试与空表/大数字布局
 npm run test:e2e -- opencode opencode-v2  # 新旧 SQLite 结构，真实 Rust 解析器生成合成数据
 npm run test:manual -- opencode-runtime # 已安装的官方 v2 CLI，隔离目录 + 本地模型接口，无需 API Key
 npm run test:manual -- agent-context-runtime # 已安装的 Claude Code / Pi，真实上下文日志与 WebKit 验证
@@ -43,6 +44,8 @@ OpenCode 本机只读复测：`cd src-tauri && cargo run --release --offline --l
 用量本机复测：`cd src-tauri && cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`；输出首次同步、重启后热同步及请求表查询的数字与耗时。加 `--cold` 时要求空目录，不清除既有数据。统计语义与 ccusage 来源见 `src-tauri/src/usage/README.md`。
 
 用量复测要求传 `-- --storage <临时目录>`，使用该目录下的 `cache.sqlite3` 和 `ledger.sqlite3` 验证迁移，不修改应用的累计账本。源日志仍只读。
+
+`cargo test --offline --locked cold_start_tests -- --test-threads=1 --nocapture` 使用全新临时目录，导入 256 份约 270 MiB 的日志、32,768 个请求，并在写入期间并发查询；检查完整快照、取消、重启后的零重复读取。日志输出同步和查询耗时，不包含会话正文。常规 Rust 回归会包含这些检查。
 
 后台进程验证：先完成 release 构建，再执行 `npm run test:integration -- collector`。它只在自清理的临时目录创建五类 Agent 日志，验证无窗口采集、迟建目录、单实例、重启/删除保留、暂停及真实进程 CPU/内存；不注册机器的登录服务。可用 `ASM_COLLECTOR_BIN` 指定待测可执行文件。
 

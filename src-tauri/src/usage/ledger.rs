@@ -4,10 +4,109 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
+    fs::{self, File},
+    os::fd::AsRawFd,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+pub(super) fn path() -> Result<PathBuf, String> {
+    Ok(dirs::data_dir()
+        .ok_or("缺少应用数据目录")?
+        .join("Agent Session Manager/usage-ledger-v1.sqlite3"))
+}
+
+/// 前台、启动任务和登录服务共用一把可取消的写锁。等待导入不是读取失败。
+pub(super) struct SyncLock(File);
+impl SyncLock {
+    pub fn acquire(path: &Path, cancel: &dyn Fn() -> bool) -> Result<Self, String> {
+        let parent = path.parent().ok_or("用量账本路径无效")?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|e| format!("无法创建用量账本目录：{e}"))?;
+        if fs::symlink_metadata(parent)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("用量账本目录不能是符号链接".into());
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path.with_extension("sync.lock"))
+            .map_err(|e| format!("无法打开用量同步锁：{e}"))?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("用量同步锁必须是普通文件".into());
+        }
+        loop {
+            if cancel() {
+                return Err("采集已停止".into());
+            }
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Err(format!("无法锁定用量同步：{error}"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+    }
+}
+impl Drop for SyncLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// 查询连接不持有采集器的 Mutex，不迁移/刷新索引，也不创建磁盘上的空账本。
+pub(super) fn reader(path: &Path) -> Result<Connection, String> {
+    let db = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ledger::open(None)?.db),
+        Err(e) => return Err(format!("无法读取用量账本：{e}")),
+        Ok(meta) if !meta.is_file() => return Err("用量账本必须是普通文件".into()),
+        Ok(_) => {
+            // macOS 的 /var 本身是符号链接；只规范化父目录，仍拒绝账本文件被替换成链接。
+            let canonical = path
+                .parent()
+                .ok_or("用量账本路径无效")?
+                .canonicalize()
+                .map_err(|e| format!("无法定位用量账本：{e}"))?
+                .join(path.file_name().ok_or("用量账本路径无效")?);
+            Connection::open_with_flags(
+                canonical,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(|e| format!("无法打开用量账本：{e}"))?
+        }
+    };
+    db.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
+    if version > 4 {
+        return Err("用量账本来自较新版本，请先升级应用".into());
+    }
+    if version < 4 {
+        return Ok(Ledger::open(None)?.db);
+    }
+    Ok(db)
+}
 
 pub(super) struct Ledger {
     pub(super) db: Connection,
@@ -54,7 +153,9 @@ impl Ledger {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
         // 账本是不可重建的用户数据，提交必须落盘；不能沿用可重建缓存的 MEMORY/OFF。
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        // WAL 允许大批导入期间查询上一份完整快照；同步仍为 FULL，旁文件继承 0600。
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            PRAGMA journal_size_limit=16777216;
             CREATE TABLE IF NOT EXISTS usage_ledger_sources(agent TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(agent,path));
             CREATE TABLE IF NOT EXISTS usage_ledger_updates(agent TEXT PRIMARY KEY,updated INTEGER NOT NULL);")
             .map_err(|_| "用量账本损坏或不可写，已保留原文件")?;

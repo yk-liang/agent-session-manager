@@ -15,7 +15,7 @@ fn main() {
     let path = source.data_dir().unwrap().join("opencode.db");
     let conn = agents::opencode::open_db(&path).unwrap();
     let requested = std::env::var("ASM_OPENCODE_SESSION").ok();
-    let (id,bytes):(String,u64)=conn.query_row("SELECT s.id,sum(length(p.data)) FROM session s JOIN message m ON m.session_id=s.id JOIN part p ON p.message_id=m.id
+    let (id,bytes):(String,i64)=conn.query_row("SELECT s.id,sum(length(p.data)) FROM session s JOIN message m ON m.session_id=s.id JOIN part p ON p.message_id=m.id
         WHERE s.parent_id IS NULL AND s.time_archived IS NULL AND (?1 IS NULL OR s.id=?1) GROUP BY s.id ORDER BY 2 DESC LIMIT 1",[requested],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     let start = Instant::now();
     let detail = source.read_session_view("", &id).unwrap();

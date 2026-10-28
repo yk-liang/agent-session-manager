@@ -1,5 +1,7 @@
 //! 本地 token 统计。解析/去重规则参考 ccusage，运行时不依赖其程序或定价服务。
 mod cache;
+#[cfg(test)]
+mod cold_start_tests;
 pub mod collector;
 #[cfg(test)]
 mod event_tests;
@@ -168,6 +170,7 @@ pub fn preserve_before_delete(
     delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let roots = roots(agent)?;
+    let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
     let mut store = store(agent).lock().unwrap_or_else(|e| e.into_inner());
     preserve_before_delete_at(agent, &roots, &mut store, delete)
 }

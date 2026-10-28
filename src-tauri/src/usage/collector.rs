@@ -1,6 +1,5 @@
 //! 无窗口的用量采集进程：文件事件驱动，变化来源立即入账，报表按需汇总。
 use super::{
-    ingest,
     service::{self, ProcessLock, RuntimeStatus, Settings},
     Store,
 };
@@ -313,7 +312,11 @@ fn run(dir: &Path, isolated: bool) -> Result<(), String> {
             .join("com.liangyukun.agent-session-manager/token-usage-v1.sqlite3")
     };
     // 单个 Store 即可处理所有来源；不在内存中常驻完整账本或所有历史报表。
-    let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
+    let cancelled = || STOPPED.load(Ordering::Relaxed);
+    let mut store = {
+        let _writer = super::ledger::SyncLock::acquire(&ledger, &cancelled)?;
+        Store::open_with_ledger(Some(&cache), Some(&ledger))
+    };
     let inbox = Arc::new(Mutex::new(Inbox::default()));
     let (sender, receiver) = mpsc::sync_channel(1);
     let mut watcher = watch(dir, &settings, inbox.clone(), sender.clone());
@@ -351,9 +354,11 @@ fn run(dir: &Path, isolated: bool) -> Result<(), String> {
                 _ => None,
             };
             let started = Instant::now();
-            match ingest::collect(&id, roots, &mut store, paths, &|| {
-                STOPPED.load(Ordering::Relaxed)
-            }) {
+            let collected = (|| {
+                let _writer = super::ledger::SyncLock::acquire(&ledger, &cancelled)?;
+                super::summary::sync_paths(&id, roots, &mut store, paths, &cancelled)
+            })();
+            match collected {
                 Ok(result) => {
                     status
                         .collected_at

@@ -123,21 +123,21 @@ pub(super) fn refresh(
             |r| r.get(0),
         )
         .optional()
-        .map_err(|_| "无法读取请求事件版本")?
+        .map_err(|error| format!("无法读取请求事件版本：{error}"))?
         .unwrap_or(false);
     if !dirty {
         return Ok(());
     }
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|_| "请求事件正在更新，请稍后重试")?;
+        .map_err(|error| format!("无法开始请求事件更新：{error}"))?;
     let (revision, indexed): (i64, i64) = tx
         .query_row(
             "SELECT revision,indexed FROM usage_request_index WHERE agent=?1",
             [agent],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| "无法读取请求事件版本")?;
+        .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
     if indexed == 0 {
         // 仅升级旧账本时全量建立身份索引。事务失败/取消时旧事件仍然完整可用。
         let mut statement = tx
@@ -317,10 +317,11 @@ fn update_sources(
 }
 
 pub fn read(query: EventQuery, cancel: &dyn Fn() -> bool) -> Result<EventPage, String> {
-    let mut store = super::store("claude")
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    page(&mut store.ledger()?.db, query, cancel)
+    if cancel() {
+        return Err("请求事件读取已取消".into());
+    }
+    let mut db = super::ledger::reader(&super::ledger::path()?)?;
+    page(&mut db, query, cancel)
 }
 
 pub(super) fn page(
@@ -345,20 +346,15 @@ pub(super) fn page(
     if query.from.zip(query.to).is_some_and(|(a, b)| a >= b) {
         return Err("请求事件时间范围无效".into());
     }
-    for agent in super::AGENTS {
-        if cancel() {
-            return Err("请求事件读取已取消".into());
-        }
-        if query.agent.as_deref().is_none_or(|a| a == agent) {
-            refresh(db, agent, cancel)?;
-        }
+    if cancel() {
+        return Err("请求事件读取已取消".into());
     }
     // count、页数据和版本来自同一个读快照；新写入只在下一次查询呈现。
     let tx = db.transaction().map_err(|_| "无法读取请求事件快照")?;
     let revision: String = {
         let mut stmt = tx
             .prepare("SELECT agent,indexed FROM usage_request_index ORDER BY agent")
-            .map_err(|_| "无法读取请求事件版本")?;
+            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(format!(
@@ -367,9 +363,9 @@ pub(super) fn page(
                     r.get::<_, i64>(1)?
                 ))
             })
-            .map_err(|_| "无法读取请求事件版本")?;
+            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "无法读取请求事件版本")?
+            .map_err(|error| format!("无法读取请求事件版本：{error}"))?
             .join("|")
     };
     let reset = query
@@ -410,13 +406,14 @@ pub(super) fn page(
         values.push(time.into());
     }
     let filter = predicates.join(" AND ");
-    let total: u64 = tx
+    let total: i64 = tx
         .query_row(
             &format!("SELECT count(*) FROM usage_request_events WHERE {filter}"),
             params_from_iter(&values),
             |r| r.get(0),
         )
         .map_err(|_| "无法读取请求事件数量")?;
+    let total = u64::try_from(total).map_err(|_| "请求事件数量无效")?;
     if let Some(c) = query.cursor.filter(|_| !reset) {
         predicates.push("(time<? OR (time=? AND id<?))".into());
         values.extend([c.time.into(), c.time.into(), c.id.into()]);

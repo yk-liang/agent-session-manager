@@ -13,12 +13,24 @@ pub(super) struct Ingested {
     pub bytes_read: u64,
 }
 
+#[cfg(test)]
 pub(super) fn collect(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
     paths: Option<&BTreeSet<PathBuf>>,
     cancel: &dyn Fn() -> bool,
+) -> Result<Ingested, String> {
+    collect_with_progress(agent, roots, store, paths, cancel, &|_, _| {})
+}
+
+pub(super) fn collect_with_progress(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    paths: Option<&BTreeSet<PathBuf>>,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize, usize),
 ) -> Result<Ingested, String> {
     let key = scope(agent, roots);
     if store.ledger()?.updated(agent).is_none() {
@@ -46,10 +58,11 @@ pub(super) fn collect(
         }
     };
     let mut result = Ingested::default();
-    for path in paths {
+    for (done, path) in paths.iter().enumerate() {
         if cancel() {
             return Err("采集已停止".into());
         }
+        progress(done, paths.len());
         if !roots.iter().any(|root| path.starts_with(root)) {
             continue;
         }
@@ -104,5 +117,6 @@ pub(super) fn collect(
         result.files += 1;
         result.bytes_read += bytes;
     }
+    progress(paths.len(), paths.len());
     Ok(result)
 }

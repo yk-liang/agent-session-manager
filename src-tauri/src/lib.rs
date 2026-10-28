@@ -106,14 +106,30 @@ static SUMMARY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[tauri::command]
 async fn sync_request_events(
+    app: tauri::AppHandle,
     agent: String,
     generation: u64,
 ) -> Result<usage::summary::Synced, String> {
     USAGE_GENERATION.fetch_max(generation, Ordering::SeqCst);
     run_backend(move || {
-        usage::summary::sync(&agent, &|| {
-            USAGE_GENERATION.load(Ordering::SeqCst) != generation
-        })
+        let last = std::cell::RefCell::new((std::time::Instant::now(), ""));
+        usage::summary::sync_with_progress(
+            &agent,
+            &|| USAGE_GENERATION.load(Ordering::SeqCst) != generation,
+            &|progress| {
+                let mut last = last.borrow_mut();
+                if progress.phase != last.1
+                    || last.0.elapsed().as_millis() >= 200
+                    || progress.total_files == Some(progress.checked_files)
+                {
+                    *last = (std::time::Instant::now(), progress.phase);
+                    let _ = app.emit(
+                        "usage-sync-progress",
+                        serde_json::json!({ "generation": generation, "progress": progress }),
+                    );
+                }
+            },
+        )
     })
     .await
 }
@@ -398,13 +414,19 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             install_guarded_quit(app.handle())?;
             let service_app = app.handle().clone();
+            let generation = USAGE_GENERATION.load(Ordering::SeqCst);
             tauri::async_runtime::spawn_blocking(move || {
                 if service_app.state::<usage::service::Service>().ensure().is_err() {
                     eprintln!("Background token collector registration failed; inspect usage service status");
                 }
                 // 每次启动只同步一次，不依赖可选的登录服务。
+                let cancelled = || USAGE_GENERATION.load(Ordering::SeqCst) != generation;
                 for agent in usage::AGENTS {
-                    if usage::summary::sync(agent, &|| false).is_err() {
+                    // 用量页接管同步后停止启动任务，避免冷启动重复读取大历史。
+                    if cancelled() {
+                        break;
+                    }
+                    if usage::summary::sync(agent, &cancelled).is_err() && !cancelled() {
                         eprintln!("Request sync failed for {agent}; open the usage page to retry");
                     }
                 }

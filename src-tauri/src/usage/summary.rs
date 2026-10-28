@@ -3,7 +3,10 @@ use super::{events, ingest, types::*, Store};
 use chrono::{Local, TimeZone};
 use rusqlite::{params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Health {
@@ -46,12 +49,37 @@ pub struct Synced {
     pub bytes_read: u64,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub agent: String,
+    pub phase: &'static str,
+    /// 已检查的日志文件数；发现目录/等待其他同步时尚不知道总数。
+    pub checked_files: usize,
+    pub total_files: Option<usize>,
+}
+
 pub fn sync(agent: &str, cancel: &dyn Fn() -> bool) -> Result<Synced, String> {
+    sync_with_progress(agent, cancel, &|_| {})
+}
+
+pub fn sync_with_progress(
+    agent: &str,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(SyncProgress),
+) -> Result<Synced, String> {
     let roots = super::roots(agent)?;
+    progress(SyncProgress {
+        agent: agent.into(),
+        phase: "waiting",
+        checked_files: 0,
+        total_files: None,
+    });
+    let _writer = super::ledger::SyncLock::acquire(&super::ledger::path()?, cancel)?;
     let mut store = super::store(agent)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    sync_at(agent, &roots, &mut store, cancel)
+    sync_with_store(agent, &roots, &mut store, None, cancel, progress)
 }
 
 pub(crate) fn sync_at(
@@ -60,12 +88,47 @@ pub(crate) fn sync_at(
     store: &mut Store,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Synced, String> {
+    sync_paths(agent, roots, store, None, cancel)
+}
+
+pub(super) fn sync_paths(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    paths: Option<&BTreeSet<PathBuf>>,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Synced, String> {
+    sync_with_store(agent, roots, store, paths, cancel, &|_| {})
+}
+
+fn sync_with_store(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    paths: Option<&BTreeSet<PathBuf>>,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(SyncProgress),
+) -> Result<Synced, String> {
+    let report = |phase, checked_files, total_files| {
+        progress(SyncProgress {
+            agent: agent.into(),
+            phase,
+            checked_files,
+            total_files,
+        })
+    };
+    report("discovering", 0, None);
     // 即使稍后的文件不可读，也先把本轮已经入账的部分转成持久请求事件。
-    let collected = ingest::collect(agent, roots, store, None, cancel);
+    let collected =
+        ingest::collect_with_progress(agent, roots, store, paths, cancel, &|done, total| {
+            report("reading", done, Some(total))
+        });
     if !cancel() {
+        report("indexing", 0, None);
         events::refresh(&mut store.ledger()?.db, agent, cancel)?;
     }
     let result = collected?;
+    report("complete", result.checked_files, Some(result.checked_files));
     Ok(Synced {
         updated_at: chrono::Utc::now().timestamp_millis(),
         checked_files: result.checked_files,
@@ -75,11 +138,12 @@ pub(crate) fn sync_at(
 }
 
 pub fn read(query: SummaryQuery, cancel: &dyn Fn() -> bool) -> Result<Summary, String> {
-    let mut store = super::store("claude")
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut result = read_from(&mut store, query, cancel)?;
-    drop(store);
+    if cancel() {
+        return Err("用量查询已取消".into());
+    }
+    let mut db = super::ledger::reader(&super::ledger::path()?)?;
+    let mut result = read_at(&mut db, query, cancel)?;
+    drop(db);
     // 名称补全只看此次查询涉及的模型，不再次读取计量日志。
     for agent in ["qoder", "opencode"] {
         let ids = result
@@ -106,6 +170,7 @@ pub fn read(query: SummaryQuery, cancel: &dyn Fn() -> bool) -> Result<Summary, S
     Ok(result)
 }
 
+#[allow(dead_code)] // 供隔离目录下的 usage_perf 示例复测，GUI 使用独立只读连接。
 pub(crate) fn read_from(
     store: &mut Store,
     query: SummaryQuery,
@@ -131,13 +196,12 @@ pub(super) fn read_at(
                 && query.bounds.windows(2).all(|w| w[0] < w[1]) => {}
         _ => return Err("用量时间分桶无效".into()),
     }
-    for agent in super::AGENTS {
-        if cancel() {
-            return Err("用量查询已取消".into());
-        }
-        events::refresh(db, agent, cancel)?;
+    if cancel() {
+        return Err("用量查询已取消".into());
     }
-    let tx = db.transaction().map_err(|_| "无法读取用量快照")?;
+    let tx = db
+        .transaction()
+        .map_err(|error| format!("无法读取用量快照：{error}"))?;
     let mut health = BTreeMap::<String, Health>::new();
     {
         let mut stmt = tx

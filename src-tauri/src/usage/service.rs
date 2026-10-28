@@ -169,7 +169,15 @@ impl Service {
         Ok(Status {
             desired,
             running: active,
-            authorization: platform::status().into(),
+            authorization: {
+                let status = platform::status();
+                if !matches!(status, "unsupported" | "notBundled") && !platform::can_register() {
+                    "signingRequired"
+                } else {
+                    status
+                }
+            }
+            .into(),
             pid: runtime.as_ref().filter(|_| active).map(|r| r.pid),
             version: runtime.filter(|_| active).map(|r| r.version),
             error,
@@ -188,6 +196,10 @@ impl Service {
             if matches!(authorization, "unsupported" | "notBundled") {
                 return Ok(());
             }
+            let can_register = platform::can_register();
+            if enabled == Some(true) && !can_register {
+                return Err("当前安装包不支持退出后的后台采集；打开应用时仍会同步用量".into());
+            }
             let dir = directory()?;
             let old = if dir.join("settings.json").exists() {
                 Some(Settings::load(&dir)?)
@@ -195,7 +207,10 @@ impl Service {
                 None
             };
             let mut settings = Settings {
-                enabled: enabled.unwrap_or(old.as_ref().map(|s| s.enabled).unwrap_or(false)),
+                // 本地 ad hoc 签名的服务可能被 launchd 以签名约束终止，并被 KeepAlive 反复拉起。
+                // 升级时撤销这类旧注册；只有带团队签名的构建才提供登录后台服务。
+                enabled: can_register
+                    && enabled.unwrap_or(old.as_ref().map(|s| s.enabled).unwrap_or(false)),
                 roots: BTreeMap::new(),
             };
             for id in super::AGENTS {
@@ -278,6 +293,22 @@ mod platform {
             })
             .is_some_and(|p| p.is_file())
     }
+    pub fn can_register() -> bool {
+        static SIGNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SIGNED.get_or_init(|| {
+            let Ok(executable) = std::env::current_exe() else {
+                return false;
+            };
+            let Ok(result) = std::process::Command::new("/usr/bin/codesign")
+                .args(["--display", "--verbose=4"])
+                .arg(executable)
+                .output()
+            else {
+                return false;
+            };
+            result.status.success() && super::team_signed(&String::from_utf8_lossy(&result.stderr))
+        })
+    }
     pub fn status() -> &'static str {
         if !bundled() {
             return "notBundled";
@@ -327,6 +358,9 @@ mod platform {
 }
 #[cfg(not(target_os = "macos"))]
 mod platform {
+    pub fn can_register() -> bool {
+        false
+    }
     pub fn status() -> &'static str {
         "unsupported"
     }
@@ -338,9 +372,30 @@ mod platform {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn team_signed(metadata: &str) -> bool {
+    metadata.lines().any(|line| {
+        line.strip_prefix("TeamIdentifier=")
+            .is_some_and(|team| !team.trim().is_empty() && team != "not set")
+    }) && metadata.lines().any(|line| line.starts_with("Authority="))
+        && !metadata.lines().any(|line| line == "Signature=adhoc")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn background_registration_requires_team_signing() {
+        assert!(!team_signed("Signature=adhoc\nTeamIdentifier=not set\n"));
+        assert!(!team_signed("TeamIdentifier=ABCDE12345\n"));
+        assert!(!team_signed(""));
+        assert!(team_signed(
+            "Authority=Developer ID Application: Example\nTeamIdentifier=ABCDE12345\n"
+        ));
+        assert!(team_signed(
+            "Authority=Apple Development: Example\nTeamIdentifier=ABCDE12345\n"
+        ));
+    }
     #[test]
     fn process_lock_prevents_two_collectors_and_stale_status_is_not_running() {
         let dir = tempfile::tempdir().unwrap();

@@ -22,6 +22,10 @@ fn scan(agent: &str, path: &Path, store: &mut Store) {
     ingest::collect(agent, &[path.into()], store, None, &|| false).unwrap();
 }
 fn page(store: &mut Store, query: EventQuery) -> EventPage {
+    // 测试先完成同步索引，再验证只读分页；生产查询不会替采集器写账本。
+    for agent in AGENTS {
+        events::refresh(&mut store.ledger().unwrap().db, agent, &|| false).unwrap();
+    }
     events::page(&mut store.ledger().unwrap().db, query, &|| false).unwrap()
 }
 
@@ -505,15 +509,13 @@ fn request_events_cancelled_index_update_rolls_back() {
     }
     scan("claude", dir.path(), &mut store);
     let calls = std::cell::Cell::new(0);
-    assert!(events::page(
-        &mut store.ledger().unwrap().db,
-        EventQuery::default(),
-        &|| {
+    assert!(
+        events::refresh(&mut store.ledger().unwrap().db, "claude", &|| {
             calls.set(calls.get() + 1);
             calls.get() > 20
-        }
-    )
-    .is_err());
+        })
+        .is_err()
+    );
     let count: i64 = store
         .ledger()
         .unwrap()

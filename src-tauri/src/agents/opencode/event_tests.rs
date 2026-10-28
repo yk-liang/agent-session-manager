@@ -433,7 +433,7 @@ fn real_stored_parts_are_complete_ordered_and_fast_if_present() {
         WHERE m.session_id=?1 AND CASE WHEN json_valid(p.data) AND json_valid(m.data) THEN json_extract(m.data,'$.role')='assistant'
         AND COALESCE(json_extract(p.data,'$.synthetic'),0)=0
         AND (json_extract(p.data,'$.type')='tool' OR (json_extract(p.data,'$.type')='reasoning' AND LENGTH(TRIM(COALESCE(json_extract(p.data,'$.text'),'')))>0)) ELSE 0 END GROUP BY 1").unwrap()
-        .query_map([&session],|r|Ok((r.get::<_,String>(0)?,r.get::<_,usize>(1)?))).unwrap().map(Result::unwrap).collect();
+        .query_map([&session],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)? as usize))).unwrap().map(Result::unwrap).collect();
     for (kind, count) in counts {
         let unified = if kind == "tool" {
             "tool_use"
