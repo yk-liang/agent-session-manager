@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agent Session Manager",
+  "version": "0.1.33",
+  "identifier": "com.liangyukun.agent-session-manager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Session Manager",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws:; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-",
+      "files": {
+        "Library/LaunchAgents/com.liangyukun.agent-session-manager.usage-collector.plist": "macos/com.liangyukun.agent-session-manager.usage-collector.plist"
+      }
+    },
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../public/licenses/lucide-react.txt": "licenses/lucide-react.txt",
+      "../public/licenses/tanstack-virtual.txt": "licenses/tanstack-virtual.txt",
+      "../public/licenses/markdown.txt": "licenses/markdown.txt",
+      "../public/licenses/ccusage.txt": "licenses/ccusage.txt",
+      "../public/licenses/agent-events.txt": "licenses/agent-events.txt",
+      "../public/licenses/zstd.txt": "licenses/zstd.txt"
+    }
+  }
+}

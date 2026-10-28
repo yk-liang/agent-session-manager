@@ -1,0 +1,13 @@
+[source.crates-io]
+replace-with = "rsparse-sparse"
+
+[source.rsparse-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+retry = 10
+
+[http]
+multiplexing = false
+timeout = 60

@@ -1,0 +1,41 @@
+{
+  "name": "agent-session-manager",
+  "private": true,
+  "version": "0.1.33",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
+    "test:rust": "cd src-tauri && cargo test --offline --locked -- --test-threads=1",
+    "test:e2e": "node tests/run.mjs e2e",
+    "test:integration": "node tests/run.mjs integration",
+    "test:manual": "node tests/run.mjs manual"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.14.21",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-shell": "^2.3.6",
+    "lucide-react": "^1.59.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "playwright": "^1.62.1",
+    "typescript": "~5.8.3",
+    "vite": "^7.3.7"
+  },
+  "license": "MIT"
+}
