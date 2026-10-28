@@ -16,7 +16,7 @@ try{
     window.__QODER_GROUP__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
-      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder CLI":"Codex CLI",installed:true,supportsFork:false,deletePolicy:"trash"}));
+      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder CLI":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
       if(command==="catalog"){
         const sessions=args.agent==="qoder"?state.rows:[meta("shared","codex-src","Codex 会话","/tmp/codex")];
         return {sessions,projects:sessions.map(s=>({dirName:s.projectDir,displayPath:s.cwd,sessionCount:1,lastActivity:null})),warnings:[],...(args.agent==="qoder"?{sessionGroupHints:state.rows.filter(s=>s.projectDir!=="manual").map(s=>({projectDir:s.projectDir,sessionId:s.sessionId,root:s.projectDir==="auto"?null:"/Users/demo/work/real-project"}))}:{projectlessSessionIds:["shared"]})};
@@ -66,7 +66,7 @@ try{
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===2);
   assert.equal(await page.locator(".session-card",{hasText:"独立工作区"}).count(),1);
   pass("batch operations preserve same-ID sessions belonging to other source directories");
-  await page.locator(".sidebar").getByRole("button",{name:"Codex CLI",exact:true}).click();
+  await page.locator(".sidebar").getByRole("button",{name:"Codex",exact:true}).click();
   await page.locator(".session-card",{hasText:"Codex 会话"}).waitFor();
   assert.equal(await root.count(),0);assert.equal(await unassigned.count(),1);
   assert.deepEqual(errors,[]);pass("agent switching clears Qoder root hints while retaining Codex classification");

@@ -17,11 +17,16 @@ try {
   assert.match(run.stdout, /1 passed/);
   const fixture = JSON.parse(readFileSync(exported, 'utf8'));
   assert.equal(fixture.total, 110);
+  const longProject = `/Users/demo/Workspace/${'nested/'.repeat(24)}example-project`;
+  const successes = fixture.events.filter(e => e.agent === 'claude' && e.status === 'success');
+  successes[0].request.project = longProject;
+  successes[1].request.project = '/Users/demo/.codex';
+  fixture.events.find(e => e.status === 'failed').request.project = null;
   browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1080 } });
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
-    const names = { claude: 'Claude Code', codex: 'Codex CLI', opencode: 'OpenCode', qoder: 'Qoder CLI', pi: 'Pi' };
+    const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', pi: 'Pi' };
     const state = window.__EVENTS__ = { fixture, calls: [], fail: false, delay: false, release: null, revision: '1' };
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
@@ -52,7 +57,22 @@ try {
   assert.equal(await table.locator('tbody > tr').count(), 50);
   const codex = table.locator('tbody > tr').filter({ hasText: 'gpt-codex' });
   assert.ok((await codex.textContent()).includes('≈ 50.0 t/s'));
-  assert.ok((await codex.textContent()).includes('本轮首 Token 400 ms'));
+  assert.ok((await codex.textContent()).includes('本轮首字 400 ms'));
+  assert.equal(await codex.locator('.request-source > span').textContent(), 'Codex');
+  assert.equal(await codex.locator('.request-source > small').textContent(), 'Codex Desktop');
+  assert.equal(await codex.locator('.request-project > span').textContent(), 'codex');
+  assert.equal(await codex.locator('.request-project > small').textContent(), '/fixture/codex');
+  const beforeExpand = await table.locator('th').nth(5).boundingBox();
+  await codex.locator('.request-expand').click();
+  assert.equal(await table.locator('.request-detail dl > div').filter({ has: page.getByText('原始来源类型', { exact: true }) }).locator('dd').textContent(), 'vscode');
+  const afterExpand = await table.locator('th').nth(5).boundingBox();
+  assert.equal(afterExpand.width, beforeExpand.width, 'expanded metadata must not resize status columns');
+  await codex.locator('.request-expand').click();
+  const project = table.locator('.request-project > small').filter({ hasText: 'example-project' });
+  assert.equal(await project.getAttribute('title'), longProject);
+  assert.ok((await project.textContent()).startsWith('~/Workspace/'));
+  assert.equal(await table.locator('.request-project > span').filter({ hasText: /^\.codex$/ }).count(), 1);
+  console.log(`PASS: actual client is preferred, raw source remains in details, project names and full paths remain available (${engine})`);
   await table.getByRole('button', { name: '加载更多', exact: true }).click();
   await page.getByText('已加载 100 / 110 条', { exact: true }).waitFor();
   await table.getByRole('button', { name: '加载更多', exact: true }).click();
@@ -67,6 +87,7 @@ try {
   const failed = table.locator('tbody > tr').first();
   assert.equal(await failed.locator('td').nth(7).textContent(), '—');
   assert.equal(await failed.locator('td').nth(10).textContent(), '—');
+  assert.equal(await failed.locator('.request-project').textContent(), '未记录');
   await failed.locator('.request-expand').click();
   assert.ok((await table.locator('.request-detail').textContent()).includes('503'));
   assert.ok((await table.locator('.request-detail').textContent()).includes('未记录'));
@@ -100,18 +121,27 @@ try {
   await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
   console.log(`PASS: changing data resets stale cursors, changing filters rejects late pages, read errors retry (${engine})`);
 
-  for (const width of [960, 1280, 1600]) {
+  for (const width of [960, 1280, 1600, 2200]) {
     await page.setViewportSize({ width, height: 1080 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     assert.ok(await table.locator('.request-table-wrap').evaluate(el => el.scrollWidth >= el.clientWidth && el.clientWidth > 450));
+    const layout = await table.locator('tbody > tr').first().evaluate(row => {
+      const result = row.querySelector('.request-result'), timing = row.querySelector('.request-timing');
+      return { statusWidth: result.parentElement.getBoundingClientRect().width,
+        gap: timing.querySelector('span').getBoundingClientRect().left - result.getBoundingClientRect().right };
+    });
+    assert.ok(layout.statusWidth <= 80 && layout.gap >= 0 && layout.gap <= 48, `unexpected result/TPS gap at ${width}: ${JSON.stringify(layout)}`);
+    assert.ok(await project.evaluate(el => el.scrollWidth > el.clientWidth), 'long paths should truncate inside their column');
   }
   await page.setViewportSize({ width: 1600, height: 1100 });
   await table.scrollIntoViewIfNeeded();
   await table.locator('.request-table-wrap').evaluate(el => { el.scrollLeft = 0; el.scrollTop = 0; });
   await page.mouse.move(0, 0);
   await table.screenshot({ path: path.join(artifactDir, 'request-events.png') });
+  await table.locator('.request-table-wrap').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  await table.screenshot({ path: path.join(artifactDir, 'request-events-projects.png') });
   assert.deepEqual(errors, []);
   await page.getByRole('button', { name: '会话', exact: true }).click();
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(c => c.cmd === 'cancel_request_events')));
-  console.log(`PASS: bounded 960/1280/1600 layouts, screenshot, cancellation, no runtime errors (${engine})`);
+  console.log(`PASS: bounded 960/1280/1600/2200 layouts, screenshot, cancellation, no runtime errors (${engine})`);
 } finally { await browser?.close(); rmSync(dir, { recursive: true, force: true }); }

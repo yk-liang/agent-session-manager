@@ -1,4 +1,4 @@
-//! Codex CLI 数据源：~/.codex/sessions/年/月/日/rollout-<时间戳>-<uuid>.jsonl
+//! Codex 本地数据源（CLI、IDE、桌面）：~/.codex/sessions/年/月/日/rollout-<时间戳>-<uuid>.jsonl
 //!
 //! 与 Claude 系完全不同：OpenAI Responses 格式（session_meta + response_item）。
 //! 转换为统一对话事件，运行指令与状态通知独立标记为 context。
@@ -892,7 +892,7 @@ impl AgentSource for CodexSource {
         "codex"
     }
     fn display_name(&self) -> &'static str {
-        "Codex CLI"
+        "Codex"
     }
     fn is_installed(&self) -> bool {
         sessions_root().exists()

@@ -47,7 +47,7 @@ try {
     }));
     window.__TAURI_INTERNALS__ = { transformCallback: (cb) => cb, invoke: async (command, args) => {
       if (command === "list_agents") return [
-        ["qoder", "Qoder CLI"], ["claude", "Claude Code"], ["codex", "Codex CLI"], ["opencode", "OpenCode"], ["pi", "Pi"],
+        ["qoder", "Qoder CLI"], ["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"], ["pi", "Pi"],
       ].map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, deletePolicy: "trash" }));
       if (command === "catalog") return { sessions, projects: sessions.map((s) => ({ dirName: s.projectDir, displayPath: s.cwd, sessionCount: 1, lastActivity: null })), warnings: [] };
       if (command === "read_session") return { meta: sessions.find((s) => s.sessionId === args.sessionId), events: [

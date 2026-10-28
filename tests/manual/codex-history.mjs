@@ -29,7 +29,7 @@ try {
   const query = lastText.trim().slice(0, 18);
   await page.addInitScript(({ meta, lastIndex, query, eventId }) => {
     window.__TAURI_INTERNALS__ = { transformCallback: (cb) => cb, invoke: async (command) => {
-      if (command === "list_agents") return [{ id: "codex", displayName: "Codex CLI", installed: true, supportsFork: false, deletePolicy: "trash" }];
+      if (command === "list_agents") return [{ id: "codex", displayName: "Codex", installed: true, supportsFork: false, deletePolicy: "trash" }];
       if (command === "catalog") return { sessions: [meta], projects: [{ dirName: meta.projectDir, displayPath: meta.cwd, sessionCount: 1, lastActivity: meta.lastTs }], warnings: [] };
       if (command === "read_session") return window.__READ_HISTORY__();
       if (command === "search_conversations") return { hits: [{ sessionId: meta.sessionId, projectDir: meta.projectDir, role: "assistant", eventIndex: lastIndex, eventId, snippet: query }], skipped: 0, cancelled: false };

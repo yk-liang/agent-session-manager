@@ -136,7 +136,7 @@ const mock = {
   list_agents: [
     { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
     { id: "claude", displayName: "Claude Code", installed: true, supportsFork: false, dataDir: "/Users/demo/.claude", deletePolicy: "trash" },
-    { id: "codex", displayName: "Codex CLI", installed: true, supportsFork: false, dataDir: "/Users/demo/.codex", deletePolicy: "trash" },
+    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, dataDir: "/Users/demo/.codex", deletePolicy: "trash" },
     { id: "opencode", displayName: "OpenCode", installed: true, supportsFork: false, dataDir: "/Users/demo/.config/opencode", deletePolicy: "permanent" },
     { id: "pi", displayName: "Pi", installed: true, supportsFork: false, dataDir: "/Users/demo/.pi/agent", deletePolicy: "trash" },
   ],
@@ -323,7 +323,7 @@ await page.click(".session-card");
 const detailWhileLoading = await page.locator(".detail-body").count();
 console.log("STEP1a old detail cleared on re-open:", detailWhileLoading === 0 ? "OK" : "FAILED");
 if (detailWhileLoading !== 0) process.exit(1);
-await page.locator(".agent-item", { hasText: "Codex CLI" }).click();
+await page.locator(".agent-item", { hasText: "Codex" }).click();
 if (process.env.CATALOG_FAIL === "1") {
   // catalog 失败时不得残留旧 agent 的列表
   await page.waitForTimeout(500);
@@ -493,13 +493,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), projectScroll);
 
-  const codexPosition = await page.locator(".agent-item", { hasText: "Codex CLI" }).boundingBox();
+  const codexPosition = await page.locator(".agent-item", { hasText: "Codex" }).boundingBox();
   assert.ok(codexPosition.y >= 48 && codexPosition.y + codexPosition.height <= viewport.height);
   await page.mouse.click(codexPosition.x + codexPosition.width / 2, codexPosition.y + codexPosition.height / 2);
   await page.locator('.session-card:has-text("Codex 会话")').waitFor();
   assert.equal(await page.locator(".sidebar-project-list .project-item").count(), 1);
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), 0);
-  assert.ok((await page.locator(".agent-item.active").textContent()).includes("Codex CLI"));
+  assert.ok((await page.locator(".agent-item.active").textContent()).includes("Codex"));
   console.log(`STEP12 sidebar scroll, fixed actions and agent switch at ${viewport.width}x${viewport.height}: OK`);
 }
 

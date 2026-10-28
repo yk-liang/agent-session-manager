@@ -58,18 +58,18 @@
 .request-filters { flex-wrap: wrap; gap: 8px; }.request-filters select { max-width: 185px; font-size: 12px; }
 .request-clear { padding: 6px; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
 .request-table-wrap { width: 100%; max-height: 620px; overflow: auto; scrollbar-gutter: stable; outline-offset: 3px; border-bottom: 1px solid var(--border); }
-.request-table { width: 100%; min-width: 1420px; border-collapse: separate; border-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.request-table { width: 100%; min-width: 1460px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
 .request-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-panel); color: var(--text-dim); text-align: left; font-size: 11px; font-weight: 500; padding: 12px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .request-table td { padding: 13px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
 .request-table tbody tr:last-child td { border-bottom: 0; }.request-table tbody tr:hover,.request-selected { background: var(--accent-soft); }
 .request-table small { display: block; margin-top: 5px; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
-.request-table .numeric { text-align: right; }.request-table th:first-child,.request-table td:first-child { width: 28px; padding-left: 2px; padding-right: 2px; }
-.request-model > span,.request-model > small { display: block; max-width: 205px; overflow: hidden; text-overflow: ellipsis; }
-.request-source small { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.request-table .numeric { text-align: right; }.request-table th:first-child,.request-table tr:not(.request-detail-row) > td:first-child { padding-left: 2px; padding-right: 2px; }
+.request-table td:not([colspan]) { overflow: hidden; text-overflow: ellipsis; }
+.request-model > span,.request-model > small,.request-source > span,.request-source > small,.request-project > span,.request-project > small,.request-timing > small { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .request-result { display: inline-block; padding: 3px 7px; border-radius: 6px; font-size: 11px; border: 1px solid var(--border); color: var(--text-dim); }
 .request-result.success { color: #6ad5ab; background: #4dbe8e14; border-color: #4dbe8e33; }.request-result.failed { color: var(--danger); background: #ff626212; border-color: #ff626233; }
 .request-expand { display: flex; align-items: center; justify-content: center; padding: 6px; background: transparent; border: 0; color: var(--text-dim); }.request-expand .ui-icon { width: 14px; height: 14px; transform: rotate(-90deg); }.request-expand[aria-expanded="true"] .ui-icon { transform: none; }
-.request-session { display: inline-flex; align-items: center; gap: 6px; max-width: 200px; padding: 5px 0; border: 0; background: transparent; color: var(--text-dim); }.request-session:hover { color: var(--text); }.request-session code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }.request-session .ui-icon { flex-shrink: 0; }
+.request-session { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 0; border: 0; background: transparent; color: var(--text-dim); }.request-session:hover { color: var(--text); }.request-session code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }.request-session .ui-icon { flex-shrink: 0; }
 .request-detail-row td { white-space: normal; background: var(--bg); }.request-detail { max-width: 1250px; padding: 5px 20px 10px; }.request-detail dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px 24px; margin: 0; }.request-detail dl > div { display: grid; grid-template-columns: 85px minmax(0,1fr); gap: 8px; }.request-detail dt { color: var(--text-dim); }.request-detail dd { margin: 0; overflow-wrap: anywhere; user-select: text; }.request-detail p { color: var(--text-dim); margin-bottom: 0; }
 .request-footer { justify-content: flex-end; margin-top: 12px; color: var(--text-dim); font-size: 11px; min-height: 30px; }.request-footer > span { display: inline-flex; align-items: center; gap: 6px; }.request-footer > span:first-child { margin-right: auto; }.request-footer button,.request-error button { padding: 6px 12px; font-size: 12px; }.request-footer button:disabled { opacity: .5; cursor: wait; }
 .request-error { display: flex; gap: 12px; align-items: center; color: var(--danger); padding-top: 14px; font-size: 12px; }.request-empty { text-align: center; padding: 48px 16px; color: var(--text-dim); font-size: 12px; }

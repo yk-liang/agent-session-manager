@@ -4,6 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "../api";
 import type { AgentInfo, EventPage, EventQuery, RequestEvent } from "../types";
 import { dateKey, firstDate, formatTokens, type UsagePeriod } from "../usageView";
+import { shortPath } from "../utils";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 
@@ -81,12 +82,19 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
       </div>
     </div>
     <div className="request-table-wrap" tabIndex={0} role="region" aria-label="请求事件表，可横向滚动" aria-busy={loading}>
-      <table className="request-table"><thead><tr>
-        <th aria-label="详情" /><th>时间</th><th>模型</th><th>推理 / 速度</th><th>Agent / 来源</th><th>结果</th><th className="numeric">TPS / 耗时</th><th className="numeric">输入</th><th className="numeric">缓存读取</th><th className="numeric">输出</th><th className="numeric">成本</th><th>会话 ID</th>
+      <table className="request-table"><colgroup>
+        <col style={{ width: 32 }} /><col style={{ width: 104 }} /><col style={{ width: 140 }} />
+        <col style={{ width: 90 }} /><col style={{ width: 126 }} /><col style={{ width: 64 }} />
+        <col style={{ width: 116 }} /><col style={{ width: 96 }} /><col style={{ width: 96 }} />
+        <col style={{ width: 96 }} /><col style={{ width: 92 }} /><col /><col style={{ width: 176 }} />
+      </colgroup><thead><tr>
+        <th aria-label="详情" /><th>时间</th><th>模型</th><th>推理 / 速度</th><th>Agent / 来源</th><th>结果</th><th>TPS / 耗时</th><th className="numeric">输入</th><th className="numeric">缓存读取</th><th className="numeric">输出</th><th className="numeric">成本</th><th>项目 / 目录</th><th>会话 ID</th>
       </tr></thead><tbody>
         {(page?.events ?? []).map(event => {
           const r = event.request, date = event.time > 0 ? new Date(event.time) : null;
           const estimated = r.timing === "estimated";
+          const client = r.client?.trim() || r.kind?.trim() || "未记录";
+          const project = r.project?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || r.project;
           const input = event.inputRecorded ? `${event.inputIncomplete ? "≥ " : ""}${formatTokens(event.inputTokens)}` : "—";
           const output = event.outputRecorded ? `${event.outputIncomplete ? "≥ " : ""}${formatTokens(event.outputTokens)}` : "—";
           const cachePercent = event.cacheReadRecorded && event.inputRecorded && !event.inputIncomplete && event.inputTokens > 0 && event.cacheReadTokens <= event.inputTokens && event.agent !== "qoder" ? `${(event.cacheReadTokens / event.inputTokens * 100).toFixed(1)}%` : null;
@@ -95,15 +103,16 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
             <td>{date ? <><span>{date.toLocaleTimeString("zh-CN", { hour12: false })}</span><small>{dateKey(date).replace(/-/g, "/")}</small></> : "未记录"}</td>
             <td className="request-model"><span title={event.model}>{event.model === "unknown" ? "未知模型" : event.modelName}</span>{r.provider && <small title={r.provider}>{r.provider}</small>}</td>
             <td><span>{r.effort ?? "—"}</span><small>{r.tier ?? "—"}</small></td>
-            <td className="request-source"><span>{names.get(event.agent) ?? event.agent}</span><small title={r.kind ?? r.client ?? ""}>{r.kind ?? r.client ?? "—"}</small></td>
+            <td className="request-source"><span>{names.get(event.agent) ?? event.agent}</span><small title={r.client ? `客户端：${r.client}` : r.kind ? `原始来源类型：${r.kind}` : "未记录客户端"}>{client}</small></td>
             <td><span className={`request-result ${event.status}`}>{resultNames[event.status]}</span>{r.scope === "usage_delta" && <small>累计差额</small>}{r.scope === "error" && <small>错误事件</small>}</td>
-            <td className="numeric" title={r.timing ? timingNames[r.timing] : "日志未记录请求耗时"}><span>{event.outputTps == null ? "—" : `${estimated ? "≈ " : ""}${event.outputTps.toFixed(1)} t/s`}</span><small>{r.latencyMs == null ? "—" : `${estimated ? "≈ " : ""}${duration(r.latencyMs)}`}</small>{r.ttftMs != null && <small title="从本轮开始到首个 Token，可能包含请求前准备">{r.ttftScope === "turn" ? "本轮首 Token " : "首 Token "}{duration(r.ttftMs)}</small>}</td>
+            <td className="request-timing" title={r.timing ? timingNames[r.timing] : "日志未记录请求耗时"}><span>{event.outputTps == null ? "—" : `${estimated ? "≈ " : ""}${event.outputTps.toFixed(1)} t/s`}</span><small>{r.latencyMs == null ? "—" : `${estimated ? "≈ " : ""}${duration(r.latencyMs)}`}</small>{r.ttftMs != null && <small title={`${r.ttftScope === "turn" ? "本轮" : "请求"}首 Token：${duration(r.ttftMs)}`}>{r.ttftScope === "turn" ? "本轮首字 " : "首字 "}{duration(r.ttftMs)}</small>}</td>
             <td className="numeric">{input}</td>
             <td className="numeric"><span>{event.cacheReadRecorded ? formatTokens(event.cacheReadTokens) : "—"}</span>{cachePercent && <small>{cachePercent}</small>}</td>
             <td className="numeric"><span>{output}</span>{event.reasoningRecorded && <small>思考 {formatTokens(event.reasoningTokens)}</small>}</td>
             <td className="numeric" title="日志记录的美元成本">{r.costUsd == null ? "—" : `$${r.costUsd.toFixed(6)}`}</td>
+            <td className="request-project"><span title={r.project ?? undefined}>{project || "未记录"}</span>{r.project && <small title={r.project}>{shortPath(r.project)}</small>}</td>
             <td><button className="request-session" onClick={() => void copy(event.session)} title={event.session} aria-label={`复制会话 ID ${event.session}`}><code>{event.session}</code><UiIcon icon={Copy} size={12} /></button></td>
-          </tr>{expanded === event.id && <tr className="request-detail-row"><td colSpan={12}><EventDetail event={event} /></td></tr>}</Fragment>;
+          </tr>{expanded === event.id && <tr className="request-detail-row"><td colSpan={13}><EventDetail event={event} /></td></tr>}</Fragment>;
         })}
       </tbody></table>
       {!page?.events.length && !error && <div className="request-empty">{loading ? "正在读取请求事件…" : "当前筛选下没有请求事件"}</div>}
@@ -116,13 +125,14 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
 function EventDetail({ event }: { event: RequestEvent }) {
   const r = event.request;
   const fields = [
-    ["会话 ID", event.session], ["请求 ID", r.requestId], ["项目", r.project], ["日志文件", r.source],
-    ["客户端 / 版本", [r.client, r.version].filter(Boolean).join(" / ")], ["结束原因", r.stop],
+    ["会话 ID", event.session], ["请求 ID", r.requestId], ["项目目录", r.project], ["日志文件", r.source],
+    ["客户端 / 版本", [r.client, r.version].filter(Boolean).join(" / ")], ["原始来源类型", r.kind], ["结束原因", r.stop],
     ["HTTP 状态", r.httpStatus], ["缓存写入", event.cacheWriteRecorded ? formatTokens(event.cacheWriteTokens) : null],
     ["未分项 Token", event.unclassifiedTokens > 0 ? formatTokens(event.unclassifiedTokens) : null],
     ["开始时间", r.startedAt ? new Date(r.startedAt).toLocaleString("zh-CN", { hour12: false }) : null],
     ["结束时间", r.finishedAt ? new Date(r.finishedAt).toLocaleString("zh-CN", { hour12: false }) : null],
     ["耗时口径", r.timing ? timingNames[r.timing] : null],
+    ["首 Token", r.ttftMs == null ? null : `${duration(r.ttftMs)}（${r.ttftScope === "turn" ? "整轮" : "请求"}）`],
   ];
   return <div className="request-detail"><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value == null || value === "" ? "未记录" : value}</dd></div>)}</dl>{event.partial && <p>此记录的计量可能不完整，缺失字段没有按 0 补齐。</p>}</div>;
 }

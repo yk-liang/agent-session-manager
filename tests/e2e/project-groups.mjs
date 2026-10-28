@@ -23,7 +23,7 @@ try {
     const state={rows,ids:["a","b"],calls:[],deleted:[]};window.__GROUP_TEST__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
-      if(command==="list_agents")return [{id:"codex",displayName:"Codex CLI",installed:true,deletePolicy:"trash",supportsFork:false},
+      if(command==="list_agents")return [{id:"codex",displayName:"Codex",installed:true,deletePolicy:"trash",supportsFork:false},
         {id:"qoder",displayName:"Qoder CLI",installed:true,deletePolicy:"trash",supportsFork:false}];
       if(command==="catalog"){
         const sessions=args.agent==="codex"?state.rows:[meta("a","qoder-dir","另一 Agent 会话","/tmp/qoder")];

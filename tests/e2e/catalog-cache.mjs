@@ -30,7 +30,7 @@ try {
       state.calls.push({ command, args: structuredClone(args) });
       if (command === "list_agents") return [
         { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, supportsModelNames: true, deletePolicy: "trash" },
-        { id: "codex", displayName: "Codex CLI", installed: true, supportsFork: false, deletePolicy: "trash" }];
+        { id: "codex", displayName: "Codex", installed: true, supportsFork: false, deletePolicy: "trash" }];
       if (command === "catalog") {
         if (state.hold[args.agent]) return new Promise((resolve, reject) => state.pending.push({ agent: args.agent, empty: args.includeEmpty, resolve, reject }));
         return catalog(args.agent, args.includeEmpty);
@@ -50,7 +50,7 @@ try {
     } };
   });
   const qoder = page.locator(".agent-item", { hasText: "Qoder CLI" });
-  const codex = page.locator(".agent-item", { hasText: "Codex CLI" });
+  const codex = page.locator(".agent-item", { hasText: "Codex" });
   const cards = page.locator(".session-card");
   const refresh = page.getByRole("button", { name: "刷新", exact: true });
   const project = page.locator('.sidebar-project-list .project-item[title="/tmp/source"]');

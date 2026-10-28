@@ -25,7 +25,7 @@ try {
     window.__CONTEXT_CALLS__ = [];
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       window.__CONTEXT_CALLS__.push({ cmd, args });
-      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex CLI', installed: true, deletePolicy: 'trash' }];
+      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, deletePolicy: 'trash' }];
       if (cmd === 'catalog') return structuredClone(args.includeEmpty ? fixture.all : fixture.catalog);
       if (cmd === 'read_session') return structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
       if (cmd === 'search_conversations') return args.query === 'visible needle' ? fixture.search : { hits: [], skipped: 0, cancelled: false };

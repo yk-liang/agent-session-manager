@@ -177,13 +177,13 @@ try {
   await page.evaluate(() => { window.__CONFIG_TEST__.holdReads = true; });
   await refresh();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length === 1);
-  await page.locator(".sidebar").getByRole("button", { name: "Codex CLI", exact: true }).click();
+  await page.locator(".sidebar").getByRole("button", { name: "Codex", exact: true }).click();
   // StrictMode 挂载会发出两次读取，释放最后一个请求以验证最新代次。
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length >= 2);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.at(-1).resolve(); });
   await page.getByText("codex-demo", { exact: true }).waitFor();
   await page.evaluate(() => { window.__CONFIG_TEST__.pendingReads.splice(0).forEach((r) => r.resolve()); });
-  assert.equal(await page.locator(".config-page-heading h1").textContent().then((s) => s.includes("Codex CLI")), true);
+  assert.equal(await page.locator(".config-page-heading h1").textContent().then((s) => s.includes("Codex")), true);
   pass("slow configuration reads remain navigable and late responses stay agent-bound");
 
   await agent("Qoder CLI");
@@ -218,7 +218,7 @@ try {
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
   pass("changing the target after preview cannot silently apply unseen content");
 
-  await agent("Codex CLI");
+  await agent("Codex");
   await file("config.toml").getByRole("button", { name: "编辑", exact: true }).click();
   const toml = file("config.toml").locator("textarea");
   await toml.fill("model = [");

@@ -15,7 +15,7 @@ export function configMockBootstrap(input) {
   const fixtures = input.fixtures ?? input;
   const native = input.native ?? false;
   const oldInvoke = window.__TAURI_INTERNALS__?.invoke;
-  const names = { qoder: "Qoder CLI", claude: "Claude Code", codex: "Codex CLI", opencode: "OpenCode", pi: "Pi" };
+  const names = { qoder: "Qoder CLI", claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "Pi" };
   const state = {
     configs: Object.fromEntries(Object.entries(fixtures).map(([agent, files]) => [agent, files.map((file) => ({ ...file, label: file.key, path: `/Users/demo/.${agent}/${file.key}`, present: file.content !== null }))])),
     profiles: {}, backups: {}, calls: [], writes: [], sequence: 0,

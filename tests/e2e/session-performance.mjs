@@ -18,7 +18,7 @@ try {
     const catalog=statsPending=>({sessions:[{...meta,model:statsPending?null:meta.model,statsPending}],projects:[{dirName:'p',displayPath:'/tmp/long',sessionCount:1,lastActivity:null}],warnings:[]});
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(cmd,args={})=>{
       state.calls.push({cmd,args});
-      if(cmd==='list_agents')return [{id:'codex',displayName:'Codex CLI',installed:true,supportsFastCatalog:true,deletePolicy:'trash'}];
+      if(cmd==='list_agents')return [{id:'codex',displayName:'Codex',installed:true,supportsFastCatalog:true,deletePolicy:'trash'}];
       if(cmd==='catalog')return catalog(!state.refined);
       if(cmd==='refine_catalog'){state.refining=true;await new Promise(resolve=>state.release=resolve);state.refined=true;return catalog(false);}
       if(cmd==='read_session')return {meta,events};

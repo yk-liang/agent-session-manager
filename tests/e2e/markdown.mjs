@@ -26,7 +26,7 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
     const state={calls:[],messages};window.__MD__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(cmd,args={})=>{
       state.calls.push({cmd,args});
-      if(cmd==='list_agents')return[{id:'codex',displayName:'Codex CLI',installed:true,supportsFork:false,deletePolicy:'trash'}];
+      if(cmd==='list_agents')return[{id:'codex',displayName:'Codex',installed:true,supportsFork:false,deletePolicy:'trash'}];
       if(cmd==='catalog')return{sessions:records,projects:[{dirName:'p',displayPath:'/tmp/md',sessionCount:records.length,lastActivity:null}],warnings:[]};
       if(cmd==='read_session')return{meta:records.find(s=>s.sessionId===args.sessionId),events:messages[args.sessionId]};
       if(cmd==='read_tool_payload')return args.token==='tool-input'?{type:'tool_use',id:'call',name:'fixture',input:{value:'**原样**'}}:{type:'tool_result',tool_use_id:'call',content:'# 结果标题\n**保持原文**'};
