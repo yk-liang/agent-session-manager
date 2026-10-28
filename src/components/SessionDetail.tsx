@@ -461,14 +461,14 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
       <div className="detail-header">
         <div className="detail-title">{meta.title || "(无标题)"}</div>
         <div className="detail-meta">
-          <CopyButton key={sessionKey(meta)} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="点击复制完整会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
+          <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="点击复制完整会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
           {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${fullTime(meta.firstTs)} ~ ${fullTime(meta.lastTs)}`}>
             {fullTime(meta.lastTs)}
           </time>}
-          <SessionInfo key={sessionKey(meta)} meta={meta} models={models} />
+          <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
         </div>
         <div className="detail-actions">
           {meta.hasTranscript && (

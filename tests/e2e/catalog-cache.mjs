@@ -9,7 +9,7 @@ let checks = 0; const pass = label => console.log(`PASS ${++checks}: ${label}`);
 try {
   await page.addInitScript(() => {
     Object.defineProperty(document, "hasFocus", { value: () => false });
-    window.addEventListener("focus", event => event.stopImmediatePropagation());
+    window.addEventListener("focus", event => { if (!window.__CACHE_TEST__?.allowFocus) event.stopImmediatePropagation(); });
     const row = (id, title, model = null) => ({ sessionId: id, projectDir: "source-dir", cwd: "/tmp/source", title,
       model, modelName: null, firstTs: null, lastTs: null, realUserCount: 1, assistantTextCount: 1,
       userCount: 1, assistantCount: 1, sizeBytes: 100, hasTranscript: true });
@@ -49,10 +49,14 @@ try {
       return null;
     } };
   });
-  const qoder = page.locator(".agent-item", { hasText: "Qoder CLI" });
-  const codex = page.locator(".agent-item", { hasText: "Codex" });
+  const qoder = () => page.getByRole("combobox", { name: "当前 Agent" }).selectOption("qoder");
+  const codex = () => page.getByRole("combobox", { name: "当前 Agent" }).selectOption("codex");
   const cards = page.locator(".session-card");
-  const reload = () => page.locator(".agent-item.active").click();
+  const reload = () => page.evaluate(() => {
+    window.__CACHE_TEST__.allowFocus = true;
+    window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus"));
+    window.__CACHE_TEST__.allowFocus = false;
+  });
   const waitLoaded = () => page.locator('.session-list[aria-busy="false"]').waitFor();
   const project = page.locator('.sidebar-project-list .project-item[title="/tmp/source"]');
   const assertProjectDetail = async (phase) => {
@@ -67,18 +71,18 @@ try {
   assert.equal(await cards.count(), 1);
   pass("the first catalog renders while the model registry request remains unresolved");
 
-  await codex.click(); await cards.filter({ hasText: "Codex question" }).waitFor();
+  await codex(); await cards.filter({ hasText: "Codex question" }).waitFor();
   await page.evaluate(() => { for (const resolve of window.__CACHE_TEST__.naming) resolve({ "mode-id": "Qwen readable name" }); });
   await page.waitForFunction(() => window.__CACHE_TEST__.named);
   assert.equal(await cards.filter({ hasText: "Qwen readable name" }).count(), 0);
   await page.evaluate(() => { window.__CACHE_TEST__.hold.qoder = true; window.__CACHE_TEST__.hold.codex = true; });
-  await qoder.click();
+  await qoder();
   await cards.filter({ hasText: "Qwen readable name" }).waitFor({ timeout: 750 });
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   pass("a late name response updates the Qoder cache without leaking into another Agent; switching back uses it before refresh finishes");
 
-  await codex.click(); await cards.filter({ hasText: "Codex question" }).waitFor({ timeout: 750 });
-  await qoder.click(); await cards.filter({ hasText: "Qoder question" }).waitFor({ timeout: 750 });
+  await codex(); await cards.filter({ hasText: "Codex question" }).waitFor({ timeout: 750 });
+  await qoder(); await cards.filter({ hasText: "Qoder question" }).waitFor({ timeout: 750 });
   assert.equal(await page.evaluate(() => window.__CACHE_TEST__.pending.filter(p => p.agent === "qoder").length), 1);
   await page.evaluate(() => { window.__CACHE_TEST__.add(); window.__CACHE_TEST__.release("qoder"); });
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 2);
@@ -139,7 +143,7 @@ try {
   await page.getByRole("dialog").getByRole("button", { name: "移入回收站", exact: true }).click();
   await page.waitForFunction(() => window.__CACHE_TEST__.deleted.length === 1);
   assert.equal(await cards.count(), 1);
-  await codex.click(); await qoder.click();
+  await codex(); await qoder();
   await cards.filter({ hasText: "New Qoder question" }).waitFor();
   assert.equal(await cards.count(), 1);
   await page.evaluate(() => { window.__CACHE_TEST__.release("qoder"); window.__CACHE_TEST__.release("codex"); });
@@ -152,7 +156,7 @@ try {
   await page.locator(".detail-title").waitFor();
   await page.getByLabel("显示空会话").check();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
-  await codex.click();
+  await codex();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "codex"));
   assert.equal(await cards.count(), 0, "uncached Agent must not inherit the previous Agent's cards");
   assert.equal(await page.locator(".detail-actions").count(), 0);
@@ -172,7 +176,7 @@ try {
   await cards.filter({ hasText: "Codex question" }).click();
   await page.locator(".detail-title", { hasText: "Codex question" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "分叉会话", exact: true }).count(), 0);
-  await qoder.click();
+  await qoder();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   assert.equal(await cards.filter({ hasText: "Codex question" }).count(), 0);
   assert.equal(await page.locator(".detail-actions").count(), 0);

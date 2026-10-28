@@ -8,6 +8,10 @@ npm run tauri dev     # 开发模式
 npm run tauri build   # 打包（产物在 src-tauri/target/release/bundle/）
 ```
 
+应用图标的主源文件是 `src/assets/brand/app-icon.svg`。修改后运行 `npm run icons`，会生成深色 SVG 和 `src-tauri/icons/` 下的桌面图标。深色版只改变底座配色，与默认版共用同一套路径；不要手动修改生成文件。
+
+应用目前使用深色界面，标题栏使用深色 SVG；浏览器标签图标随系统配色选择。macOS Dock/Finder 使用兼容 macOS 13+ 的默认 `.icns`。系统级 Default/Dark/Mono 图标切换需要单独编译并打包 [Icon Composer](https://developer.apple.com/icon-composer/) 资源，当前未启用；两份 SVG 不会让 `.icns` 自动切换。
+
 分发给其他 Mac 用户时，构建 macOS 13+ 的通用包（M 系列与 Intel）：
 
 ```bash

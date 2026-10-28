@@ -108,7 +108,7 @@ try {
   await search.fill('目标针');
   await page.waitForFunction(()=>window.__SEARCH_TEST__.pending.length===1);
   await page.evaluate(()=>window.__SEARCH_TEST__.hold=false);
-  await page.locator('.sidebar').getByRole('button',{name:'Codex',exact:true}).click();
+  await page.getByRole('combobox',{name:'当前 Agent',exact:true}).selectOption('codex');
   await page.locator('.session-card',{hasText:'另一 Agent 的记录'}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.pending.splice(0).forEach(resolve=>resolve()));
   assert.equal(await page.locator('.session-card').count(),1);

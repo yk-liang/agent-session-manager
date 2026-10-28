@@ -72,7 +72,7 @@ try {
       const layout = await page.evaluate(() => {
         const requests = document.querySelector('.request-events').getBoundingClientRect();
         const breakdowns = document.querySelector('.usage-breakdowns').getBoundingClientRect();
-        return { gap: breakdowns.top - requests.bottom, widths: [...document.querySelectorAll('.usage-agent-row,.usage-models')].map(el => [el.scrollWidth, el.clientWidth]) };
+        return { gap: breakdowns.top - requests.bottom, widths: [...document.querySelectorAll('.agent-switcher,.usage-models')].map(el => [el.scrollWidth, el.clientWidth]) };
       });
       assert.ok(layout.gap >= 18, `sections touch at ${width}`);
       assert.ok(layout.widths.every(([scroll, client]) => scroll <= client + 1), `breakdown overflow at ${width}`);
@@ -87,6 +87,11 @@ try {
   await page.waitForFunction(() => window.__COLD__.active === 'claude');
   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
   assert.equal(await page.locator('.usage-sync-status').count(), 0, 'once saved results are available, remaining sources update quietly');
+  await page.getByRole('combobox', { name: '当前 Agent' }).selectOption('codex');
+  assert.equal(await page.locator('.usage-stat strong').first().textContent(), '—', 'another Agent finishing cannot turn this pending source into measured zero');
+  await page.getByText('正在同步历史用量…', { exact: true }).waitFor();
+  await page.getByRole('combobox', { name: '当前 Agent' }).selectOption('all');
+  await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
   await assertLayout();
   await page.locator('.usage-trend').screenshot({ path: path.join(artifactDir, 'usage-chart-large-values.png') });
   await page.evaluate(() => { window.__COLD__.failSummary = true; window.__COLD__.failEvents = true; });

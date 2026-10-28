@@ -59,7 +59,28 @@ try {
  await page.getByRole('button', { name: '用量', exact: true }).click();
  const total = async () => (await page.locator('.usage-stat strong').first().textContent()).replace(/[^0-9]/g, '');
  const waitTotal = n => page.waitForFunction(n => document.querySelector('.usage-stat strong')?.textContent.replace(/[^0-9]/g, '') === n, n);
+ const selectAgent = name => page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption({ label: name });
  await waitTotal('1100');
+ assert.equal(await page.locator('.usage-details,.usage-agent-tabs').count(), 0);
+ const modelCells = selector => page.locator(selector).locator('td').allTextContents();
+ const modelRow = name => `.usage-models tbody tr:has(.model-label:text-is("${name}"))`;
+ assert.deepEqual(await page.locator('.usage-models thead th').allTextContents(), ['模型','请求','输入','输出','缓存读','缓存率','成本 (USD)']);
+ assert.deepEqual(await modelCells(modelRow('gpt-fixture')), ['2','700','70','450','64.29%','—']);
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['4','1K','100','450','45.00%','—']);
+ assert.equal(await page.getByRole('combobox', { name: '请求 Agent', exact: true }).count(), 0);
+ assert.equal(await page.getByRole('combobox', { name: '请求模型', exact: true }).count(), 0);
+ assert.ok(await page.evaluate(() => document.querySelector('.agent-switcher').getBoundingClientRect().bottom < document.querySelector('.usage-cards').getBoundingClientRect().top));
+ await page.locator('.usage-page').evaluate(el => { el.scrollTop = 40; });
+ const scrollBefore = await page.locator('.usage-page').evaluate(el => el.scrollTop);
+ assert.ok(scrollBefore > 0);
+ for (const [name, amount] of [['Codex','770'], ['Pi',null], ['全部 Agent','1100']]) {
+  await selectAgent(name);
+  if (amount === null) {
+   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '—');
+  } else await waitTotal(amount);
+  await page.waitForFunction(() => document.querySelector('.request-table-wrap')?.getAttribute('aria-busy') === 'false');
+  assert.ok(Math.abs(await page.locator('.usage-page').evaluate(el => el.scrollTop) - scrollBefore) < 2, `Agent switch moved the page: ${name}`);
+ }
  await page.getByText('按需同步', { exact: true }).waitFor();
  await page.waitForTimeout(400);
  assert.equal(await page.locator('.usage-sync-status').count(), 0, 'saved results should update quietly');
@@ -70,19 +91,27 @@ try {
  assert.equal(await page.locator('.usage-bucket').nth(2).getAttribute('data-total'), '110');
  assert.equal(await page.locator('.usage-bucket').nth(15).getAttribute('data-total'), '550');
  await page.waitForFunction(() => document.querySelectorAll('.request-table tbody tr').length === 3);
- await page.getByLabel('统计 Agent').selectOption('claude'); await waitTotal('330');
+ await selectAgent('Claude Code'); await waitTotal('330');
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['2','300','30','0','0.00%','—']);
  await page.getByLabel('统计模型').selectOption('claude-fixture'); await waitTotal('330');
- await page.getByLabel('统计 Agent').selectOption('all');
+ await selectAgent('Claude Code');
+ assert.equal(await page.getByLabel('统计模型').inputValue(), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
+ assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'claude');
+ await selectAgent('全部 Agent');
  for (const [label, count] of [['近 7 天', 7], ['近 30 天', 30]]) {
   await page.getByRole('button', { name: label, exact: true }).click(); await waitTotal('1100');
   assert.equal(await page.locator('.usage-bucket').count(), count);
  }
  await page.getByRole('button', { name: '全部', exact: true }).click(); await waitTotal('2090');
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['5','1.9K','190','450','23.68%','—']);
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'sync_request_events').length), syncCalls);
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'read_usage').length), 0);
  await page.evaluate(() => window.__USAGE__.releaseSync());
  const waitSynced = round => page.waitForFunction(round => window.__USAGE__.syncRounds >= round, round);
  await waitSynced(1);
+ // Empty usage is a measured zero only after this source has finished its first sync.
+ await selectAgent('Pi'); await waitTotal('0');
+ await selectAgent('全部 Agent'); await waitTotal('2090');
  console.log(`PASS: persisted results render during sync; request-time hourly/daily buckets, filters and table totals agree; filters never reread logs (${engine})`);
 
  await page.evaluate(() => window.__USAGE__.failSync = 'claude');
@@ -117,6 +146,12 @@ try {
  for (const width of [960, 1280, 1600, 2200, 1280]) {
   await page.setViewportSize({ width, height: 900 });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  const tableLayout = await page.locator('.usage-models').evaluate(el => ({
+   width: el.clientWidth, scrollWidth: el.scrollWidth,
+   overflowingCells: [...el.querySelectorAll('td')].filter(cell => cell.scrollWidth > cell.clientWidth + 1).map(cell => cell.textContent),
+  }));
+  assert.ok(tableLayout.scrollWidth <= tableLayout.width + 1, `model section overflows at ${width}`);
+  assert.deepEqual(tableLayout.overflowingCells, [], `model values overlap at ${width}`);
   await page.waitForFunction(() => {
    const svg = document.querySelector('.usage-chart svg');
    const grid = svg?.querySelector('.usage-grid-line');
@@ -139,6 +174,37 @@ try {
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.screenshot({ path: path.join(artifactDir, 'usage-hourly.png') });
+ await page.locator('.usage-page').evaluate(el => { el.scrollTop = 0; });
+ await page.screenshot({ path: path.join(artifactDir, 'usage-agent-switcher.png') });
+ await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models.png') });
+ // More than eight models: the footer always includes hidden rows, with large values and long names.
+ await page.evaluate(() => {
+  const summary = window.__USAGE__.fixture.summaries.today, base = summary.rows[0];
+  summary.rows = Array.from({ length: 10 }, (_, i) => ({ ...base,
+   model: `provider/model-${i + 1}-with-a-long-name-for-layout-check`, modelName: `provider/model-${i + 1}-with-a-long-name-for-layout-check`,
+   inputTokens: (i + 1) * 100_000_000, outputTokens: (i + 1) * 10_000, totalTokens: (i + 1) * 100_010_000,
+   cacheReadTokens: (i + 1) * 90_000_000, requestCount: (i + 1) * 100, costUsd: i === 0 ? 0.000001 : (i + 1) * 0.5, costIncomplete: false,
+  }));
+ });
+ await page.getByRole('button', { name: '近 7 天', exact: true }).click(); await waitTotal('1100');
+ await page.getByRole('button', { name: '今日', exact: true }).click(); await waitTotal('5500550000');
+ assert.equal(await page.locator('.usage-models tbody tr').count(), 8);
+ const allModelsTotal = ['5.5K','5.5B','550K','4.95B','90.00%','$27.000001'];
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), allModelsTotal);
+ await page.getByRole('button', { name: '显示全部 10 个模型', exact: true }).click();
+ assert.equal(await page.locator('.usage-models tbody tr').count(), 10);
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), allModelsTotal);
+ for (const width of [960, 1280, 2200]) {
+  await page.setViewportSize({ width, height: 900 });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  const overflow = await page.locator('.usage-models td').evaluateAll(cells => cells.filter(c => c.scrollWidth > c.clientWidth + 1).map(c => c.textContent));
+  assert.deepEqual(overflow, [], `large model values overlap at ${width}`);
+ }
+ await page.setViewportSize({ width: 1280, height: 900 });
+ await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models-large.png') });
+ await page.getByLabel('统计模型').selectOption('provider/model-1-with-a-long-name-for-layout-check');
+ await waitTotal('100010000');
+ assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['100','100M','10K','90M','90.00%','$0.000001']);
  await page.getByRole('button', { name: '会话', exact: true }).click();
  assert.ok(await page.evaluate(() => window.__USAGE__.calls.some(c => c.cmd === 'cancel_usage_summary')));
  assert.deepEqual(errors, []);

@@ -103,7 +103,7 @@ try {
   pass("automatic updates pause during batch selection and resume afterward without losing the pending change");
 
   const old = await page.evaluate(() => structuredClone(window.__AUTO_TEST__.watch));
-  await page.locator(".agent-item", { hasText: "Codex" }).click();
+  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Codex" });
   await page.locator(".session-card", { hasText: "Existing Codex session" }).waitFor();
   await page.waitForFunction(() => window.__AUTO_TEST__.watch.agent === "codex");
   await page.evaluate(old => window.__AUTO_TEST__.changed(old.agent, old.generation), old);

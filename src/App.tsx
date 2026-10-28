@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import UiIcon from "./components/UiIcon";
+import appIcon from "./assets/brand/app-icon-dark.svg";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
+import AgentSwitcher from "./components/AgentSwitcher";
 import SessionList from "./components/SessionList";
 import SessionDetailView from "./components/SessionDetail";
 import ConfigPanel from "./components/ConfigPanel";
@@ -28,6 +30,8 @@ export default function App() {
   // 初始为 null：等 agent 列表返回再定默认值，
   // 避免未安装 Qoder 的用户在启动时发出一次必然失败的请求
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  // “全部”仅是用量范围；返回会话或配置时保留最近选择的本地 Agent。
+  const [usageAgent, setUsageAgent] = useState("all");
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -221,14 +225,9 @@ export default function App() {
   useEffect(() => { autoRefresh.current?.setBlocked(pauseAutoRefresh); }, [pauseAutoRefresh]);
 
   const selectAgentNow = (id: string) => {
-    if (deleting || batchRunning.current) return;
+    if (deleting || batchRunning.current || id === selectedAgent) return;
     clearBatchSelection();
     setBatchMode(false);
-    if (id === selectedAgent) {
-      // 重点当前 agent = 手动刷新，不能清空后不重载
-      setRefreshKey((k) => k + 1);
-      return;
-    }
     detailGen.current += 1;
     setSelectedAgent(id);
     setSelectedProject(null);
@@ -237,7 +236,15 @@ export default function App() {
     applyCatalog(catalogCache.peek(id, showEmpty) ?? EMPTY_CATALOG);
   };
 
-  const selectAgent = (id: string) => protectConfig(() => selectAgentNow(id), id === selectedAgent ? "刷新配置" : "切换 Agent");
+  const selectAgent = (id: string) => {
+    if (deleting || batchRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
+    if (tab !== "usage" && !agents.some(agent => agent.id === id && agent.installed)) return;
+    protectConfig(() => {
+      setUsageAgent(id);
+      // 历史用量可能来自已卸载的 Agent，不能把它设为配置写入目标。
+      if (agents.some(agent => agent.id === id && agent.installed)) selectAgentNow(id);
+    }, "切换 Agent");
+  };
 
   const selectProject = (dirName: string | null) => {
     if (deleting || batchRunning.current) return;
@@ -371,9 +378,11 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-dot" />
+          <img className="brand-icon" src={appIcon} alt="" aria-hidden="true" />
           Agent Session Manager
         </div>
+        <AgentSwitcher agents={agents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
+          disabled={deleting || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
           <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={deleting}>
             会话
@@ -403,9 +412,7 @@ export default function App() {
       {tab === "sessions" ? (
         <ResizableLayout
           sidebar={<Sidebar
-            agents={agents.filter((a) => a.installed)}
             selectedAgent={selectedAgent}
-            onSelectAgent={selectAgent}
             projects={sidebarGroups}
             selected={selectedProject}
             onSelect={selectProject}
@@ -455,18 +462,7 @@ export default function App() {
           )}
         </ResizableLayout>
       ) : tab === "config" ? (
-        <ResizableLayout
-          sidebar={<Sidebar
-            agents={agents.filter((a) => a.installed)}
-            selectedAgent={selectedAgent}
-            onSelectAgent={selectAgent}
-            projects={sidebarGroups}
-            selected={selectedProject}
-            onSelect={selectProject}
-            disabled={deleting}
-            hideProjects
-          />}
-        >
+        <main className="main single">
           {selectedAgent ? (
             <ConfigPanel
               key={selectedAgent}
@@ -480,8 +476,8 @@ export default function App() {
           ) : (
             <div className="placeholder">选择一个 Agent 查看配置</div>
           )}
-        </ResizableLayout>
-      ) : <UsagePanel agents={agents} />}
+        </main>
+      ) : <UsagePanel agents={agents} agent={usageAgent} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存修改？" message={`继续${configNavigation.label}会放弃尚未写入文件的草稿。你也可以取消，返回编辑器保存。`} confirmLabel="放弃修改并继续" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

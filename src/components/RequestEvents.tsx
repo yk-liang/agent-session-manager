@@ -17,14 +17,12 @@ interface Props {
   model: string;
   revision: number;
   syncing?: boolean;
-  onAgentChange: (agent: string) => void;
-  onModelChange: (model: string) => void;
 }
 const resultNames = { success: "成功", failed: "失败", unknown: "未记录" };
 const duration = (ms: number | null) => ms == null ? "—" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 const timingNames = { recorded: "日志记录耗时", observed: "请求与响应日志的时间差", estimated: "按相邻事件估算，可能包含调度、重试及工具等待" };
 
-export default function RequestEvents({ agents, period, now, agent, model, revision, syncing = false, onAgentChange, onModelChange }: Props) {
+export default function RequestEvents({ agents, period, now, agent, model, revision, syncing = false }: Props) {
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState<EventPage | null>(null);
   const [loading, setLoading] = useState(false);
@@ -76,10 +74,8 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
         <p>“≈”为估算，“—”为未记录；展开行可看详情。</p>
       </HelpTip><span className="request-count">{syncing && !page?.total ? "同步中" : `${page ? formatTokens(page.total) : "—"} 条`}</span></div>
       <div className="request-filters">
-        <span className="usage-select"><select aria-label="请求 Agent" value={agent} onChange={e => onAgentChange(e.target.value)}><option value="all">全部 Agent</option>{agents.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
-        <span className="usage-select"><select aria-label="请求模型" value={model} onChange={e => onModelChange(e.target.value)}><option value="all">全部模型</option>{[...new Set([...(page?.models ?? []), ...(model !== "all" ? [model] : [])])].map(m => <option key={m} value={m}>{m === "unknown" ? "未知模型" : m}</option>)}</select><UiIcon icon={ChevronDown} /></span>
         <span className="usage-select"><select aria-label="请求结果" value={status} onChange={e => setStatus(e.target.value)}><option value="all">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="unknown">未记录</option></select><UiIcon icon={ChevronDown} /></span>
-        {(agent !== "all" || model !== "all" || status !== "all") && <button className="request-clear" onClick={() => { onAgentChange("all"); onModelChange("all"); setStatus("all"); }}>清除筛选</button>}
+        {status !== "all" && <button className="request-clear" onClick={() => setStatus("all")}>清除结果筛选</button>}
       </div>
     </div>
     <div className="request-table-wrap" tabIndex={0} role="region" aria-label="请求事件表，可横向滚动" aria-busy={loading}>
@@ -128,8 +124,10 @@ function EventDetail({ event }: { event: RequestEvent }) {
   const fields = [
     ["会话 ID", event.session], ["请求 ID", r.requestId], ["项目目录", r.project], ["日志文件", r.source],
     ["客户端 / 版本", [r.client, r.version].filter(Boolean).join(" / ")], ["原始来源类型", r.kind], ["结束原因", r.stop],
-    ["HTTP 状态", r.httpStatus], ["缓存写入", event.cacheWriteRecorded ? formatTokens(event.cacheWriteTokens) : null],
-    ["未分项 Token", event.unclassifiedTokens > 0 ? formatTokens(event.unclassifiedTokens) : null],
+    ["HTTP 状态", r.httpStatus], ["缓存读取", event.cacheReadRecorded ? formatTokens(event.cacheReadTokens) : null],
+    ["缓存写入", event.cacheWriteRecorded ? formatTokens(event.cacheWriteTokens) : null],
+    ["思考 Token", event.reasoningRecorded ? formatTokens(event.reasoningTokens) : null],
+    ...(event.unclassifiedTokens > 0 ? [["未分项 Token", formatTokens(event.unclassifiedTokens)]] : []),
     ["开始时间", r.startedAt ? new Date(r.startedAt).toLocaleString("zh-CN", { hour12: false }) : null],
     ["结束时间", r.finishedAt ? new Date(r.finishedAt).toLocaleString("zh-CN", { hour12: false }) : null],
     ["耗时口径", r.timing ? timingNames[r.timing] : null],

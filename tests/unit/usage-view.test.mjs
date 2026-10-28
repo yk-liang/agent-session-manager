@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dateKey, firstDate, selectRows, sumTokens, dailySeries, modelTotals, formatUsageField, summaryQuery, usageSeries } from '../../src/usageView.ts';
+import { dateKey, firstDate, selectRows, sumTokens, dailySeries, modelTotals, modelUsageCells, sumModelUsage, formatUsageField, summaryQuery, usageSeries } from '../../src/usageView.ts';
 const row=(date,model,input,output,extra=0)=>({date,model,modelName:model,inputTokens:input,outputTokens:output,cacheReadTokens:2,cacheWriteTokens:1,reasoningTokens:1,unclassifiedTokens:extra,totalTokens:input+output+extra,partial:false});
 test('range boundaries follow local calendar dates and include unknown dates only in all',()=>{
  const now=new Date(2026,9,22,0,30),report={rows:[row('2026-10-15','a',10,1),row('2026-10-16','a',20,2),row('2026-10-22','b',30,3),row('','a',40,4)]};
@@ -34,6 +34,31 @@ test('input and output distinguish unknown, measured zero and a measured lower b
  assert.equal(formatUsageField(sumTokens([zero]),'output'),'0');
  assert.equal(formatUsageField(sumTokens([unknown,known]),'input'),'≥ 100');
  assert.equal(formatUsageField(modelTotals([unknown,known])[0],'output'),'≥ 0');
+});
+
+const measured = (model, input, cached, costUsd) => ({ ...row('2026-10-22', model, input, 10), inputRecorded:true, outputRecorded:true, cacheReadRecorded:true, cacheReadTokens:cached, requestCount:1, requestCountIncomplete:false, costUsd, costIncomplete:costUsd===null, cacheReadIncomplete:false, cacheRateUnavailable:false });
+test('model metrics and footer use weighted cache rates across models, sources and buckets',()=>{
+ const rows=[{...measured('a',100,90,0.25),agent:'claude'}, {...measured('a',900,600,0),agent:'codex'}, measured('b',1000,300,0.5)];
+ const models=modelTotals(rows);
+ assert.equal(models.find(m=>m.model==='a').requestCount,2);
+ assert.equal(modelUsageCells(models.find(m=>m.model==='a'))[4].text,'69.00%');
+ const total=sumModelUsage(rows), cells=modelUsageCells(total);
+ assert.deepEqual(cells.map(c=>c.text),['3','2K','30','990','49.50%','$0.75']);
+ assert.equal(total.totalTokens,2030);
+ assert.equal(rows[0].requestCount,1);
+});
+test('model metrics never display unknown usage or cost as zero or invent a precise cache rate',()=>{
+ const known=measured('a',100,90,0), missing={...measured('a',900,0,null),cacheReadRecorded:false,cacheReadIncomplete:true,cacheRateUnavailable:true};
+ const cells=modelUsageCells(sumModelUsage([known,missing]));
+ assert.deepEqual(cells.map(c=>c.text),['2','1K','20','≥ 90','—','≥ $0.00']);
+ assert.equal(modelUsageCells(sumModelUsage([missing]))[3].text,'—');
+ assert.equal(modelUsageCells(sumModelUsage([missing]))[5].text,'—');
+ assert.equal(modelUsageCells(sumModelUsage([measured('zero',100,0,0)]))[4].text,'0.00%');
+ assert.equal(modelUsageCells(sumModelUsage([measured('zero',0,0,0)]))[4].text,'—');
+ const delta={...known,requestCount:0,requestCountIncomplete:true};
+ assert.equal(modelUsageCells(sumModelUsage([delta]))[0].text,'—');
+ assert.equal(modelUsageCells(sumModelUsage([known,delta]))[0].text,'≥ 1');
+ assert.equal(modelUsageCells(sumModelUsage([{...known,cacheRateUnavailable:true}]))[4].text,'—');
 });
 
 test('today plots actual hourly buckets and week/month use local calendar boundaries',()=>{

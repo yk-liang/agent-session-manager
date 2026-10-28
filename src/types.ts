@@ -243,7 +243,17 @@ export interface UsageReport {
   scanMs: number;
   bytesRead: number;
 }
-export interface UsageSummaryRow extends UsageRow { agent: string; bucketStart: number | null }
+export interface UsageRequestMetrics {
+  // 累计差额不能还原请求次数；此时 requestCount 只是可确认的下限。
+  requestCount: number;
+  requestCountIncomplete: boolean;
+  // 日志中的美元成本；null 表示未记录，不按模型价格估算。
+  costUsd: number | null;
+  costIncomplete: boolean;
+  cacheReadIncomplete: boolean;
+  cacheRateUnavailable: boolean;
+}
+export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics { agent: string; bucketStart: number | null }
 export interface UsageSummary {
   rows: UsageSummaryRow[];
   health: Record<string, { partial: boolean; warnings: string[] }>;

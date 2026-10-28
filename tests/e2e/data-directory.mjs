@@ -30,7 +30,7 @@ try {
   });
   await page.goto(baseURL);
   for (const [id, name] of [['qoder', 'Qoder CLI'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['pi', 'Pi']]) {
-    await page.getByRole('button', { name, exact: true }).click();
+    await page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption(id);
     const open = page.getByRole('button', { name: '打开数据目录', exact: true });
     assert.equal(await open.getAttribute('title'), `在访达中打开 ${name} 数据目录`);
     await open.click();

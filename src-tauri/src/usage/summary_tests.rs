@@ -260,6 +260,97 @@ fn summary_hour_buckets_follow_supplied_dst_and_quarter_hour_timezone_boundaries
 }
 
 #[test]
+fn model_metrics_count_deduped_requests_and_keep_costs_after_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("a.jsonl");
+    let t = 1_790_000_000_000i64;
+    let message = |id, time, input, cached, cost: Option<f64>| json!({"type":"message","id":id,"timestamp":time,"message":{"role":"assistant","provider":"p","model":"m","usage":{"input":input,"output":10,"cacheRead":cached,"cacheWrite":0,"cost":{"total":cost}}}});
+    let first = message("a", t, 10, 90, Some(0.25));
+    write(
+        &source,
+        &[
+            json!({"type":"session","id":"session"}),
+            first.clone(),
+            first,
+            message("b", t + 3600000, 300, 600, Some(0.0)),
+            message("c", t + 7200000, 10, 0, None),
+        ],
+    );
+    let mut store = Store::open(None);
+    summary::sync_at("pi", &[dir.path().into()], &mut store, &|| false).unwrap();
+    let result = read(&mut store, vec![t, t + 7200000]);
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.metrics.request_count, 2);
+    assert!(!row.metrics.request_count_incomplete);
+    assert_eq!(row.metrics.cost_usd, Some(0.25));
+    assert!(!row.metrics.cost_incomplete);
+    assert_eq!(row.usage.tokens.input_tokens, 1000);
+    assert_eq!(row.usage.tokens.cache_read_tokens, 690);
+    assert!(!row.metrics.cache_read_incomplete);
+    assert!(!row.metrics.cache_rate_unavailable);
+    fs::remove_file(source).unwrap();
+    let all = read(&mut store, vec![t, t + 10800000]);
+    assert_eq!(all.rows[0].metrics.request_count, 3);
+    assert_eq!(all.rows[0].metrics.cost_usd, Some(0.25));
+    assert!(all.rows[0].metrics.cost_incomplete);
+    assert_eq!(sum(&all), 1040);
+}
+
+#[test]
+fn model_metrics_keep_missing_cache_distinct_from_zero_and_count_failed_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = 1_790_000_000_000i64;
+    let known = record("a", t, 100, 10);
+    let mut missing = record("b", t + 1, 100, 10);
+    missing["message"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_read_input_tokens");
+    let mut failed = record("failed", t + 2, 0, 0);
+    failed["isApiErrorMessage"] = json!(true);
+    failed["apiErrorStatus"] = json!(429);
+    failed["message"]["usage"] = Value::Null;
+    write(&dir.path().join("a.jsonl"), &[known, missing, failed]);
+    let mut store = Store::open(None);
+    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    let result = read(&mut store, vec![t, t + 100]);
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.metrics.request_count, 3);
+    assert!(row.usage.details.cache_read_recorded);
+    assert!(row.metrics.cache_read_incomplete);
+    assert!(row.metrics.cache_rate_unavailable);
+    assert_eq!(row.metrics.cost_usd, None);
+    assert_eq!(sum(&result), 220);
+    assert!(
+        !row.usage.details.input_incomplete,
+        "missing error usage must not pollute measured inputs"
+    );
+}
+
+#[test]
+fn model_metrics_do_not_count_cumulative_deltas_as_single_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = 1_790_000_000_000i64;
+    write(
+        &dir.path().join("a.jsonl"),
+        &[
+            json!({"type":"session_meta","payload":{"id":"delta-fixture"}}),
+            json!({"type":"turn_context","payload":{"model":"gpt-fixture"}}),
+            json!({"type":"event_msg","timestamp":t,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0,"cached_input_tokens":0,"reasoning_output_tokens":0}}}}),
+            json!({"type":"event_msg","timestamp":t+1,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"cached_input_tokens":80,"reasoning_output_tokens":0}}}}),
+        ],
+    );
+    let mut store = Store::open(None);
+    summary::sync_at("codex", &[dir.path().into()], &mut store, &|| false).unwrap();
+    let result = read(&mut store, vec![]);
+    assert_eq!(sum(&result), 110);
+    assert_eq!(result.rows[0].metrics.request_count, 0);
+    assert!(result.rows[0].metrics.request_count_incomplete);
+}
+
+#[test]
 fn export_usage_summary_fixture_if_requested() {
     let Ok(export) = std::env::var("ASM_USAGE_SUMMARY_EXPORT") else {
         return;

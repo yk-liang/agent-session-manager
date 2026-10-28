@@ -30,6 +30,22 @@ pub struct SummaryRow {
     pub bucket_start: Option<i64>,
     #[serde(flatten)]
     pub usage: UsageRow,
+    #[serde(flatten)]
+    pub metrics: RequestMetrics,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMetrics {
+    /// 只计可确认的请求（含失败）；累计差额可能包含多次调用，只标记数量不完整。
+    pub request_count: u64,
+    pub request_count_incomplete: bool,
+    /// 仅汇总日志明确记录的美元成本，None 不代表免费。
+    pub cost_usd: Option<f64>,
+    pub cost_incomplete: bool,
+    pub cache_read_incomplete: bool,
+    /// 缺少输入/缓存字段或包含关系不明确时，不推算缓存率。
+    pub cache_rate_unavailable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,8 +265,14 @@ pub(super) fn read_at(
     let mut rows = stmt
         .query(params_from_iter(values))
         .map_err(|_| "无法查询请求用量")?;
-    let mut grouped =
-        BTreeMap::<(String, String, String, Option<i64>), (Tokens, RecordedFields, bool)>::new();
+    #[derive(Default)]
+    struct Group {
+        tokens: Tokens,
+        details: RecordedFields,
+        partial: bool,
+        metrics: RequestMetrics,
+    }
+    let mut grouped = BTreeMap::<(String, String, String, Option<i64>), Group>::new();
     // SQL 先按事件时间范围筛选。只读账本中的小型计量记录，不读取或扫描会话正文。
     #[derive(Deserialize)]
     struct Measurement {
@@ -259,6 +281,14 @@ pub(super) fn read_at(
         #[serde(flatten)]
         details: RecordedFields,
         partial: bool,
+        #[serde(default)]
+        request: Request,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct Request {
+        scope: Option<String>,
+        cost_usd: Option<f64>,
     }
     while let Some(row) = rows.next().map_err(|_| "无法读取请求计量")? {
         if cancel() {
@@ -270,10 +300,8 @@ pub(super) fn read_at(
         let data: String = row.get(3).map_err(|_| "请求计量无效")?;
         let m: Measurement =
             serde_json::from_str(&data).map_err(|_| "请求计量损坏，已保留原数据")?;
-        // 没有 usage 的错误事件不变成计量为零的模型调用。
-        if !m.details.input_recorded && !m.details.output_recorded && m.tokens.total() == 0 {
-            continue;
-        }
+        let measured =
+            m.details.input_recorded || m.details.output_recorded || m.tokens.total() > 0;
         let bucket_start = if query.bounds.is_empty() {
             None
         } else {
@@ -295,12 +323,32 @@ pub(super) fn read_at(
             h.warnings
                 .push("部分请求缺少发生时间，只计入全部范围，不放入趋势".into());
         }
+        let cache_rate_unavailable = agent == "qoder"
+            || !m.details.input_recorded
+            || m.details.input_incomplete
+            || !m.details.cache_read_recorded
+            || m.tokens.cache_read_tokens > m.tokens.input_tokens;
         let entry = grouped
             .entry((agent, model, date, bucket_start))
             .or_default();
-        entry.0.add(&m.tokens);
-        entry.1.merge(&m.details);
-        entry.2 |= m.partial;
+        // 无计量的失败请求参与次数/成本统计，不把缺失 usage 当作实测的 0。
+        if measured {
+            entry.tokens.add(&m.tokens);
+            entry.details.merge(&m.details);
+            entry.metrics.cache_read_incomplete |= !m.details.cache_read_recorded;
+            entry.metrics.cache_rate_unavailable |= cache_rate_unavailable;
+        }
+        entry.partial |= m.partial;
+        if matches!(m.request.scope.as_deref(), Some("request" | "error")) {
+            entry.metrics.request_count += 1;
+        } else {
+            entry.metrics.request_count_incomplete = true;
+        }
+        if let Some(cost) = m.request.cost_usd.filter(|c| c.is_finite() && *c >= 0.0) {
+            *entry.metrics.cost_usd.get_or_insert(0.0) += cost;
+        } else {
+            entry.metrics.cost_incomplete = true;
+        }
     }
     for h in health.values_mut() {
         h.warnings.sort();
@@ -308,25 +356,24 @@ pub(super) fn read_at(
     }
     let rows = grouped
         .into_iter()
-        .map(
-            |((agent, model, date, bucket_start), (tokens, details, partial))| SummaryRow {
-                agent,
-                bucket_start,
-                usage: UsageRow {
-                    date,
-                    model_name: if model == "unknown" {
-                        "未知模型".into()
-                    } else {
-                        model.clone()
-                    },
-                    model,
-                    total_tokens: tokens.total(),
-                    tokens,
-                    details,
-                    partial,
+        .map(|((agent, model, date, bucket_start), group)| SummaryRow {
+            agent,
+            bucket_start,
+            usage: UsageRow {
+                date,
+                model_name: if model == "unknown" {
+                    "未知模型".into()
+                } else {
+                    model.clone()
                 },
+                model,
+                total_tokens: group.tokens.total(),
+                tokens: group.tokens,
+                details: group.details,
+                partial: group.partial,
             },
-        )
+            metrics: group.metrics,
+        })
         .collect();
     Ok(Summary {
         rows,

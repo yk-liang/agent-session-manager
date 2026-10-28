@@ -15,10 +15,13 @@ mkdirSync(artifacts, { recursive: true });
 let checks = 0;
 const pass = (label) => { checks++; console.log(`PASS ${checks}: ${label}`); };
 const file = (key) => page.locator(`.config-file[data-file-key="${key}"]`);
-const agent = async (name) => { await page.locator(".sidebar").getByRole("button", { name, exact: true }).click(); await page.locator(".config-file").first().waitFor(); };
+const agent = async (name) => { await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: name }); await page.locator(".config-file").first().waitFor(); };
 const refresh = async () => {
   const retry = page.getByRole("button", { name: "重试读取", exact: true });
-  if (await retry.count()) await retry.click(); else await page.locator(".sidebar .agent-item.active").click();
+  if (await retry.count()) await retry.click(); else {
+    await page.getByRole("button", { name: "会话", exact: true }).click();
+    await page.getByRole("button", { name: "配置", exact: true }).click();
+  }
 };
 const beforeUnloadBlocked = () => page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
 const discard = () => page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).getByRole("button", { name: "放弃修改并继续", exact: true }).click();
@@ -92,30 +95,38 @@ try {
   await file("settings.json").locator("textarea").fill('{"unsaved":true}');
   assert.ok(await page.getByRole("button", { name: "保存为方案", exact: true }).isDisabled());
   assert.ok(await page.getByRole("button", { name: "应用", exact: true }).first().isDisabled());
-  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => page.locator(".sidebar").getByRole("button", { name: "Claude Code", exact: true }).click()]) {
+  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), () => page.getByRole("button", { name: "用量", exact: true }).click(), () => page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" })]) {
     await action();
     await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   }
   assert.ok(await beforeUnloadBlocked());
+  // Saving another file can fail during readback while this draft is still open.
+  await file("mcp.json").getByRole("button", { name: "编辑", exact: true }).click();
+  await file("mcp.json").locator("textarea").fill('{"saved":"readback-test"}');
   await page.evaluate(() => { window.__CONFIG_TEST__.holdReads = true; window.__CONFIG_TEST__.failNextRead = true; });
-  await refresh();
-  await discard();
+  await file("mcp.json").getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length === 1);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.splice(0).forEach((r) => r.resolve()); });
-  await page.getByRole("alert").filter({ hasText: "mock config reload failure" }).waitFor();
+  await page.getByRole("alert").filter({ hasText: "mcp.json 已保存，但无法重新读取状态。" }).waitFor();
   assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   assert.ok(await page.getByRole("status").filter({ hasText: "1 个文件未保存" }).isVisible());
   assert.ok(await beforeUnloadBlocked(), "failed discard-refresh must still protect the surviving draft");
   assert.deepEqual(await page.evaluate(() => window.__CONFIG_TEST__.guard), { dirty: true, busy: false });
-  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => page.locator(".sidebar").getByRole("button", { name: "Claude Code", exact: true }).click(), nativeExit]) {
+  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" }), nativeExit]) {
     await action();
     await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   }
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 0);
+  await page.evaluate(() => { window.__CONFIG_TEST__.failNextRead = true; });
+  await refresh();
+  await discard();
+  await page.getByRole("alert").filter({ hasText: "mock config reload failure" }).waitFor();
+  assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
+  assert.ok(await beforeUnloadBlocked());
   pass("failed discard-refresh retains draft, dirty notice, browser/native guards and navigation confirmations");
 
   await page.evaluate(() => { window.__CONFIG_TEST__.holdReads = true; });
@@ -146,13 +157,13 @@ try {
 
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
   await file("settings.json").locator("textarea").fill('{"discard":"agent"}');
-  await page.locator(".sidebar").getByRole("button", { name: "Claude Code", exact: true }).click();
+  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" });
   await discard();
   await page.getByText("claude-demo", { exact: true }).waitFor();
   assert.equal(await page.locator("textarea").count(), 0);
   assert.equal(await beforeUnloadBlocked(), false);
   assert.deepEqual(await page.evaluate(() => window.__CONFIG_TEST__.guard), { dirty: false, busy: false });
-  pass("tab, agent, refresh and beforeunload protect unsaved drafts; confirmed discard stays agent-bound");
+  pass("tab, agent, retry and beforeunload protect unsaved drafts; confirmed discard stays agent-bound");
 
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
   const editor = file("settings.json").locator("textarea");
@@ -179,8 +190,8 @@ try {
   // 慢读取不锁住导航；旧页的晚到响应不得覆盖新 Agent。
   await page.evaluate(() => { window.__CONFIG_TEST__.holdReads = true; });
   await refresh();
-  await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length === 1);
-  await page.locator(".sidebar").getByRole("button", { name: "Codex", exact: true }).click();
+  await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length >= 1);
+  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Codex" });
   // StrictMode 挂载会发出两次读取，释放最后一个请求以验证最新代次。
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length >= 2);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.at(-1).resolve(); });
@@ -298,7 +309,7 @@ try {
 
   for (const viewport of [{ width: 960, height: 600 }, { width: 1600, height: 1000 }]) {
     await page.setViewportSize(viewport);
-    await page.locator(".detail-pane").evaluate((el) => { el.scrollTop = 0; });
+    await page.locator(".main.single").evaluate((el) => { el.scrollTop = 0; });
     assert.ok(await page.getByRole("button", { name: "保存为方案", exact: true }).isVisible());
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.screenshot({ path: path.join(artifacts, `config-${viewport.width}-${engine}.png`) });

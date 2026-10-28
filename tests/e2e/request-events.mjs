@@ -35,7 +35,7 @@ try {
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: true, running: true, authorization: 'enabled' };
       if (cmd === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
-      if (cmd === 'read_usage_summary') return { rows: [], health: {}, revision: '0' };
+      if (cmd === 'read_usage_summary') return { rows: fixture.events.map(e => ({ ...e, bucketStart: null, date: new Date(e.time).toISOString().slice(0,10), totalTokens: e.inputTokens + e.outputTokens + e.unclassifiedTokens })), health: {}, revision: '0' };
       if (cmd === 'read_request_events') {
         if (state.fail) throw new Error('fixture read failure');
         const q = args.query;
@@ -66,6 +66,10 @@ try {
   const beforeExpand = await table.locator('th').nth(5).boundingBox();
   await codex.locator('.request-expand').click();
   assert.equal(await table.locator('.request-detail dl > div').filter({ has: page.getByText('原始来源类型', { exact: true }) }).locator('dd').textContent(), 'vscode');
+  const codexEvent = fixture.events.find(event => event.agent === 'codex');
+  for (const [label, count, recorded] of [['缓存读取', codexEvent.cacheReadTokens, codexEvent.cacheReadRecorded], ['缓存写入', codexEvent.cacheWriteTokens, codexEvent.cacheWriteRecorded], ['思考 Token', codexEvent.reasoningTokens, codexEvent.reasoningRecorded]]) {
+    assert.equal(await table.locator('.request-detail dl > div').filter({ has: page.getByText(label, { exact: true }) }).locator('dd').textContent(), recorded ? count.toLocaleString('en-US') : '未记录');
+  }
   const afterExpand = await table.locator('th').nth(5).boundingBox();
   assert.equal(afterExpand.width, beforeExpand.width, 'expanded metadata must not resize status columns');
   await codex.locator('.request-expand').click();
@@ -81,7 +85,8 @@ try {
   assert.equal(await table.getByRole('button', { name: '加载更多', exact: true }).count(), 0);
   console.log(`PASS: real Rust fixture renders 110 events with keyset paging, approximate TPS and turn TTFT (${engine})`);
 
-  await page.getByLabel('请求 Agent', { exact: true }).selectOption('claude');
+  const selectAgent = name => page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption({ label: name });
+  await selectAgent('Claude Code');
   await page.getByText('已加载 50 / 109 条', { exact: true }).waitFor();
   await page.getByLabel('请求结果', { exact: true }).selectOption('failed');
   await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
@@ -101,11 +106,14 @@ try {
   await table.locator('.request-session[data-copied="true"] .lucide-check').waitFor();
   assert.equal(await page.getByText('复制失败，可以展开详情选择会话 ID', { exact: true }).count(), 0);
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(c => c.cmd.includes('clipboard') && c.args.text === 'session-one')));
-  await page.getByLabel('请求模型', { exact: true }).selectOption('claude-sonnet');
+  await page.getByLabel('统计模型', { exact: true }).selectOption('claude-sonnet');
   await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
-  await table.getByRole('button', { name: '清除筛选', exact: true }).click();
+  await table.getByRole('button', { name: '清除结果筛选', exact: true }).click();
+  assert.equal(await page.getByLabel('统计模型', { exact: true }).inputValue(), 'claude-sonnet');
+  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'claude');
+  await selectAgent('全部 Agent');
   await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('统计 Agent', { exact: true }).inputValue(), 'all');
+  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'all');
   console.log(`PASS: shared Agent/model filters, results, details, unknown vs zero, and copying full session IDs (${engine})`);
 
   await page.evaluate(() => { window.__EVENTS__.revision = '2'; });
@@ -115,13 +123,13 @@ try {
   await page.evaluate(() => { window.__EVENTS__.delay = true; });
   await table.getByRole('button', { name: '加载更多', exact: true }).click();
   await page.waitForFunction(() => !!window.__EVENTS__.release);
-  await page.getByLabel('请求 Agent', { exact: true }).selectOption('codex');
+  await selectAgent('Codex');
   await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
   await page.evaluate(() => window.__EVENTS__.release());
   await page.waitForTimeout(50);
   assert.equal(await table.locator('tbody > tr').count(), 1);
   await page.evaluate(() => { window.__EVENTS__.fail = true; });
-  await page.getByLabel('请求 Agent', { exact: true }).selectOption('all');
+  await selectAgent('全部 Agent');
   await table.getByRole('alert').waitFor();
   await page.evaluate(() => { window.__EVENTS__.fail = false; });
   await table.getByRole('button', { name: '重试', exact: true }).click();

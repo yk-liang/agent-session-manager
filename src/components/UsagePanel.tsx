@@ -5,9 +5,8 @@ import * as api from "../api";
 import { AutoRefreshScheduler } from "../autoRefresh";
 import { useDelayedBusy } from "../useDelayedBusy";
 import { observeSessionChanges } from "../sessionWatch";
-import { dateKey, formatTokens, formatUsageField, modelTotals, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
+import { dateKey, formatTokens, formatUsageField, modelTotals, modelUsageCells, sumModelUsage, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
 import type { AgentInfo, UsageSummary, UsageSyncProgress } from "../types";
-import AgentIcon from "./AgentIcon";
 import CollectorControl from "./CollectorControl";
 import RequestEvents from "./RequestEvents";
 import HelpTip from "./HelpTip";
@@ -17,7 +16,7 @@ import { ModelLabel } from "./SessionModel";
 const snapshots = new Map<string, UsageSummary>();
 const periods: [UsagePeriod, string][] = [["today", "今日"], ["week", "近 7 天"], ["month", "近 30 天"], ["all", "全部"]];
 
-export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
+export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; agent: string }) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [queryError, setQueryError] = useState("");
   const [queryLoading, setQueryLoading] = useState(true);
@@ -27,9 +26,12 @@ export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
   const [period, setPeriod] = useState<UsagePeriod>("month");
-  const [agent, setAgent] = useState("all");
-  const [model, setModel] = useState("all");
+  const [modelFilter, setModelFilter] = useState({ agent, value: "all" });
+  // Agent 改变的首帧就移除旧模型条件，避免发出跨来源的过期请求。
+  const model = modelFilter.agent === agent ? modelFilter.value : "all";
+  const setModel = (value: string) => setModelFilter({ agent, value });
   const [expanded, setExpanded] = useState(false);
+  useEffect(() => { setModelFilter({ agent, value: "all" }); setExpanded(false); }, [agent]);
   const [now, setNow] = useState(() => new Date());
   const [watchError, setWatchError] = useState(false);
   const [eventsRevision, setEventsRevision] = useState(0);
@@ -123,7 +125,9 @@ export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
   const scopedRows = allRows.filter(r => agent === "all" || r.agent === agent);
   const rows = scopedRows.filter(r => model === "all" || r.model === model);
   const totals = sumTokens(rows);
-  const available = summary !== null && (hasSynced || !busy || allRows.length > 0);
+  // 其他 Agent 的记录不能证明当前来源已完成导入，尚未读到的用量不能显示为 0。
+  const scopePending = agent === "all" ? busy : pending.has(agent);
+  const available = summary !== null && (hasSynced || !scopePending || scopedRows.length > 0);
   const scopedHealth = Object.entries(summary?.health ?? {}).filter(([id]) => agent === "all" || id === agent).map(([, h]) => h);
   const partial = scopedHealth.some(h => h.partial) || rows.some(r => r.partial) || !!queryError ||
     agents.some(a => (agent === "all" || a.id === agent) && errors.has(a.id));
@@ -131,7 +135,6 @@ export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
   const models = modelTotals(rows);
   const series = usageSeries(rows, period, now);
   const value = (number: number) => available ? formatTokens(number) : "—";
-  const changeAgent = (id: string) => { setAgent(id); setModel("all"); setExpanded(false); };
   // 已有记录时安静地补入变化；只有尚无可展示数据的历史导入才显示进度。
   const showImportProgress = showSync && busy && !available;
   const activeName = agents.find(a => a.id === progress?.agent)?.displayName;
@@ -153,13 +156,14 @@ export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
         <p>首次读取可能较慢，可继续使用其他页面。</p>
       </div>}
       {queryError && <div className="usage-query-error" role="alert">用量查询失败：{queryError}<button onClick={() => setEventsRevision(n => n + 1)}>重试查询</button></div>}
-      {errors.size > 0 && <div className="usage-sync-error" role="alert">部分来源暂时无法更新，已保存记录仍可查看。<button disabled={busy} onClick={() => setRetryKey(key => key + 1)}>重试同步</button></div>}
+      {errors.size > 0 && <div className="usage-sync-error" role="alert"><span>
+        {[...errors].map(([id, error], index) => <span key={id} className="usage-source-error" title={error}>{index > 0 && "、"}{agents.find(a => a.id === id)?.displayName ?? id}</span>)}
+        暂时无法更新，已保存记录仍可查看。</span><button disabled={busy} onClick={() => setRetryKey(key => key + 1)}>重试同步</button></div>}
       <div className="usage-filters">
         <div className="usage-periods" role="group" aria-label="统计时间">
           {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} className={period === id ? "active" : ""} onClick={() => setPeriod(id)}>{label}</button>)}
         </div>
         <div className="usage-selects">
-          <span className="usage-select"><select aria-label="统计 Agent" value={agent} onChange={e => changeAgent(e.target.value)}><option value="all">全部 Agent</option>{agents.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
           <span className="usage-select"><select aria-label="统计模型" value={model} onChange={e => { setModel(e.target.value); setExpanded(false); }}><option value="all">全部模型</option>{model !== "all" && !options.some(m => m.model === model) && <option value={model}>{model}</option>}{options.map(m => <option key={m.model} value={m.model}>{m.modelName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
         </div>
       </div>
@@ -169,28 +173,20 @@ export default function UsagePanel({ agents }: { agents: AgentInfo[] }) {
       <section className="usage-section usage-trend"><h2>{period === "today" ? "每小时趋势" : "每日趋势"}<small className="usage-time-basis">按请求发生时间 · 本地时区</small></h2>
         {available ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{queryError ? "暂时无法读取用量，请重试查询" : busy ? "正在同步历史用量…" : queryLoading ? "正在读取已保存用量…" : "此时间范围暂无记录"}</div>}
       </section>
-      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={busy && !available} onAgentChange={changeAgent} onModelChange={setModel} />
+      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={busy && !available} />
       <div className="usage-breakdowns">
-        <section className="usage-section"><h2>按 Agent</h2><div className="usage-agent-list">
-          {agents.map(a => {
-            const agentRows = allRows.filter(r => r.agent === a.id && (model === "all" || r.model === model));
-            const total = sumTokens(agentRows);
-            return <button key={a.id} className={`usage-agent-row${agent === a.id ? " selected" : ""}`} aria-pressed={agent === a.id} onClick={() => changeAgent(agent === a.id ? "all" : a.id)}>
-              <span className="usage-agent-name"><AgentIcon agent={a.id} />{a.displayName}</span>
-              <span className="usage-agent-value" title={summary?.health[a.id]?.partial ? "部分统计" : undefined}>{showImportProgress && pending.has(a.id) && <UiIcon icon={LoaderCircle} className="usage-spin" />}{summary && (hasSynced || !pending.has(a.id) || agentRows.length > 0) ? formatTokens(total.totalTokens) : "—"}</span>
-              {errors.has(a.id) && !pending.has(a.id) && <span className="usage-source-error">同步失败：{errors.get(a.id)}</span>}
-            </button>;
-          })}
-        </div></section>
-        <section className="usage-section usage-models"><h2>按模型</h2>
-          {models.length > 0 ? <><table><thead><tr><th>模型</th><th>Token</th></tr></thead><tbody>
-            {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><td><ModelLabel id={m.model} name={m.modelName} /></td><td title={m.partial ? "部分统计" : undefined}>{formatTokens(m.totalTokens)}</td></tr>)}
-          </tbody></table>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">{queryError ? "模型用量暂不可用" : busy ? "等待历史用量同步" : "暂无模型记录"}</div>}
+        <section className="usage-section usage-models"><h2>按模型<HelpTip label="模型统计说明">
+          输入包含缓存；缓存率 = 缓存读取 ÷ 输入。
+          <p>成本仅汇总日志记录的美元金额。“—”为未知，“≥”为已知下限。</p>
+        </HelpTip></h2>
+          {models.length > 0 ? <><div className="usage-model-table-scroll" tabIndex={0} role="region" aria-label="按模型用量明细"><table>
+            <colgroup>{[24, 10, 13, 13, 14, 11, 15].map((width, i) => <col key={i} style={{ width: `${width}%` }} />)}</colgroup>
+            <thead><tr>{["模型", "请求", "输入", "输出", "缓存读", "缓存率", "成本 (USD)"].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead><tbody>
+              {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><th scope="row"><ModelLabel id={m.model} name={m.modelName} /></th>{modelUsageCells(m).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr>)}
+            </tbody><tfoot><tr><th scope="row">合计</th>{modelUsageCells(sumModelUsage(rows)).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr></tfoot>
+          </table></div>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">{queryError ? "模型用量暂不可用" : busy ? "等待历史用量同步" : "暂无模型记录"}</div>}
         </section>
       </div>
-      <details className="usage-details"><summary>缓存与思考明细<UiIcon icon={ChevronDown} /></summary><div className="usage-detail-grid">
-        {([["缓存读取", totals.cacheReadTokens, totals.cacheReadRecorded], ["缓存写入", totals.cacheWriteTokens, totals.cacheWriteRecorded], ["思考", totals.reasoningTokens, totals.reasoningRecorded], ["未分项", totals.unclassifiedTokens, true]] as const).map(([label, count, recorded]) => <div key={label}><span>{label}</span><strong>{available ? recorded ? formatTokens(count) : "未提供" : "—"}</strong></div>)}
-      </div></details>
     </div>
   </main>;
 }

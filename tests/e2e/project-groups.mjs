@@ -78,12 +78,12 @@ try {
 
   await page.getByRole("searchbox").fill("");
   await page.evaluate(()=>window.__GROUP_TEST__.ids=[]);
-  await page.locator(".agent-item.active").click();
+  await page.evaluate(() => { window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus")); });
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===4);
   assert.equal(await group.count(),0);
   assert.equal(await page.locator(".sidebar-projects-header .project-item.active").count(),1);
   await page.evaluate(()=>window.__GROUP_TEST__.ids=["a","b"]);
-  await page.locator(".agent-item.active").click();
+  await page.evaluate(() => { window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus")); });
   await group.waitFor();await group.click();
   assert.equal(await page.locator(".session-card").count(),2);
   pass("membership refresh restores directory grouping and clears a vanished virtual selection");
@@ -99,7 +99,7 @@ try {
   assert.equal(await page.locator(".session-card",{hasText:"同目录有项目会话"}).count(),1);
   pass("batch actions use real source projects and leave assigned sessions untouched");
 
-  await page.locator(".sidebar").getByRole("button",{name:"Qoder CLI",exact:true}).click();
+  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
   await page.locator(".session-card",{hasText:"另一 Agent 会话"}).waitFor();
   assert.equal(await group.count(),0);
   assert.equal(await page.locator(".session-project-path").count(),1);

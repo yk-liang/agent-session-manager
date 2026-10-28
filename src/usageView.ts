@@ -1,4 +1,4 @@
-import type { UsageReport, UsageRow, UsageTokens, UsageSummaryQuery, UsageSummaryRow } from "./types";
+import type { UsageReport, UsageRow, UsageTokens, UsageSummaryQuery, UsageSummaryRow, UsageRequestMetrics } from "./types";
 
 export type UsagePeriod = "today" | "week" | "month" | "all";
 export const emptyTokens = (): UsageTokens => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, totalTokens: 0, inputRecorded: false, outputRecorded: false, inputIncomplete: false, outputIncomplete: false, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false });
@@ -41,13 +41,47 @@ export function dailySeries(rows: UsageRow[], period: UsagePeriod, now: Date): (
   }
   return result;
 }
-export function modelTotals(rows: UsageRow[]) {
-  const models = new Map<string, UsageTokens & { model: string; modelName: string; partial: boolean }>();
+export interface ModelUsage extends UsageTokens, UsageRequestMetrics { partial: boolean }
+type ModelUsageRow = UsageRow & Partial<UsageRequestMetrics>;
+const emptyModelUsage = (): ModelUsage => ({ ...emptyTokens(), partial: false, requestCount: 0, requestCountIncomplete: false, costUsd: null, costIncomplete: false, cacheReadIncomplete: false, cacheRateUnavailable: false });
+function addModelUsage(target: ModelUsage, row: ModelUsageRow) {
+  addTokens(target, row);
+  target.partial ||= row.partial;
+  target.requestCount += row.requestCount ?? 0;
+  target.requestCountIncomplete ||= row.requestCountIncomplete ?? true;
+  if (row.costUsd != null) target.costUsd = (target.costUsd ?? 0) + row.costUsd;
+  target.costIncomplete ||= row.costIncomplete ?? true;
+  target.cacheReadIncomplete ||= row.cacheReadIncomplete ?? true;
+  target.cacheRateUnavailable ||= row.cacheRateUnavailable ?? true;
+  return target;
+}
+export function sumModelUsage(rows: ModelUsageRow[]): ModelUsage { return rows.reduce(addModelUsage, emptyModelUsage()); }
+export function modelTotals(rows: ModelUsageRow[]) {
+  const models = new Map<string, ModelUsage & { model: string; modelName: string }>();
   for (const row of rows) {
-    const value = models.get(row.model) ?? { ...emptyTokens(), model: row.model, modelName: row.modelName, partial: false };
-    addTokens(value, row); value.partial ||= row.partial; models.set(row.model, value);
+    const value = models.get(row.model) ?? { ...emptyModelUsage(), model: row.model, modelName: row.modelName };
+    addModelUsage(value, row); models.set(row.model, value);
   }
   return [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model));
+}
+const compactNumber = (value: number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+export function modelUsageCells(row: ModelUsage): { text: string; title: string }[] {
+  const count = (value: number, recorded: boolean | undefined, incomplete: boolean | undefined, unit: string) => ({
+    text: recorded ? `${incomplete ? "≥ " : ""}${compactNumber(value)}` : "—",
+    title: recorded ? `${incomplete ? "已记录下限：" : ""}${formatTokens(value)} ${unit}` : "未记录",
+  });
+  // 对合计后的分子/分母求比值，不能平均各请求或各模型的百分比。
+  const rate = !row.cacheRateUnavailable && row.inputRecorded && row.cacheReadRecorded && !row.inputIncomplete && row.inputTokens > 0 && row.cacheReadTokens <= row.inputTokens
+    ? row.cacheReadTokens / row.inputTokens * 100 : null;
+  const cost = row.costUsd == null ? "—" : `${row.costIncomplete ? "≥ " : ""}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(row.costUsd)}`;
+  return [
+    count(row.requestCount, row.requestCount > 0 || !row.requestCountIncomplete, row.requestCountIncomplete, "次请求"),
+    count(row.inputTokens, row.inputRecorded, row.inputIncomplete, "Token"),
+    count(row.outputTokens, row.outputRecorded, row.outputIncomplete, "Token"),
+    count(row.cacheReadTokens, row.cacheReadRecorded, row.cacheReadIncomplete, "Token"),
+    { text: rate == null ? "—" : `${rate.toFixed(2)}%`, title: rate == null ? "输入或缓存记录不足，无法计算" : "缓存读取 ÷ 输入（输入含缓存）" },
+    { text: cost, title: row.costUsd == null ? "日志未记录成本" : `${row.costIncomplete ? "仅部分请求记录成本；" : ""}已记录 ${row.costUsd.toFixed(6)} USD` },
+  ];
 }
 export function formatTokens(value: number, compact = false) {
   return new Intl.NumberFormat("zh-CN", compact ? { notation: "compact", maximumFractionDigits: 1 } : { maximumFractionDigits: 0 }).format(value);

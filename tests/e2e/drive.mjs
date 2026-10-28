@@ -274,7 +274,10 @@ const browser =
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 await page.addInitScript(initScript + "\n(" + configMockBootstrap.toString() + ")(" + JSON.stringify(configFixtures) + ");");
 const pageErrors = [];
-page.on("console", (m) => console.log("[console]", m.type(), m.text()));
+page.on("console", (m) => {
+  console.log("[console]", m.type(), m.text());
+  if (m.type() === "error") pageErrors.push(m.text());
+});
 page.on("pageerror", (e) => {
   pageErrors.push(e.message);
   console.log("[pageerror]", e.message);
@@ -290,21 +293,18 @@ await page.getByRole('searchbox').fill('');
 await page.screenshot({ path: `${artifactDir}/qsm-1-list-${engine}.png` });
 console.log("STEP1 list view OK");
 
-// 重点当前 agent 必须触发重载，会话卡片不得清零
+// Selecting the current Agent is idempotent; automatic updates own rescanning.
 const callsBefore = await page.evaluate(() => window.__CATALOG_CALLS__);
-await page.locator(".agent-item", { hasText: "Qoder CLI" }).click();
-await page.waitForFunction((prev) => window.__CATALOG_CALLS__ > prev, callsBefore, {
-  timeout: 3000,
-});
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
 await page.waitForSelector(".session-card", { timeout: 5000 });
 const callsAfter = await page.evaluate(() => window.__CATALOG_CALLS__);
 const cardsAfter = await page.locator(".session-card").count();
 console.log(
-  `STEP1f re-click current agent reloads: calls ${callsBefore} -> ${callsAfter}, cards=${cardsAfter} -> ${
-    callsAfter > callsBefore && cardsAfter > 0 ? "OK" : "FAILED"
+  `STEP1f selecting current agent keeps state: calls ${callsBefore} -> ${callsAfter}, cards=${cardsAfter} -> ${
+    callsAfter === callsBefore && cardsAfter > 0 ? "OK" : "FAILED"
   }`,
 );
-if (callsAfter <= callsBefore || cardsAfter === 0) process.exit(1);
+if (callsAfter !== callsBefore || cardsAfter === 0) process.exit(1);
 
 // 先正常打开 Qoder 会话
 await page.click(".session-card");
@@ -323,7 +323,7 @@ await page.click(".session-card");
 const detailWhileLoading = await page.locator(".detail-body").count();
 console.log("STEP1a old detail cleared on re-open:", detailWhileLoading === 0 ? "OK" : "FAILED");
 if (detailWhileLoading !== 0) process.exit(1);
-await page.locator(".agent-item", { hasText: "Codex" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Codex" });
 if (process.env.CATALOG_FAIL === "1") {
   // catalog 失败时不得残留旧 agent 的列表
   await page.waitForTimeout(500);
@@ -356,7 +356,7 @@ console.log("STEP1e codex detail:", codexText.includes("codex 助手正文") ? "
 if (!codexText.includes("codex 助手正文")) process.exit(1);
 
 // 切回 Qoder，继续后续流程
-await page.locator(".agent-item", { hasText: "Qoder CLI" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
 await page.waitForSelector('.session-card:has-text("测试会话")', { timeout: 5000 });
 
 await page.click(".session-card");
@@ -458,25 +458,25 @@ await page.locator(".tabs button", { hasText: "会话" }).click();
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 }]) {
   await page.setViewportSize(viewport);
-  await page.locator(".agent-item", { hasText: "Qoder CLI" }).click();
+  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
-  const agentButtons = page.locator(".sidebar .agent-item");
+  const agentControl = page.getByRole("combobox", { name: "当前 Agent" });
   const allSessions = page.locator(".sidebar .project-item", { hasText: "全部会话" });
-  const agentPositions = await agentButtons.evaluateAll((elements) => elements.map((el) => el.getBoundingClientRect().y));
+  const agentPosition = await agentControl.boundingBox();
   const allPosition = await allSessions.boundingBox();
-  assert.equal(agentPositions.length, 5);
-  await page.locator(".sidebar .project-item:not(.agent-item)").nth(1).hover();
+  assert.equal(await agentControl.locator("option").count(), 5);
+  await page.locator(".sidebar .project-item").nth(1).hover();
   await page.mouse.wheel(0, 100000);
   await page.waitForFunction(() => {
-    const items = document.querySelectorAll(".sidebar .project-item:not(.agent-item)");
+    const items = document.querySelectorAll(".sidebar .project-item");
     const last = items[items.length - 1].getBoundingClientRect();
     const sidebar = document.querySelector(".sidebar").getBoundingClientRect();
     return last.top >= sidebar.top && last.bottom <= sidebar.bottom;
   });
   assert.deepEqual(
-    await agentButtons.evaluateAll((elements) => elements.map((el) => el.getBoundingClientRect().y)),
-    agentPositions,
-    "Agent buttons must remain fixed while scrolling projects",
+    await agentControl.boundingBox(),
+    agentPosition,
+    "Agent control must remain fixed while scrolling projects",
   );
   assert.equal((await allSessions.boundingBox()).y, allPosition.y, "All sessions must stay fixed");
   assert.equal(await page.locator(".sidebar").evaluate((el) => el.scrollTop), 0);
@@ -493,29 +493,28 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), projectScroll);
 
-  const codexPosition = await page.locator(".agent-item", { hasText: "Codex" }).boundingBox();
-  assert.ok(codexPosition.y >= 48 && codexPosition.y + codexPosition.height <= viewport.height);
-  await page.mouse.click(codexPosition.x + codexPosition.width / 2, codexPosition.y + codexPosition.height / 2);
+  assert.ok(agentPosition.y >= 0 && agentPosition.y + agentPosition.height <= 48);
+  await agentControl.selectOption("codex");
   await page.locator('.session-card:has-text("Codex 会话")').waitFor();
   assert.equal(await page.locator(".sidebar-project-list .project-item").count(), 1);
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), 0);
-  assert.ok((await page.locator(".agent-item.active").textContent()).includes("Codex"));
+  assert.equal(await agentControl.inputValue(), "codex");
   console.log(`STEP12 sidebar scroll, fixed actions and agent switch at ${viewport.width}x${viewport.height}: OK`);
 }
 
-await page.locator(".sidebar").getByRole("button", { name: "Pi", exact: true }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Pi" });
 await page.locator(".sidebar .empty-hint", { hasText: "未发现会话" }).waitFor();
-assert.equal(await page.locator(".sidebar .agent-item").count(), 5);
+assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).locator("option").count(), 5);
 assert.equal(await page.locator(".sidebar-project-list .project-item").count(), 0);
 assert.ok((await page.locator(".sidebar-projects-header").textContent()).includes("0 个会话"));
 await page.locator(".tabs button", { hasText: "配置" }).click();
-assert.equal(await page.locator(".sidebar .agent-item").count(), 5);
+assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).locator("option").count(), 5);
 assert.equal(await page.locator(".sidebar-project-list, .sidebar-projects-header").count(), 0);
-await page.locator(".sidebar .agent-item", { hasText: "Claude Code" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" });
 await page.locator(".config-file").waitFor();
-assert.ok((await page.locator(".sidebar .agent-item.active").textContent()).includes("Claude Code"));
+assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).inputValue(), "claude");
 assert.deepEqual(pageErrors, []);
-console.log("STEP12b empty projects and config-only sidebar remain usable: OK");
+console.log("STEP12b empty projects and full-width configuration remain usable: OK");
 
 const batchSessions = [
   { sessionId: "shared-id", projectDir: "project-a", title: "项目 A 的同 ID 会话" },
@@ -530,7 +529,7 @@ await page.evaluate((sessions) => {
   window.__CATALOG_BY_AGENT__.qoder = { projects, sessions, warnings: [] };
 }, batchSessions);
 await page.locator(".tabs button", { hasText: "会话" }).click();
-await page.locator(".agent-item", { hasText: "Qoder CLI" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input[type=checkbox]").count(), 4);
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
@@ -561,9 +560,9 @@ assert.equal(await page.locator(".batch-toolbar").count(), 0);
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 2);
-await page.locator(".agent-item", { hasText: "Claude Code" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" });
 assert.equal(await page.locator(".batch-toolbar").count(), 0);
-await page.locator(".agent-item", { hasText: "Qoder CLI" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 console.log("STEP13 selection, filtered select-all, confirmation cancellation and context isolation: OK");
@@ -593,11 +592,13 @@ assert.ok(await page.locator('.search-box input[type="search"]').isDisabled());
 assert.ok(await page.locator(".show-empty-toggle input").isDisabled());
 assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).count(), 0);
 assert.ok(await page.locator(".tabs button", { hasText: "配置" }).isDisabled());
-assert.ok(await page.locator(".sidebar .agent-item", { hasText: "Claude Code" }).isDisabled());
+assert.ok(await page.getByRole("combobox", { name: "当前 Agent" }).isDisabled());
 assert.ok(await page.locator(".sidebar-projects-header button").isDisabled());
 assert.ok(await page.locator(".session-card input").first().isDisabled());
-await page.locator(".agent-item", { hasText: "Claude Code" }).evaluate((button) => button.click());
-assert.ok((await page.locator(".agent-item.active").textContent()).includes("Qoder CLI"));
+await page.getByRole("combobox", { name: "当前 Agent" }).evaluate(select => {
+  select.value = "claude"; select.dispatchEvent(new Event("change", { bubbles: true }));
+});
+assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).inputValue(), "qoder");
 await page.evaluate(() => window.__PENDING_DELETES__.shift()());
 await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 2 && window.__PENDING_DELETES__.length === 1, batchStart);
 assert.ok((await page.locator(".batch-status").textContent()).includes("1 / 3"));
@@ -642,7 +643,7 @@ await page.evaluate((session) => {
     sessions: [session], warnings: [],
   };
 }, batchSessions[3]);
-await page.locator(".agent-item", { hasText: "OpenCode" }).click();
+await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "OpenCode" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
