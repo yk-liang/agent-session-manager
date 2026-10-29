@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import UiIcon from "./components/UiIcon";
-import appIcon from "./assets/brand/app-icon-dark.svg";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
@@ -377,10 +376,6 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
-          <img className="brand-icon" src={appIcon} alt="" aria-hidden="true" />
-          Agent Session Manager
-        </div>
         <AgentSwitcher agents={agents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
           disabled={deleting || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">

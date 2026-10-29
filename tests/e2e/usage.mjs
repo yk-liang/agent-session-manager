@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -59,7 +60,7 @@ try {
  await page.getByRole('button', { name: '用量', exact: true }).click();
  const total = async () => (await page.locator('.usage-stat strong').first().textContent()).replace(/[^0-9]/g, '');
  const waitTotal = n => page.waitForFunction(n => document.querySelector('.usage-stat strong')?.textContent.replace(/[^0-9]/g, '') === n, n);
- const selectAgent = name => page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption({ label: name });
+ const selectAgent = name => chooseAgent(page, { label: name });
  await waitTotal('1100');
  assert.equal(await page.locator('.usage-details,.usage-agent-tabs').count(), 0);
  const modelCells = selector => page.locator(selector).locator('td').allTextContents();
@@ -96,7 +97,7 @@ try {
  await page.getByLabel('统计模型').selectOption('claude-fixture'); await waitTotal('330');
  await selectAgent('Claude Code');
  assert.equal(await page.getByLabel('统计模型').inputValue(), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
- assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'claude');
+ assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
  await selectAgent('全部 Agent');
  for (const [label, count] of [['近 7 天', 7], ['近 30 天', 30]]) {
   await page.getByRole('button', { name: label, exact: true }).click(); await waitTotal('1100');

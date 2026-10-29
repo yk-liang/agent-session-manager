@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import {chromium,webkit} from "playwright";
 import assert from "node:assert/strict";
@@ -66,7 +67,7 @@ try{
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===2);
   assert.equal(await page.locator(".session-card",{hasText:"独立工作区"}).count(),1);
   pass("batch operations preserve same-ID sessions belonging to other source directories");
-  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Codex" });
+  await chooseAgent(page, { label: "Codex" });
   await page.locator(".session-card",{hasText:"Codex 会话"}).waitFor();
   assert.equal(await root.count(),0);assert.equal(await unassigned.count(),1);
   assert.deepEqual(errors,[]);pass("agent switching clears Qoder root hints while retaining Codex classification");

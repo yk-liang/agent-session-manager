@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from "playwright";
 import assert from "node:assert/strict";
@@ -99,7 +100,7 @@ try {
   assert.equal(await page.locator(".session-card",{hasText:"同目录有项目会话"}).count(),1);
   pass("batch actions use real source projects and leave assigned sessions untouched");
 
-  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Qoder CLI" });
+  await chooseAgent(page, { label: "Qoder CLI" });
   await page.locator(".session-card",{hasText:"另一 Agent 会话"}).waitFor();
   assert.equal(await group.count(),0);
   assert.equal(await page.locator(".session-project-path").count(),1);

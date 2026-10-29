@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from '../helpers/browser.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -87,10 +88,10 @@ try {
   await page.waitForFunction(() => window.__COLD__.active === 'claude');
   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
   assert.equal(await page.locator('.usage-sync-status').count(), 0, 'once saved results are available, remaining sources update quietly');
-  await page.getByRole('combobox', { name: '当前 Agent' }).selectOption('codex');
+  await chooseAgent(page, 'codex');
   assert.equal(await page.locator('.usage-stat strong').first().textContent(), '—', 'another Agent finishing cannot turn this pending source into measured zero');
   await page.getByText('正在同步历史用量…', { exact: true }).waitFor();
-  await page.getByRole('combobox', { name: '当前 Agent' }).selectOption('all');
+  await chooseAgent(page, 'all');
   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
   await assertLayout();
   await page.locator('.usage-trend').screenshot({ path: path.join(artifactDir, 'usage-chart-large-values.png') });

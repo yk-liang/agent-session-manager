@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from "playwright";
 import assert from "node:assert/strict";
@@ -15,7 +16,7 @@ mkdirSync(artifacts, { recursive: true });
 let checks = 0;
 const pass = (label) => { checks++; console.log(`PASS ${checks}: ${label}`); };
 const file = (key) => page.locator(`.config-file[data-file-key="${key}"]`);
-const agent = async (name) => { await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: name }); await page.locator(".config-file").first().waitFor(); };
+const agent = async (name) => { await chooseAgent(page, { label: name }); await page.locator(".config-file").first().waitFor(); };
 const refresh = async () => {
   const retry = page.getByRole("button", { name: "重试读取", exact: true });
   if (await retry.count()) await retry.click(); else {
@@ -49,17 +50,17 @@ try {
   await backupHelp.hover();
   await page.getByRole("tooltip").waitFor();
   assert.ok((await page.getByRole("tooltip").textContent()).includes("自动备份"));
-  await page.locator(".brand").hover();
+  await page.locator(".topbar").hover({ position: { x: 2, y: 2 } });
   await page.getByRole("tooltip").waitFor({ state: "hidden" });
   await backupHelp.click();
-  await page.locator(".brand").hover();
+  await page.locator(".topbar").hover({ position: { x: 2, y: 2 } });
   await page.getByRole("tooltip").waitFor();
   const tipBox = await page.getByRole("tooltip").boundingBox();
   assert.ok(tipBox.y >= 0 && tipBox.x >= 0 && tipBox.x + tipBox.width <= 1280);
   await page.keyboard.press("Escape");
   await page.getByRole("tooltip").waitFor({ state: "hidden" });
   await backupHelp.click();
-  await page.locator(".brand").click();
+  await page.locator(".topbar").click({ position: { x: 2, y: 2 } });
   await page.getByRole("tooltip").waitFor({ state: "hidden" });
   pass("help stays hidden by default, supports hover, pinned click, Escape and outside dismissal");
 
@@ -95,7 +96,7 @@ try {
   await file("settings.json").locator("textarea").fill('{"unsaved":true}');
   assert.ok(await page.getByRole("button", { name: "保存为方案", exact: true }).isDisabled());
   assert.ok(await page.getByRole("button", { name: "应用", exact: true }).first().isDisabled());
-  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), () => page.getByRole("button", { name: "用量", exact: true }).click(), () => page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" })]) {
+  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), () => page.getByRole("button", { name: "用量", exact: true }).click(), () => chooseAgent(page, { label: "Claude Code" })]) {
     await action();
     await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
@@ -114,7 +115,7 @@ try {
   assert.ok(await page.getByRole("status").filter({ hasText: "1 个文件未保存" }).isVisible());
   assert.ok(await beforeUnloadBlocked(), "failed discard-refresh must still protect the surviving draft");
   assert.deepEqual(await page.evaluate(() => window.__CONFIG_TEST__.guard), { dirty: true, busy: false });
-  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" }), nativeExit]) {
+  for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => chooseAgent(page, { label: "Claude Code" }), nativeExit]) {
     await action();
     await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
@@ -157,7 +158,7 @@ try {
 
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
   await file("settings.json").locator("textarea").fill('{"discard":"agent"}');
-  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Claude Code" });
+  await chooseAgent(page, { label: "Claude Code" });
   await discard();
   await page.getByText("claude-demo", { exact: true }).waitFor();
   assert.equal(await page.locator("textarea").count(), 0);
@@ -191,7 +192,7 @@ try {
   await page.evaluate(() => { window.__CONFIG_TEST__.holdReads = true; });
   await refresh();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length >= 1);
-  await page.getByRole("combobox", { name: "当前 Agent", exact: true }).selectOption({ label: "Codex" });
+  await chooseAgent(page, { label: "Codex" });
   // StrictMode 挂载会发出两次读取，释放最后一个请求以验证最新代次。
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length >= 2);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.at(-1).resolve(); });

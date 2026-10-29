@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL } from '../helpers/browser.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ try {
   });
   await page.goto(baseURL);
   for (const [id, name] of [['qoder', 'Qoder CLI'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['pi', 'Pi']]) {
-    await page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption(id);
+    await chooseAgent(page, id);
     const open = page.getByRole('button', { name: '打开数据目录', exact: true });
     assert.equal(await open.getAttribute('title'), `在访达中打开 ${name} 数据目录`);
     await open.click();

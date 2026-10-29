@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from '../helpers/browser.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -85,7 +86,7 @@ try {
   assert.equal(await table.getByRole('button', { name: '加载更多', exact: true }).count(), 0);
   console.log(`PASS: real Rust fixture renders 110 events with keyset paging, approximate TPS and turn TTFT (${engine})`);
 
-  const selectAgent = name => page.getByRole('combobox', { name: '当前 Agent', exact: true }).selectOption({ label: name });
+  const selectAgent = name => chooseAgent(page, { label: name });
   await selectAgent('Claude Code');
   await page.getByText('已加载 50 / 109 条', { exact: true }).waitFor();
   await page.getByLabel('请求结果', { exact: true }).selectOption('failed');
@@ -110,10 +111,10 @@ try {
   await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
   await table.getByRole('button', { name: '清除结果筛选', exact: true }).click();
   assert.equal(await page.getByLabel('统计模型', { exact: true }).inputValue(), 'claude-sonnet');
-  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'claude');
+  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
   await selectAgent('全部 Agent');
   await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
-  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).inputValue(), 'all');
+  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'all');
   console.log(`PASS: shared Agent/model filters, results, details, unknown vs zero, and copying full session IDs (${engine})`);
 
   await page.evaluate(() => { window.__EVENTS__.revision = '2'; });

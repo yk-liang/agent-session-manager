@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -108,7 +109,7 @@ try {
   await search.fill('目标针');
   await page.waitForFunction(()=>window.__SEARCH_TEST__.pending.length===1);
   await page.evaluate(()=>window.__SEARCH_TEST__.hold=false);
-  await page.getByRole('combobox',{name:'当前 Agent',exact:true}).selectOption('codex');
+  await chooseAgent(page, 'codex');
   await page.locator('.session-card',{hasText:'另一 Agent 的记录'}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.pending.splice(0).forEach(resolve=>resolve()));
   assert.equal(await page.locator('.session-card').count(),1);

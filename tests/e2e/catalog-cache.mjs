@@ -1,3 +1,4 @@
+import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL } from "../helpers/browser.mjs";
 import { chromium, webkit } from "playwright";
 import assert from "node:assert/strict";
@@ -49,8 +50,8 @@ try {
       return null;
     } };
   });
-  const qoder = () => page.getByRole("combobox", { name: "当前 Agent" }).selectOption("qoder");
-  const codex = () => page.getByRole("combobox", { name: "当前 Agent" }).selectOption("codex");
+  const qoder = () => chooseAgent(page, "qoder");
+  const codex = () => chooseAgent(page, "codex");
   const cards = page.locator(".session-card");
   const reload = () => page.evaluate(() => {
     window.__CACHE_TEST__.allowFocus = true;
