@@ -257,6 +257,8 @@ export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics { agent: 
 export interface UsageSummary {
   rows: UsageSummaryRow[];
   health: Record<string, { partial: boolean; warnings: string[] }>;
+  // 与 rows 来自同一快照；空目录也必须完成同步后才能确认用量为 0。
+  syncedAgents: string[];
   revision: string;
 }
 export interface UsageSummaryQuery { from?: number; to?: number; bounds: number[] }
@@ -301,21 +303,22 @@ export interface RequestEvent extends Omit<UsageTokens, "totalTokens"> {
   request: RequestMetadata;
   outputTps: number | null;
 }
-export interface EventCursor { time: number; id: string; revision: string }
 export interface EventQuery {
   agent?: string;
   model?: string;
   status?: string;
   from?: number;
   to?: number;
-  cursor?: EventCursor;
+  page?: number;
   limit?: number;
+  // 自动同步时定位当前可见请求；主动跳页只使用 page。
+  anchor?: string;
 }
 export interface EventPage {
   events: RequestEvent[];
   total: number;
-  nextCursor: EventCursor | null;
+  page: number;
+  pageSize: number;
   revision: string;
-  reset: boolean;
   models: string[];
 }

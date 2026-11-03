@@ -30,6 +30,7 @@ fn cold_start_queries_remain_readable_during_a_bulk_write() {
     let started = Instant::now();
     let page = events::page(&mut reader.db, Default::default(), &|| false).unwrap();
     let summary = summary::read_at(&mut reader.db, Default::default(), &|| false).unwrap();
+    assert_eq!(summary.synced_agents, ["claude"]);
     assert_eq!(page.total, 1);
     assert_eq!(
         summary
@@ -152,9 +153,21 @@ fn cold_start_cancelled_import_keeps_committed_progress_and_wal_permissions() {
             0o600
         );
     }
+    assert!(
+        summary::read_from(&mut store, Default::default(), &|| false)
+            .unwrap()
+            .synced_agents
+            .is_empty()
+    );
     drop(store);
     let mut restarted = Store::open_with_ledger(Some(&cache), Some(&path));
     let synced = summary::sync_at("claude", &[logs], &mut restarted, &|| false).unwrap();
+    assert_eq!(
+        summary::read_from(&mut restarted, Default::default(), &|| false)
+            .unwrap()
+            .synced_agents,
+        ["claude"]
+    );
     assert_eq!((synced.checked_files, synced.changed_files), (5, 3));
     assert_eq!(
         events::page(
@@ -222,6 +235,13 @@ fn cold_start_large_import_is_queryable_and_restart_reads_no_unchanged_logs() {
         let report = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
         let tokens: u64 = report.rows.iter().map(|r| r.usage.total_tokens).sum();
         assert!(tokens == 0 || tokens == 32768 * 110);
+        if report.synced_agents.contains(&"claude".to_string()) {
+            assert_eq!(
+                tokens,
+                32768 * 110,
+                "completion must come from the same snapshot as all measured requests"
+            );
+        }
         slowest = slowest.max(query_started.elapsed());
         queries += 1;
         std::thread::sleep(Duration::from_millis(50));

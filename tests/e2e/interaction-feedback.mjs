@@ -40,11 +40,12 @@ try {
       if (command === 'collector_status') return { desired: false, running: false, authorization: 'signingRequired' };
       if (command === 'sync_request_events') {
         if (state.holdSync) await new Promise(resolve => state.releaseSync = resolve);
+        state.synced = true;
         return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
       }
       if (command === 'read_usage_summary') return { rows: state.total ? [{ agent: 'claude', model: 'fixture', modelName: 'fixture', date: '', bucketStart: args.query.bounds[0] ?? null,
-        inputTokens: state.total, outputTokens: 0, totalTokens: state.total, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false, partial: false }] : [], health: {}, revision: '1' };
-      if (command === 'read_request_events') return { events: [], models: [], total: 0, nextCursor: null, reset: false, revision: '1' };
+        inputTokens: state.total, outputTokens: 0, totalTokens: state.total, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false, partial: false }] : [], health: {}, syncedAgents: state.synced ? ['claude'] : [], revision: '1' };
+      if (command === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
     } };
   });

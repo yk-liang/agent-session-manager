@@ -335,7 +335,7 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
 }
 
 #[test]
-fn request_events_filter_keyset_paging_and_new_data_revision() {
+fn request_events_numbered_pages_filters_and_refresh_anchor() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.jsonl");
     let t = 1_790_000_000_000i64;
@@ -352,7 +352,7 @@ fn request_events_filter_keyset_paging_and_new_data_revision() {
     let second = page(
         &mut store,
         EventQuery {
-            cursor: first.next_cursor.clone(),
+            page: Some(2),
             ..Default::default()
         },
     );
@@ -360,7 +360,7 @@ fn request_events_filter_keyset_paging_and_new_data_revision() {
     let third = page(
         &mut store,
         EventQuery {
-            cursor: second.next_cursor.clone(),
+            page: Some(3),
             ..Default::default()
         },
     );
@@ -373,6 +373,31 @@ fn request_events_filter_keyset_paging_and_new_data_revision() {
         .map(|e| &e.id)
         .collect::<BTreeSet<_>>();
     assert_eq!(ids.len(), 105);
+    assert_eq!(
+        (first.page, second.page, third.page, third.page_size),
+        (1, 2, 3, 50)
+    );
+    let last = page(
+        &mut store,
+        EventQuery {
+            page: Some(u64::MAX),
+            ..Default::default()
+        },
+    );
+    assert_eq!(last.page, 3);
+    assert_eq!(last.events[0].id, third.events[0].id);
+    let large = page(
+        &mut store,
+        EventQuery {
+            page: Some(0),
+            limit: Some(1000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        (large.page, large.page_size, large.events.len()),
+        (1, 200, 105)
+    );
     for query in [
         EventQuery {
             agent: Some("codex".into()),
@@ -395,7 +420,14 @@ fn request_events_filter_keyset_paging_and_new_data_revision() {
             ..Default::default()
         },
     ] {
-        assert_eq!(page(&mut store, query).total, 0);
+        let empty = page(
+            &mut store,
+            EventQuery {
+                page: Some(10),
+                ..query
+            },
+        );
+        assert_eq!((empty.total, empty.page, empty.events.len()), (0, 1, 0));
     }
     let same_time = page(
         &mut store,
@@ -408,16 +440,42 @@ fn request_events_filter_keyset_paging_and_new_data_revision() {
     assert_eq!(same_time.total, 105);
     append(&p, claude("new", t + 1000, 30, true));
     scan("claude", dir.path(), &mut store);
-    let reset = page(
+    // 新增记录让原第 2 页末尾跨到第 3 页；按可见请求定位，不能回到最新一页。
+    let anchor = second.events.last().unwrap().id.clone();
+    let refreshed = page(
         &mut store,
         EventQuery {
-            cursor: first.next_cursor,
+            page: Some(2),
+            anchor: Some(anchor.clone()),
             ..Default::default()
         },
     );
-    assert!(reset.reset);
-    assert_eq!(reset.total, 106);
-    assert_eq!(reset.events[0].time, t + 1000);
+    assert_eq!((refreshed.total, refreshed.page), (106, 3));
+    assert_eq!(refreshed.events[0].id, anchor);
+    assert_ne!(refreshed.revision, first.revision);
+    let latest = page(&mut store, EventQuery::default());
+    assert_eq!(latest.events[0].time, t + 1000);
+    let missing = page(
+        &mut store,
+        EventQuery {
+            page: Some(2),
+            anchor: Some("removed".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(missing.page, 2);
+    let resized = page(
+        &mut store,
+        EventQuery {
+            page: Some(2),
+            limit: Some(100),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        (resized.page, resized.page_size, resized.events.len()),
+        (2, 100, 6)
+    );
     let invalid = events::page(
         &mut store.ledger().unwrap().db,
         EventQuery {
@@ -610,7 +668,7 @@ fn request_events_ledger_copy_performance_if_requested() {
     let next = page(
         &mut store,
         EventQuery {
-            cursor: first.next_cursor.clone(),
+            page: Some(2),
             ..Default::default()
         },
     );

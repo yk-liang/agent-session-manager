@@ -17,15 +17,11 @@ pub struct EventQuery {
     pub status: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
-    pub cursor: Option<EventCursor>,
+    /// 从 1 开始的页码；越界时落到最后一页，空结果仍为第 1 页。
+    pub page: Option<u64>,
     pub limit: Option<u32>,
-}
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EventCursor {
-    pub time: i64,
-    pub id: String,
-    pub revision: String,
+    /// 仅自动刷新使用：返回包含当前可见请求的页，新增记录不会挤走阅读位置。
+    pub anchor: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,8 +47,8 @@ pub struct EventPage {
     pub models: Vec<String>,
     pub events: Vec<RequestEvent>,
     pub total: u64,
-    pub next_cursor: Option<EventCursor>,
-    pub reset: bool,
+    pub page: u64,
+    pub page_size: u32,
     pub revision: String,
 }
 
@@ -368,10 +364,6 @@ pub(super) fn page(
             .map_err(|error| format!("无法读取请求事件版本：{error}"))?
             .join("|")
     };
-    let reset = query
-        .cursor
-        .as_ref()
-        .is_some_and(|c| c.revision != revision);
     let models = {
         let mut statement = tx.prepare("SELECT DISTINCT model FROM usage_request_events
             WHERE (?1 IS NULL OR agent=?1) AND (?2 IS NULL OR time>=?2) AND (?3 IS NULL OR time<?3) ORDER BY model")
@@ -414,18 +406,38 @@ pub(super) fn page(
         )
         .map_err(|_| "无法读取请求事件数量")?;
     let total = u64::try_from(total).map_err(|_| "请求事件数量无效")?;
-    if let Some(c) = query.cursor.filter(|_| !reset) {
-        predicates.push("(time<? OR (time=? AND id<?))".into());
-        values.extend([c.time.into(), c.time.into(), c.id.into()]);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let pages = total.div_ceil(u64::from(limit)).max(1);
+    let mut page = query.page.unwrap_or(1).clamp(1, pages);
+    if let Some(anchor) = query.anchor {
+        let mut anchor_values = values.clone();
+        anchor_values.push(anchor.clone().into());
+        let time: Option<i64> = tx
+            .query_row(
+                &format!("SELECT time FROM usage_request_events WHERE {filter} AND id=?"),
+                params_from_iter(&anchor_values),
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| "无法定位当前请求")?;
+        if let Some(time) = time {
+            let mut before_values = values.clone();
+            before_values.extend([time.into(), time.into(), anchor.into()]);
+            let before: i64 = tx.query_row(
+                &format!("SELECT count(*) FROM usage_request_events WHERE {filter} AND (time>? OR (time=? AND id>?))"),
+                params_from_iter(&before_values), |r| r.get(0),
+            ).map_err(|_| "无法定位请求所在页")?;
+            page = before as u64 / u64::from(limit) + 1;
+        }
+        // 归并可能替换旧请求 ID；找不到锚点时保留原页码并按新总量收敛。
     }
-    let limit = query.limit.unwrap_or(50).clamp(1, 200) as usize;
-    values.push(((limit + 1) as i64).into());
+    let offset = (page - 1) * u64::from(limit);
+    values.extend([i64::from(limit).into(), (offset as i64).into()]);
     let mut events: Vec<RequestEvent> = Vec::new();
     {
         let mut stmt = tx
             .prepare(&format!(
-                "SELECT data FROM usage_request_events WHERE {} ORDER BY time DESC,id DESC LIMIT ?",
-                predicates.join(" AND ")
+                "SELECT data FROM usage_request_events WHERE {filter} ORDER BY time DESC,id DESC LIMIT ? OFFSET ?"
             ))
             .map_err(|_| "无法读取请求事件")?;
         let rows = stmt
@@ -441,22 +453,11 @@ pub(super) fn page(
             );
         }
     }
-    let more = events.len() > limit;
-    events.truncate(limit);
-    let next_cursor = if more {
-        events.last().map(|e| EventCursor {
-            time: e.time,
-            id: e.id.clone(),
-            revision: revision.clone(),
-        })
-    } else {
-        None
-    };
     Ok(EventPage {
         events,
         total,
-        next_cursor,
-        reset,
+        page,
+        page_size: limit,
         revision,
         models,
     })

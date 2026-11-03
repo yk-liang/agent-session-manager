@@ -18,8 +18,8 @@ try {
       if (command === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (command === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
       if (command === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
-      if (command === 'read_usage_summary') return { rows: [], health: {}, revision: '1' };
-      if (command === 'read_request_events') return { events: [], models: [], total: 0, nextCursor: null, reset: false, revision: '1' };
+      if (command === 'read_usage_summary') return { rows: [], health: {}, syncedAgents: Object.keys(names), revision: '1' };
+      if (command === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
     } };
   });

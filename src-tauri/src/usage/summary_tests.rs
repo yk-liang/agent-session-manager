@@ -32,6 +32,125 @@ fn sum(result: &Summary) -> u64 {
 }
 
 #[test]
+fn summary_coverage_requires_full_success_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    let source = logs.join("a.jsonl");
+    let path = dir.path().join("ledger.sqlite");
+    write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
+    let mut store = Store::open_with_ledger(None, Some(&path));
+    // 指定文件同步可入账，但不能证明该 Agent 的其余目录已扫描。
+    summary::sync_paths(
+        "claude",
+        &[logs.clone()],
+        &mut store,
+        Some(&BTreeSet::from([source])),
+        &|| false,
+    )
+    .unwrap();
+    let partial = read(&mut store, vec![]);
+    assert_eq!(sum(&partial), 110);
+    assert!(partial.synced_agents.is_empty());
+
+    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    // 没有日志的来源仍然需要保存完成状态，才能区分「确认 0」和「尚未读到」。
+    summary::sync_at("codex", &[dir.path().join("empty")], &mut store, &|| false).unwrap();
+    drop(store);
+    let mut db = ledger::reader(&path).unwrap();
+    let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
+    assert_eq!(result.synced_agents, ["claude", "codex"]);
+    assert_eq!(sum(&result), 110);
+    let later = 1_800_000_000_000;
+    let empty = summary::read_at(
+        &mut db,
+        SummaryQuery {
+            from: Some(later),
+            to: Some(later + 1000),
+            bounds: vec![later, later + 1000],
+        },
+        &|| false,
+    )
+    .unwrap();
+    assert!(empty.rows.is_empty());
+    assert_eq!(
+        empty.synced_agents,
+        ["claude", "codex"],
+        "coverage is independent of the selected date range"
+    );
+
+    let mut restarted = Store::open_with_ledger(None, Some(&path));
+    assert!(summary::sync_at("claude", &[logs], &mut restarted, &|| true).is_err());
+    assert_eq!(
+        read(&mut restarted, vec![]).synced_agents,
+        ["claude", "codex"],
+        "a later cancelled refresh preserves the saved baseline"
+    );
+}
+
+#[test]
+fn summary_coverage_is_not_marked_when_indexing_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir.path().join("a.jsonl"),
+        &[record("a", 1_790_000_000_000, 100, 10)],
+    );
+    let mut store = Store::open(None);
+    store
+        .ledger()
+        .unwrap()
+        .db
+        .execute_batch(
+            "CREATE TRIGGER fail_index BEFORE INSERT ON usage_request_events
+         BEGIN SELECT RAISE(ABORT,'index write failed'); END;",
+        )
+        .unwrap();
+    assert!(summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).is_err());
+    assert!(
+        store.ledger().unwrap().updated("claude").is_some(),
+        "file ingestion may already be committed"
+    );
+    assert!(read(&mut store, vec![]).synced_agents.is_empty());
+    store
+        .ledger()
+        .unwrap()
+        .db
+        .execute_batch("DROP TRIGGER fail_index")
+        .unwrap();
+    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    assert_eq!(read(&mut store, vec![]).synced_agents, ["claude"]);
+}
+
+#[test]
+fn summary_reads_legacy_coverage_without_writing_or_guessing_completeness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite");
+    let logs = dir.path().join("logs");
+    write(
+        &logs.join("a.jsonl"),
+        &[record("a", 1_790_000_000_000, 100, 10)],
+    );
+    let mut store = Store::open_with_ledger(None, Some(&path));
+    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    store
+        .ledger()
+        .unwrap()
+        .db
+        .execute_batch("DROP TABLE usage_sync_state")
+        .unwrap();
+    drop(store);
+    let mut db = ledger::reader(&path).unwrap();
+    let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
+    assert_eq!(sum(&result), 110);
+    assert!(result.synced_agents.is_empty());
+    assert_eq!(db.total_changes(), 0);
+    drop(db);
+    let mut upgraded = Store::open_with_ledger(None, Some(&path));
+    assert!(read(&mut upgraded, vec![]).synced_agents.is_empty());
+    summary::sync_at("claude", &[logs], &mut upgraded, &|| false).unwrap();
+    assert_eq!(read(&mut upgraded, vec![]).synced_agents, ["claude"]);
+}
+
+#[test]
 fn summary_upgrades_v2_without_deleted_sources_or_losing_events() {
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");

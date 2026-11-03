@@ -11,7 +11,7 @@ try {
   await page.clock.install();
   await page.addInitScript(() => {
     const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
-    const state = window.__COLD__ = { calls: [], listeners: {}, registrations: {}, nextListener: 0, active: '', generation: 0, release: null, ready: false, failSummary: false, failEvents: false, failSource: false };
+    const state = window.__COLD__ = { calls: [], listeners: {}, registrations: {}, nextListener: 0, active: '', generation: 0, release: null, ready: false, failSummary: false, failEvents: false, failSource: false, synced: [] };
     const tokens = { inputTokens: 4467458800, outputTokens: 21, totalTokens: 4467458821, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false };
     const model = `claude-${'long-model-name-'.repeat(30)}`;
     const event = { ...tokens, id: 'request', agent: 'claude', time: Date.now(), session: 'session', model, modelName: model, status: 'success', partial: false, outputTps: null, request: { project: `/Users/demo/${'long-directory/'.repeat(30)}project`, client: 'Claude Code', kind: 'cli' } };
@@ -33,15 +33,16 @@ try {
         state.active = args.agent; state.generation = args.generation;
         await new Promise(resolve => state.release = resolve);
         if (state.failSource) throw Error('Source temporarily unavailable');
+        if (!state.synced.includes(args.agent)) state.synced.push(args.agent);
         return { updatedAt: Date.now(), checkedFiles: 256, changedFiles: 256, bytesRead: 270000000 };
       }
       if (cmd === 'read_usage_summary') {
         if (state.failSummary) throw Error('Database temporarily unavailable');
-        return { rows: state.ready ? [{ ...tokens, agent: 'claude', model, modelName: model, date: '', bucketStart: args.query.bounds?.[0] ?? null, partial: false }] : [], health: {}, revision: state.ready ? '1' : '' };
+        return { rows: state.ready ? [{ ...tokens, agent: 'claude', model, modelName: model, date: '', bucketStart: args.query.bounds?.[0] ?? null, partial: false }] : [], health: {}, syncedAgents: [...state.synced], revision: state.ready ? '1' : '' };
       }
       if (cmd === 'read_request_events') {
         if (state.failEvents) throw Error('Database temporarily unavailable');
-        return { events: state.ready ? [event] : [], models: state.ready ? [model] : [], total: state.ready ? 1 : 0, nextCursor: null, reset: false, revision: state.ready ? '1' : '' };
+        return { events: state.ready ? [event] : [], models: state.ready ? [model] : [], total: state.ready ? 1 : 0, page: 1, pageSize: args.query.limit ?? 50, revision: state.ready ? '1' : '' };
       }
       return null;
     } };
@@ -87,7 +88,9 @@ try {
   await page.evaluate(() => { window.__COLD__.ready = true; window.__COLD__.release(); });
   await page.waitForFunction(() => window.__COLD__.active === 'claude');
   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '4,467,458,821');
-  assert.equal(await page.locator('.usage-sync-status').count(), 0, 'once saved results are available, remaining sources update quietly');
+  assert.equal(await page.locator('.usage-coverage').count(), 1, 'partial results must retain the first-import coverage notice');
+  assert.equal(await page.locator('.usage-stat > span').first().textContent(), '已统计 Token');
+  assert.match(await page.locator('.usage-coverage').textContent(), /已完成 1 \/ 5 个 Agent/);
   await chooseAgent(page, 'codex');
   assert.equal(await page.locator('.usage-stat strong').first().textContent(), '—', 'another Agent finishing cannot turn this pending source into measured zero');
   await page.getByText('正在同步历史用量…', { exact: true }).waitFor();
@@ -113,7 +116,8 @@ try {
     await page.waitForFunction(next => window.__COLD__.active === next, next);
   }
   await page.evaluate(() => window.__COLD__.release());
-  await page.waitForFunction(() => !document.querySelector('.usage-sync-status'));
+  await page.waitForFunction(() => document.querySelector('.usage-coverage strong')?.textContent === '统计尚未完整');
+  assert.equal(await page.locator('.usage-stat > span').first().textContent(), '已统计 Token', 'a failed source must not turn partial totals into complete totals');
   assert.equal(await page.locator('.usage-stat strong').first().textContent(), '4,467,458,821');
   await page.getByRole('button', { name: '会话', exact: true }).click();
   assert.ok(await page.evaluate(() => window.__COLD__.calls.some(c => c.cmd === 'cancel_usage')));

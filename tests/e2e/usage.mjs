@@ -42,6 +42,7 @@ try {
     const count = args.query.bounds.length;
     const period = count === 0 ? 'all' : count === 8 ? 'week' : count === 31 ? 'month' : 'today';
     const result = structuredClone(fixture.summaries[period]);
+    result.syncedAgents = Object.keys(names); // This fixture represents a previously completed import.
     if (state.holdSummary === period) { state.holdSummary = null; await new Promise(resolve => state.releaseSummary = resolve); }
     if (state.failSummary) throw Error('Query failed');
     return result;
@@ -49,7 +50,7 @@ try {
    if (cmd === 'read_request_events') {
     const q = args.query;
     const events = fixture.events.events.filter(e => (q.from == null || e.time >= q.from) && (q.to == null || e.time < q.to) && (!q.agent || q.agent === e.agent) && (!q.model || q.model === e.model) && (!q.status || q.status === e.status));
-    return { ...fixture.events, events, total: events.length, nextCursor: null, reset: false };
+    return { ...fixture.events, events, total: events.length, page: 1, pageSize: args.query.limit ?? 50 };
    }
    return null;
   } };
@@ -74,11 +75,9 @@ try {
  await page.locator('.usage-page').evaluate(el => { el.scrollTop = 40; });
  const scrollBefore = await page.locator('.usage-page').evaluate(el => el.scrollTop);
  assert.ok(scrollBefore > 0);
- for (const [name, amount] of [['Codex','770'], ['Pi',null], ['全部 Agent','1100']]) {
+ for (const [name, amount] of [['Codex','770'], ['Pi','0'], ['全部 Agent','1100']]) {
   await selectAgent(name);
-  if (amount === null) {
-   await page.waitForFunction(() => document.querySelector('.usage-stat strong')?.textContent === '—');
-  } else await waitTotal(amount);
+  await waitTotal(amount);
   await page.waitForFunction(() => document.querySelector('.request-table-wrap')?.getAttribute('aria-busy') === 'false');
   assert.ok(Math.abs(await page.locator('.usage-page').evaluate(el => el.scrollTop) - scrollBefore) < 2, `Agent switch moved the page: ${name}`);
  }
@@ -88,7 +87,12 @@ try {
  assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 0);
  const syncCalls = await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'sync_request_events').length);
  await page.getByRole('button', { name: '今日', exact: true }).click(); await waitTotal('660');
- assert.equal(await page.locator('.usage-bucket').count(), 24);
+ // Local days can have 23 or 25 hours when daylight saving time changes.
+ const hoursToday = await page.evaluate(() => {
+  const now = new Date();
+  return Math.ceil((new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 3600000);
+ });
+ assert.equal(await page.locator('.usage-bucket').count(), hoursToday);
  assert.equal(await page.locator('.usage-bucket').nth(2).getAttribute('data-total'), '110');
  assert.equal(await page.locator('.usage-bucket').nth(15).getAttribute('data-total'), '550');
  await page.waitForFunction(() => document.querySelectorAll('.request-table tbody tr').length === 3);
@@ -110,7 +114,7 @@ try {
  await page.evaluate(() => window.__USAGE__.releaseSync());
  const waitSynced = round => page.waitForFunction(round => window.__USAGE__.syncRounds >= round, round);
  await waitSynced(1);
- // Empty usage is a measured zero only after this source has finished its first sync.
+ // A confirmed empty baseline remains zero during subsequent refreshes.
  await selectAgent('Pi'); await waitTotal('0');
  await selectAgent('全部 Agent'); await waitTotal('2090');
  console.log(`PASS: persisted results render during sync; request-time hourly/daily buckets, filters and table totals agree; filters never reread logs (${engine})`);

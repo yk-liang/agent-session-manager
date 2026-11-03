@@ -53,6 +53,9 @@ pub struct RequestMetrics {
 pub struct Summary {
     pub rows: Vec<SummaryRow>,
     pub health: BTreeMap<String, Health>,
+    /// 此快照中已完成过完整目录同步的来源，包含已确认的空目录。
+    /// 有请求记录不代表首次导入已结束；失败或仅同步指定文件不能建立此基线。
+    pub synced_agents: Vec<String>,
     pub revision: String,
 }
 
@@ -144,6 +147,20 @@ fn sync_with_store(
         events::refresh(&mut store.ledger()?.db, agent, cancel)?;
     }
     let result = collected?;
+    if cancel() {
+        return Err("采集已停止".into());
+    }
+    if paths.is_none() {
+        // 必须在目录遍历和请求索引全部成功后标记；部分文件入账不能冒充全量完成。
+        store
+            .ledger()?
+            .db
+            .execute(
+                "INSERT OR IGNORE INTO usage_sync_state(agent,completed_at) VALUES (?1,?2)",
+                rusqlite::params![agent, chrono::Utc::now().timestamp_millis()],
+            )
+            .map_err(|_| "无法保存用量同步状态")?;
+    }
     report("complete", result.checked_files, Some(result.checked_files));
     Ok(Synced {
         updated_at: chrono::Utc::now().timestamp_millis(),
@@ -218,6 +235,23 @@ pub(super) fn read_at(
     let tx = db
         .transaction()
         .map_err(|error| format!("无法读取用量快照：{error}"))?;
+    // 旧账本仍可只读打开，首次成功同步会补建此表；不能据已有事件推断覆盖完整。
+    let has_sync_state: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_sync_state')",
+        [], |r| r.get(0),
+    ).map_err(|_| "无法读取用量同步状态")?;
+    let synced_agents = if has_sync_state {
+        let mut stmt = tx
+            .prepare("SELECT agent FROM usage_sync_state ORDER BY agent")
+            .map_err(|_| "无法读取用量同步状态")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|_| "无法读取用量同步状态")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法读取用量同步状态")?
+    } else {
+        Vec::new()
+    };
     let mut health = BTreeMap::<String, Health>::new();
     {
         let mut stmt = tx
@@ -376,6 +410,7 @@ pub(super) fn read_at(
         })
         .collect();
     Ok(Summary {
+        synced_agents,
         rows,
         health,
         revision,

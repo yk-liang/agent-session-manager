@@ -183,7 +183,9 @@ impl Ledger {
                 .map_err(|_| "无法保存用量账本版本")?;
         }
         tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_source_keys(
+            "CREATE TABLE IF NOT EXISTS usage_sync_state(
+            agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS usage_source_keys(
             agent TEXT NOT NULL,path TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(agent,path,key));
             CREATE INDEX IF NOT EXISTS usage_source_key_lookup ON usage_source_keys(agent,key,path);
             CREATE INDEX IF NOT EXISTS usage_source_dirty ON usage_ledger_sources(agent,dirty,path);

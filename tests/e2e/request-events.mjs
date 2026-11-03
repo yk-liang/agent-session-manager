@@ -27,6 +27,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1080 } });
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
+    Object.defineProperty(document, 'hasFocus', { value: () => false });
     const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', pi: 'Pi' };
     const state = window.__EVENTS__ = { fixture, calls: [], fail: false, failCopy: false, delay: false, release: null, revision: '1' };
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
@@ -36,16 +37,17 @@ try {
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: true, running: true, authorization: 'enabled' };
       if (cmd === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
-      if (cmd === 'read_usage_summary') return { rows: fixture.events.map(e => ({ ...e, bucketStart: null, date: new Date(e.time).toISOString().slice(0,10), totalTokens: e.inputTokens + e.outputTokens + e.unclassifiedTokens })), health: {}, revision: '0' };
+      if (cmd === 'read_usage_summary') return { rows: fixture.events.map(e => ({ ...e, bucketStart: null, date: new Date(e.time).toISOString().slice(0,10), totalTokens: e.inputTokens + e.outputTokens + e.unclassifiedTokens })), health: {}, syncedAgents: Object.keys(names), revision: '0' };
       if (cmd === 'read_request_events') {
         if (state.fail) throw new Error('fixture read failure');
         const q = args.query;
         const scope = fixture.events.filter(e => (!q.agent || q.agent === e.agent) && (!q.from || e.time >= q.from) && (!q.to || e.time < q.to));
         const filtered = scope.filter(e => (!q.model || q.model === e.model) && (!q.status || q.status === e.status));
-        const reset = !!q.cursor && q.cursor.revision !== state.revision;
-        const start = q.cursor && !reset ? filtered.findIndex(e => e.id === q.cursor.id) + 1 : 0;
-        const events = filtered.slice(start, start + 50), last = events.at(-1);
-        const result = { events, total: filtered.length, reset, revision: state.revision, models: [...new Set(scope.map(e => e.model))], nextCursor: start + 50 < filtered.length ? { id: last.id, time: last.time, revision: state.revision } : null };
+        const pageSize = q.limit ?? 50, anchor = q.anchor ? filtered.findIndex(e => e.id === q.anchor) : -1;
+        const number = anchor < 0 ? q.page ?? 1 : Math.floor(anchor / pageSize) + 1;
+        const page = Math.max(1, Math.min(number, Math.ceil(filtered.length / pageSize)));
+        const start = (page - 1) * pageSize;
+        const result = { events: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, revision: state.revision, models: [...new Set(scope.map(e => e.model))] };
         if (state.delay) { state.delay = false; await new Promise(resolve => state.release = resolve); }
         return structuredClone(result);
       }
@@ -54,7 +56,7 @@ try {
   }, fixture);
   await page.goto(baseURL);
   await page.getByRole('button', { name: '用量', exact: true }).click();
-  await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
   const table = page.locator('.request-events');
   assert.equal(await table.locator('tbody > tr').count(), 50);
   const codex = table.locator('tbody > tr').filter({ hasText: 'gpt-codex' });
@@ -79,18 +81,55 @@ try {
   assert.ok((await project.textContent()).startsWith('~/Workspace/'));
   assert.equal(await table.locator('.request-project > span').filter({ hasText: /^\.codex$/ }).count(), 1);
   console.log(`PASS: actual client is preferred, raw source remains in details, project names and full paths remain available (${engine})`);
-  await table.getByRole('button', { name: '加载更多', exact: true }).click();
-  await page.getByText('已加载 100 / 110 条', { exact: true }).waitFor();
-  await table.getByRole('button', { name: '加载更多', exact: true }).click();
-  await page.getByText('已加载 110 / 110 条', { exact: true }).waitFor();
-  assert.equal(await table.getByRole('button', { name: '加载更多', exact: true }).count(), 0);
-  console.log(`PASS: real Rust fixture renders 110 events with keyset paging, approximate TPS and turn TTFT (${engine})`);
+  const rowIds = () => table.locator('tbody > tr:not(.request-detail-row)').evaluateAll(rows => rows.map(row => row.dataset.eventId));
+  const firstIds = await rowIds();
+  assert.ok(await table.getByRole('button', { name: '上一页', exact: true }).isDisabled());
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  const secondIds = await rowIds();
+  assert.equal(secondIds.length, 50, 'pagination replaces rows instead of appending');
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.getByText('第 101–110 条，共 110 条', { exact: true }).waitFor();
+  assert.ok(await table.getByRole('button', { name: '下一页', exact: true }).isDisabled());
+  assert.equal(new Set([...firstIds, ...secondIds, ...await rowIds()]).size, 110);
+  await table.getByRole('button', { name: '上一页', exact: true }).click();
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  assert.deepEqual(await rowIds(), secondIds);
+  await table.getByRole('button', { name: '首页', exact: true }).click();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  await table.getByLabel('请求页码', { exact: true }).fill('3');
+  await table.getByLabel('请求页码', { exact: true }).press('Enter');
+  await page.getByText('第 101–110 条，共 110 条', { exact: true }).waitFor();
+  await table.getByLabel('每页请求数', { exact: true }).selectOption('100');
+  await page.getByText('第 1–100 条，共 110 条', { exact: true }).waitFor();
+  assert.equal((await rowIds()).length, 100);
+  await table.getByRole('button', { name: '末页', exact: true }).click();
+  await page.getByText('第 101–110 条，共 110 条', { exact: true }).waitFor();
+  await table.getByLabel('每页请求数', { exact: true }).selectOption('200');
+  await page.getByText('第 1–110 条，共 110 条', { exact: true }).waitFor();
+  assert.equal((await rowIds()).length, 110);
+  assert.ok(await table.getByRole('button', { name: '下一页', exact: true }).isDisabled());
+  await table.getByLabel('每页请求数', { exact: true }).selectOption('50');
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  await table.getByLabel('请求页码', { exact: true }).fill('999');
+  await table.getByRole('button', { name: '跳转', exact: true }).click();
+  await page.getByText('第 101–110 条，共 110 条', { exact: true }).waitFor();
+  await table.getByLabel('请求页码', { exact: true }).fill('0');
+  await table.getByRole('button', { name: '跳转', exact: true }).click();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  assert.equal(await table.getByLabel('请求页码', { exact: true }).inputValue(), '1');
+  console.log(`PASS: numbered pages replace rows without duplication; navigation, jumps and 50/100/200 page sizes (${engine})`);
 
   const selectAgent = name => chooseAgent(page, { label: name });
   await selectAgent('Claude Code');
-  await page.getByText('已加载 50 / 109 条', { exact: true }).waitFor();
+  await page.getByText('第 1–50 条，共 109 条', { exact: true }).waitFor();
+  await page.getByLabel('请求结果', { exact: true }).selectOption('unknown');
+  await page.getByText('共 0 条', { exact: true }).waitFor();
+  assert.equal((await rowIds()).length, 0);
+  assert.ok(await table.getByRole('button', { name: '下一页', exact: true }).isDisabled());
+  assert.equal(await table.locator('.request-page-number').textContent(), '第 1 / 1 页');
   await page.getByLabel('请求结果', { exact: true }).selectOption('failed');
-  await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
+  await page.getByText('第 1–1 条，共 1 条', { exact: true }).waitFor();
   const failed = table.locator('tbody > tr').first();
   assert.equal(await failed.locator('td').nth(7).textContent(), '—');
   assert.equal(await failed.locator('td').nth(10).textContent(), '—');
@@ -108,24 +147,20 @@ try {
   assert.equal(await page.getByText('复制失败，可以展开详情选择会话 ID', { exact: true }).count(), 0);
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(c => c.cmd.includes('clipboard') && c.args.text === 'session-one')));
   await page.getByLabel('统计模型', { exact: true }).selectOption('claude-sonnet');
-  await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
+  await page.getByText('第 1–1 条，共 1 条', { exact: true }).waitFor();
   await table.getByRole('button', { name: '清除结果筛选', exact: true }).click();
   assert.equal(await page.getByLabel('统计模型', { exact: true }).inputValue(), 'claude-sonnet');
   assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
   await selectAgent('全部 Agent');
-  await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
   assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'all');
   console.log(`PASS: shared Agent/model filters, results, details, unknown vs zero, and copying full session IDs (${engine})`);
 
-  await page.evaluate(() => { window.__EVENTS__.revision = '2'; });
-  await table.getByRole('button', { name: '加载更多', exact: true }).click();
-  await page.getByText('检测到新事件，已更新到最新一页', { exact: true }).waitFor();
-  assert.equal(await table.locator('tbody > tr').count(), 50);
   await page.evaluate(() => { window.__EVENTS__.delay = true; });
-  await table.getByRole('button', { name: '加载更多', exact: true }).click();
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
   await page.waitForFunction(() => !!window.__EVENTS__.release);
   await selectAgent('Codex');
-  await page.getByText('已加载 1 / 1 条', { exact: true }).waitFor();
+  await page.getByText('第 1–1 条，共 1 条', { exact: true }).waitFor();
   await page.evaluate(() => window.__EVENTS__.release());
   await page.waitForTimeout(50);
   assert.equal(await table.locator('tbody > tr').count(), 1);
@@ -134,13 +169,89 @@ try {
   await table.getByRole('alert').waitFor();
   await page.evaluate(() => { window.__EVENTS__.fail = false; });
   await table.getByRole('button', { name: '重试', exact: true }).click();
-  await page.getByText('已加载 50 / 110 条', { exact: true }).waitFor();
-  console.log(`PASS: changing data resets stale cursors, changing filters rejects late pages, read errors retry (${engine})`);
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  await page.evaluate(() => { window.__EVENTS__.fail = true; });
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
+  await table.getByRole('alert').waitFor();
+  assert.deepEqual(await rowIds(), firstIds, 'failed navigation keeps the existing page');
+  await page.evaluate(() => { window.__EVENTS__.fail = false; });
+  await table.getByRole('button', { name: '重试', exact: true }).click();
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  console.log(`PASS: changing filters rejects late pages; failed navigation retains data and retries the requested page (${engine})`);
+
+  // Insert a full page while reading an older request. Its page number changes,
+  // but its expanded detail and visual position should survive the background sync.
+  const readerRow = table.locator('tbody > tr:not(.request-detail-row)').nth(8);
+  const readerId = await readerRow.getAttribute('data-event-id');
+  await readerRow.locator('.request-expand').click();
+  const scroller = table.locator('.request-table-wrap');
+  await scroller.evaluate((el, id) => {
+    const row = [...el.querySelectorAll('tbody > tr')].find(row => row.dataset.eventId === id);
+    el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - el.querySelector('thead').getBoundingClientRect().height + 4;
+    el.scrollLeft = 100;
+  }, readerId);
+  const readingOffset = () => scroller.evaluate((el, id) => {
+    const row = [...el.querySelectorAll('tbody > tr')].find(row => row.dataset.eventId === id);
+    return { offset: row.getBoundingClientRect().top - el.getBoundingClientRect().top, left: el.scrollLeft };
+  }, readerId);
+  const beforeSync = await readingOffset();
+  await page.evaluate(() => {
+    const state = window.__EVENTS__, latest = state.fixture.events[0];
+    state.fixture.events.unshift(...Array.from({ length: 50 }, (_, i) => ({ ...latest, id: `new-fixture-${i}`, time: latest.time + 1000 * (50 - i) })));
+    state.revision = '2'; window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByText('第 101–150 条，共 160 条', { exact: true }).waitFor();
+  assert.equal(await table.locator(`tr[data-event-id="${readerId}"] .request-expand`).getAttribute('aria-expanded'), 'true');
+  const afterSync = await readingOffset();
+  assert.ok(Math.abs(afterSync.offset - beforeSync.offset) <= 1, 'background sync preserves the visible request position');
+  assert.equal(afterSync.left, beforeSync.left);
+  assert.equal((await rowIds()).length, 50);
+  assert.ok(await page.evaluate(id => window.__EVENTS__.calls.some(c => c.cmd === 'read_request_events' && c.args.query.anchor === id), readerId));
+  await page.evaluate(() => {
+    const state = window.__EVENTS__;
+    state.fixture.events.splice(0, 50); state.revision = '3';
+    window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  assert.ok(Math.abs((await readingOffset()).offset - beforeSync.offset) <= 1);
+  await table.getByRole('button', { name: '首页', exact: true }).click();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  assert.equal(await table.locator('.request-detail-row').count(), 0);
+  assert.equal(await scroller.evaluate(el => el.scrollTop), 0);
+  console.log(`PASS: background insertions/removals keep the visible request and expanded details; manual navigation resets only table scrolling (${engine})`);
+
+  // A sync completing while a page query is pending must wait for that page to
+  // render before capturing an anchor; otherwise it anchors the page we just left.
+  const syncCount = await page.evaluate(() => {
+    const state = window.__EVENTS__; state.delay = true; state.release = null;
+    return state.calls.filter(c => c.cmd === 'sync_request_events').length;
+  });
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.waitForFunction(() => !!window.__EVENTS__.release);
+  await page.evaluate(() => {
+    const state = window.__EVENTS__, latest = state.fixture.events[0];
+    state.fixture.events.unshift(...Array.from({ length: 50 }, (_, i) => ({ ...latest, id: `pending-fixture-${i}`, time: latest.time + 1000 * (50 - i) })));
+    state.revision = '4'; window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'));
+  });
+  await page.waitForFunction(n => window.__EVENTS__.calls.filter(c => c.cmd === 'sync_request_events').length >= n + 5, syncCount);
+  assert.equal(await table.locator('.request-page-number').textContent(), '第 1 / 3 页', 'background refresh must not interrupt navigation');
+  await page.evaluate(() => window.__EVENTS__.release());
+  await page.getByText('第 101–150 条，共 160 条', { exact: true }).waitFor();
+  assert.deepEqual(await rowIds(), secondIds, 'deferred refresh must anchor the newly rendered page');
+  await page.evaluate(() => {
+    const state = window.__EVENTS__; state.fixture.events.splice(0, 50); state.revision = '5';
+    window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  await table.getByRole('button', { name: '首页', exact: true }).click();
+  await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
+  console.log(`PASS: simultaneous pagination and background sync preserve the requested page's records (${engine})`);
 
   for (const width of [960, 1280, 1600, 2200]) {
     await page.setViewportSize({ width, height: 1080 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     assert.ok(await table.locator('.request-table-wrap').evaluate(el => el.scrollWidth >= el.clientWidth && el.clientWidth > 450));
+    assert.ok(await table.locator('.request-footer').evaluate(el => el.scrollWidth <= el.clientWidth), 'pagination controls must fit within the card');
     const layout = await table.locator('tbody > tr').first().evaluate(row => {
       const result = row.querySelector('.request-result'), timing = row.querySelector('.request-timing');
       return { statusWidth: result.parentElement.getBoundingClientRect().width,
