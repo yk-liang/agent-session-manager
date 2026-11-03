@@ -1,7 +1,7 @@
 {
   "name": "agent-session-manager",
   "private": true,
-  "version": "0.1.36",
+  "version": "0.1.37",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "icons": "node scripts/generate-icons.mjs",
+    "docs:screenshots": "node scripts/readme-screenshots.mjs",
     "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
     "test:rust": "cd src-tauri && cargo test --offline --locked -- --test-threads=1",
     "test:e2e": "node tests/run.mjs e2e",

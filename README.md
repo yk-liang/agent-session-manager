@@ -1,64 +1,97 @@
+<img src="src/assets/brand/app-icon.svg" width="72" height="72" alt="Agent Session Manager icon">
+
 # Agent Session Manager
 
-在一个 macOS 窗口里管理 **Qoder CLI、Claude Code、Codex、OpenCode 和 Pi** 的本地会话、配置与用量。
+**English** · [简体中文](README.zh-CN.md)
 
-[下载最新版本](https://github.com/yk-liang/agent-session-manager/releases/latest) · [反馈问题](https://github.com/yk-liang/agent-session-manager/issues)
+Find past AI coding sessions, switch configurations, and track token usage in one macOS app.
 
-## 核心功能
+Supports **Qoder CLI, Claude Code, Codex, OpenCode, and Pi**.
 
-- **集中管理会话**：按 Agent、项目浏览，搜索标题和对话正文；复制恢复命令或在终端继续会话，支持对应 Agent 的分叉与批量删除。
-- **更清晰地阅读历史**：支持 Markdown、消息导览和长对话浏览；思考、工具调用和自动注入的上下文按需展开。
-- **查看用量与请求明细**：按 Agent、模型和时间筛选。模型表展示请求数、输入/输出、缓存读取、缓存率和成本；今日趋势按小时，近 7/30 天按日。展开请求可查看客户端、项目目录、缓存与思考用量、TPS 和耗时。
-- **保留已采集的历史用量**：删除会话后，已保存的用量仍可查询。使用时自动同步；带开发者签名的构建还可开启后台保留。
-- **管理配置方案**：保存和切换不同 Agent 的配置，修改前查看差异，自动备份并支持恢复。
+[Download the latest release](https://github.com/yk-liang/agent-session-manager/releases/latest) · [Report an issue](https://github.com/yk-liang/agent-session-manager/issues)
 
-Codex 支持 CLI、IDE 和桌面应用写入的本地会话；OpenCode 兼容 v1 和 v2 数据格式。
+## Features
 
-## 安装与更新
+Screenshots show the current source build with fictional projects, conversations, and usage data. The app interface is currently in Chinese.
 
-要求 **macOS 13 或更新版本**，支持 Apple Silicon（M 系列）和 Intel Mac。
+### Find a session and pick up where you left off
 
-1. 从 [Releases](https://github.com/yk-liang/agent-session-manager/releases/latest) 下载文件名以 `universal.dmg` 结尾的安装包。
-2. 打开 DMG，将 **Agent Session Manager** 拖入 **Applications**。也可下载 `.app.zip`，解压后移动应用。
-3. 更新时先退出旧版，再用新版替换应用。会话、配置和已采集用量保存在应用包之外。
+- Browse by Agent and project. Search session titles and conversation text.
+- Read Markdown and jump between messages with the conversation outline. System prompts and injected context are hidden by default; tool calls and reasoning can be expanded.
+- Copy a resume command or continue in a terminal. Delete sessions in bulk and fork sessions for supported Agents.
 
-当前安装包尚未经过 Apple Developer ID 公证。首次打开若被 macOS 阻止，在确认下载来源后，按 [Apple 官方步骤](https://support.apple.com/zh-cn/102445) 进入“系统设置 → 隐私与安全性 → 仍要打开”。Release 同时提供 SHA-256 校验文件。
+![Codex sessions grouped by project, with Markdown conversation history and resume controls](docs/images/sessions.png)
 
-**图形应用不需要 Node.js 或 ccusage。** 在终端恢复、分叉会话，以及删除 OpenCode 会话，需要安装对应的 Agent CLI。
+Codex support includes local sessions from the CLI, IDE integrations, and desktop app. OpenCode supports both v1 and v2 data formats.
 
-## 开始使用
+### Understand usage, down to each request
 
-- 通过顶栏选择 Agent，再切换 **会话 / 配置 / 用量**。会话页侧栏按项目浏览，搜索框可查找历史内容；用量页还可选择 **全部 Agent**。
-- 在 **用量** 页查看汇总、趋势和请求明细。项目名称取自日志记录的工作目录，悬停或展开请求可查看完整路径；来源优先显示日志中的客户端名称。
-- 首次同步会显示当前来源、文件进度和耗时。历史较多时可能需要几分钟，期间可以切换页面；每个来源完成后会自动显示已保存的结果。
-- 在 **配置** 页保存方案、预览差异并切换配置。应用保存文件后，相关 Agent 是否需要重启取决于它自身的配置加载方式。
+- Filter by Agent, model, and date range. View hourly trends for today and daily trends for the last 7 or 30 days.
+- Inspect each request's model, tokens, cache usage, TPS, duration, project, and source. Browse numbered pages and filter by outcome.
+- Keep usage history locally, even after deleting the original session. During the first sync, incomplete totals are clearly labeled.
 
-默认读取各 Agent 的本地数据目录：
+![Token totals, daily trends, and request events with model, speed, and project information](docs/images/usage.png)
 
-| Agent | 常见数据位置 |
+Compare request counts, input and output tokens, cache reads, cache hit rates, and recorded costs by model:
+
+![Per-model request counts, tokens, cache reads, cache hit rates, and costs](docs/images/models.png)
+
+### Manage configuration profiles
+
+Save multiple profiles and preview changes before switching. Files are backed up before changes and can be restored. Edit configuration files directly, with format validation and checks for external changes.
+
+![Codex configuration profiles, the active model, and a configuration file preview](docs/images/configuration.png)
+
+## Install and update
+
+**macOS 13 or later, on Apple Silicon or Intel.** The desktop app does not require Node.js or ccusage.
+
+1. Download the installer whose name ends in `universal.dmg` from [Releases](https://github.com/yk-liang/agent-session-manager/releases/latest).
+2. Open it and drag **Agent Session Manager** into **Applications**. Alternatively, download the `.app.zip`, extract it, and move the app there.
+3. To update, quit the old version and replace the app. Sessions, configurations, and saved usage are stored outside the app bundle.
+
+Current releases are not notarized by Apple. If macOS blocks the first launch, verify the download source and follow [Apple's instructions](https://support.apple.com/en-us/102445) to select **Open Anyway** in **System Settings → Privacy & Security**. Releases include SHA-256 checksums.
+
+Resuming or forking sessions in a terminal, and deleting OpenCode sessions, require the corresponding Agent CLI to be installed.
+
+## Get started
+
+1. Use any supported Agent first so that local session logs exist.
+2. Open the app, choose an Agent in the toolbar, and switch between **会话 (Sessions) / 配置 (Configuration) / 用量 (Usage)**. The Usage tab also offers **全部 Agent (All Agents)**.
+3. Importing a large history for the first time may take a few minutes. You can use other pages while it runs. Updates happen automatically.
+
+After saving a configuration, whether the Agent needs a restart depends on how that Agent reloads its settings.
+
+## Usage and data
+
+- **Local logs, not provider billing.** Cache hit rate is cache reads ÷ input tokens. Cache and reasoning are breakdowns, not additional tokens added to the total. TPS is output tokens ÷ request duration, which may include waiting time.
+- **Missing does not mean zero.** `—` means unrecorded, `≈` means estimated, and `≥` marks a known lower bound. Costs are shown only when the logs provide a USD amount.
+- **Saved history stays available.** Current releases sync while the app is in use, not after it quits. Records deleted externally before they were synced cannot be recovered.
+- **Deleting a session affects the original data.** Most sessions go to the system Trash. OpenCode sessions are permanently deleted through its official CLI and cannot be restored by this app.
+
+<details>
+<summary>Where is my data? Why are no sessions showing?</summary>
+
+The app reads existing local Agent data. If no sessions appear, check that the Agent has written session logs. If you use a custom directory, the app needs access to it.
+
+| Agent | Common data locations |
 | --- | --- |
 | Qoder CLI | `~/.qoder/projects/` |
 | Claude Code | `~/.claude/projects/` |
-| Codex | `~/.codex/sessions/`、`~/.codex/archived_sessions/` |
+| Codex | `~/.codex/sessions/`, `~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |
 | Pi | `~/.pi/agent/sessions/` |
 
-没有看到会话时，先确认对应 Agent 已在本机生成日志。配置了自定义数据目录时，应用需要能访问相同目录。
+Saved usage lives in `~/Library/Application Support/Agent Session Manager/`. Configuration profiles and backups live in `~/.agent-session-manager/`. Quit the app before backing up these complete directories; if you use a build with background collection enabled, disable it first. Original sessions remain managed by each Agent.
 
-## 用量与数据说明
+</details>
 
-- 统计来自本机读取到的日志，不等同于服务商账单。缓存和思考用量作为细分显示，不重复加入总 Token。
-- `—` 表示未记录，`≈` 表示估算值，`≥` 表示已记录的下限。缓存率按缓存读取除以输入计算；TPS 按输出 Token 除以整个请求耗时计算，可能包含等待时间。费用只显示日志已有的美元金额。
-- 已采集用量会在删除原会话后保留；从未采集就已被删除的日志无法还原。当前本地签名安装包使用按需同步，退出应用后不继续采集；后台保留需要带开发者签名的构建。
-- 普通会话删除会移入系统回收站；**OpenCode 通过官方 CLI 删除，无法通过本应用恢复**。
-- 用量账本位于 `~/Library/Application Support/Agent Session Manager/`；配置方案与备份位于 `~/.agent-session-manager/`。关闭后台采集并退出应用后，备份这些完整目录可保留相应应用数据，原始会话仍由各 Agent 管理。
+## Feedback and contributions
 
-## 反馈与贡献
+Please include the app version, Agent version, and reproduction steps when opening an [issue](https://github.com/yk-liang/agent-session-manager/issues). Remove keys, private paths, and conversation content before sharing screenshots or logs.
 
-遇到问题可在 [Issues](https://github.com/yk-liang/agent-session-manager/issues) 中附上应用版本、Agent 版本和复现步骤。请先移除截图或日志中的对话内容、密钥等私人信息。
+See the [development guide](docs/DEVELOPMENT.md) (Chinese) for building, testing, and regenerating screenshots.
 
-构建和测试说明见 [开发文档](docs/DEVELOPMENT.md)。
+## License and acknowledgments
 
-## 许可与致谢
-
-项目采用 [MIT 许可证](LICENSE)。感谢 [agent-session-cleaner](https://github.com/haowang02/agent-session-cleaner)、[ccusage](https://github.com/ccusage/ccusage) 和 [agent-events](https://github.com/haowang02/agent-events) 提供参考。第三方许可见 [public/licenses](public/licenses)，Agent 标识保留各自的权利声明。
+[MIT](LICENSE). Thanks to [agent-session-cleaner](https://github.com/haowang02/agent-session-cleaner), [ccusage](https://github.com/ccusage/ccusage), and [agent-events](https://github.com/haowang02/agent-events) for reference implementations. See [public/licenses](public/licenses) for third-party licenses. Agent logos belong to their respective owners.

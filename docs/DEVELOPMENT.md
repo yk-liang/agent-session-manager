@@ -64,3 +64,15 @@ Codex 首屏及长会话复测：`cd src-tauri && cargo run --release --offline 
 配置校验检查语法和根节点结构，不限制各 CLI 版本的自定义字段。已写入文件并不代表运行中的 CLI 已重新加载。
 
 用量解析、历史保留和兼容规则见 [用量模块说明](../src-tauri/src/usage/README.md)。
+
+## README 与公开截图
+
+英文首页为 `README.md`，中文版为 `README.zh-CN.md`，两版通过顶部链接互相切换，功能和安装说明应同步更新。
+
+```bash
+npm run docs:screenshots
+```
+
+截图脚本使用 Playwright WebKit（首次运行需 `npx playwright install webkit`），自动启动并关闭独立的本地 Vite 服务，将截图写入 `docs/images/`。它渲染真实前端，但通过 `scripts/readme-fixture.mjs` 提供虚构会话、请求与配置，拦截全部原生调用，不启动 Tauri、不读取本机 Agent 日志或配置。浏览器上下文独立，不复用本机登录状态；截图固定时区与时间，拦截外部请求。
+
+公开截图只使用这套合成数据，不将 `test-results/` 或真实用户截图直接加入 README。生成后检查可见文本、文件路径与图片内容；功能变更后按需重新生成，无需提交其他测试截图。
