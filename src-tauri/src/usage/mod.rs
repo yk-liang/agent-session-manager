@@ -13,9 +13,14 @@ mod opencode;
 mod parse;
 mod request_parse;
 pub mod service;
+mod storage;
 pub mod summary;
 #[cfg(test)]
 mod summary_tests;
+#[cfg(test)]
+mod storage_bench;
+#[cfg(test)]
+mod storage_tests;
 #[cfg(test)]
 mod tests;
 mod types;

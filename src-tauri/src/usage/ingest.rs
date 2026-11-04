@@ -46,8 +46,10 @@ pub(super) fn collect_with_progress(
                 &recorded,
                 chrono::Utc::now().timestamp_millis(),
             )?;
+            store.mark_durable(&key, &cached);
         }
     }
+    let full_scan = paths.is_none();
     let discovered;
     let paths = match paths {
         Some(paths) => paths,
@@ -116,6 +118,9 @@ pub(super) fn collect_with_progress(
         store.commit(&key, &incoming, &BTreeSet::from([path.clone()]), &[], at);
         result.files += 1;
         result.bytes_read += bytes;
+    }
+    if full_scan && !cancel() {
+        store.prune_missing(&key, paths);
     }
     progress(paths.len(), paths.len());
     Ok(result)

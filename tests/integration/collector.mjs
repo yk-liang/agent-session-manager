@@ -25,7 +25,7 @@ const start = () => child = spawnCollector(['ignore','ignore','pipe']);
 const exited = p => new Promise((resolve,reject) => { const timer=setTimeout(()=>reject(Error('Collector did not exit')),5000); if(p.exitCode!==null){clearTimeout(timer);resolve(p.exitCode);return;}p.once('exit',code=>{clearTimeout(timer);resolve(code);}); });
 const until = async (check, timeout=5000) => { const end=performance.now()+timeout;while(performance.now()<end){try{if(await check())return;}catch{}await new Promise(r=>setTimeout(r,40));}throw Error('Collector assertion timed out'); };
 const observed = async () => JSON.parse((await exec('python3',['-c',`import sqlite3,json,sys
-c=sqlite3.connect(sys.argv[1]);print(json.dumps({a:[s for r in c.execute('SELECT data FROM usage_ledger_sources WHERE agent=?',(a,)) for s in json.loads(r[0])['samples']] for a in ['qoder','claude','codex','opencode','pi']}))`,path.join(control,'ledger.sqlite3')])).stdout);
+c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);print(json.dumps({a:[json.loads(r[0]) for r in c.execute('SELECT data FROM usage_request_events WHERE agent=?',(a,))] for a in ['qoder','claude','codex','opencode','pi']}))`,path.join(control,'ledger.sqlite3')])).stdout);
 const cpuMillis = async pid => {const out=(await exec('ps',['-p',String(pid),'-o','time='])).stdout.trim();const t=out.split(':').map(Number);return t.length===2?(t[0]*60+t[1])*1000:(t[0]*3600+t[1]*60+t[2])*1000;};
 try {
  for(const id of ['claude','codex','opencode','pi'])mkdirSync(roots[id][0],{recursive:true});
@@ -38,7 +38,7 @@ c=sqlite3.connect(sys.argv[1]);c.executescript('CREATE TABLE session(id TEXT PRI
  await until(()=>Object.keys(JSON.parse(readFileSync(path.join(control,'status.json'),'utf8')).collectedAt).length===5);
  const initial=await observed();for(const id of ['claude','codex','opencode','pi'])assert.equal(initial[id].length,1,id);
  const began=performance.now();appendFileSync(path.join(roots.claude[0],'session.jsonl'),family('msg_continued',11));
- await until(async()=> (await observed()).claude.some(s=>s.key==='message:msg_continued'));
+ await until(async()=> (await observed()).claude.some(s=>s.inputTokens===11));
  console.log(JSON.stringify({check:'append_without_gui',latency_ms:Math.round(performance.now()-began)}));
  // A data root absent at startup must be watched as soon as it is created.
  mkdirSync(roots.qoder[0],{recursive:true});writeFileSync(path.join(roots.qoder[0],'session.jsonl'),family('msg_qoder',50));

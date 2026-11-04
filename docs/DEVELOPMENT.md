@@ -49,6 +49,21 @@ OpenCode 本机只读复测：`cd src-tauri && cargo run --release --offline --l
 
 用量复测要求传 `-- --storage <临时目录>`，使用该目录下的 `cache.sqlite3` 和 `ledger.sqlite3` 验证迁移，不修改应用的累计账本。源日志仍只读。
 
+存储版本对照使用 `scripts/usage-storage-fixture.py` 和显式忽略的 `usage::storage_bench::storage_comparison`。先在仓库根目录生成固定合成日志，再到 `src-tauri/` 编译、运行 release 测试；以下目录必须与实际应用数据隔离：
+
+```bash
+python3 scripts/usage-storage-fixture.py "$PWD/test-results/storage-comparison/logs"
+cd src-tauri
+ASM_STORAGE_BENCH_DIR="$PWD/../test-results/storage-comparison/new" \
+ASM_STORAGE_BENCH_LOGS="$PWD/../test-results/storage-comparison/logs" \
+ASM_STORAGE_BENCH_REPORT="$PWD/../test-results/storage-comparison/new.json" \
+cargo test --release --offline --locked --lib usage::storage_bench::storage_comparison -- --ignored --exact --nocapture
+```
+
+合成样本为 63,500 个请求：Codex 50,000（含逐响应及累计通知）、Claude 8,000、Qoder 3,200、Pi 2,300，OpenCode 目录为空；OpenCode 非空与继承去重由常规 Rust/采集进程测试覆盖。报告包括关闭连接后的主库/缓存字节数、首次打开与同步耗时、9 次热同步/查询中位数，以及全部原始观测、请求事件、完整身份关系的 SHA-256 和完整统计结果。热同步断言源日志读取为 0 字节，账本执行 `quick_check`；报告可能含模型名，真实账本报告应保留在私有临时目录。
+
+比较旧版本时，在隔离的旧提交检出中只加入 `storage_bench.rs` 和对应 `mod` 声明（沿用其已有 zstd 依赖），保存编译出的 release 测试可执行文件。旧/新程序必须使用同一路径、同一份固定日志和独立存储目录；复制已关闭的旧测试数据库给新版验证升级，另建空目录验证首次导入。检查三种 SHA-256、完整统计和请求数都一致，再比较空间与耗时。增量对照只运行一次 `python3 scripts/usage-storage-fixture.py <原固定日志目录> --append`，向首份 Codex 日志追加 10 个新请求，然后让旧/新可执行文件各同步自己的数据库；结果应增至 63,510 个请求。不要把活跃应用主库直接复制给测试，也不要在原工作区来回覆盖生产源码。
+
 `cargo test --offline --locked cold_start_tests -- --test-threads=1 --nocapture` 使用全新临时目录，导入 256 份约 270 MiB 的日志、32,768 个请求，并在写入期间并发查询；检查完整快照、取消、重启后的零重复读取。日志输出同步和查询耗时，不包含会话正文。常规 Rust 回归会包含这些检查。
 
 后台进程验证：先完成 release 构建，再执行 `npm run test:integration -- collector`。它只在自清理的临时目录创建五类 Agent 日志，验证无窗口采集、迟建目录、单实例、重启/删除保留、暂停及真实进程 CPU/内存；不注册机器的登录服务。可用 `ASM_COLLECTOR_BIN` 指定待测可执行文件。

@@ -99,7 +99,7 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
-    if version > 4 {
+    if version > super::storage::VERSION {
         return Err("用量账本来自较新版本，请先升级应用".into());
     }
     if version < 4 {
@@ -149,7 +149,7 @@ impl Ledger {
         let version: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| "用量账本损坏，已保留原文件")?;
-        if version > 4 {
+        if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
         // 账本是不可重建的用户数据，提交必须落盘；不能沿用可重建缓存的 MEMORY/OFF。
@@ -165,7 +165,7 @@ impl Ledger {
         let version: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| "无法读取用量账本版本")?;
-        if version > 4 {
+        if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
         super::events::schema(&tx)?;
@@ -182,18 +182,22 @@ impl Ledger {
             tx.pragma_update(None, "user_version", 4)
                 .map_err(|_| "无法保存用量账本版本")?;
         }
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_sync_state(
-            agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS usage_source_keys(
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS usage_sync_state(agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);")
+            .map_err(|_| "无法创建用量同步状态")?;
+        if version < super::storage::VERSION {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS usage_source_keys(
             agent TEXT NOT NULL,path TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(agent,path,key));
             CREATE INDEX IF NOT EXISTS usage_source_key_lookup ON usage_source_keys(agent,key,path);
             CREATE INDEX IF NOT EXISTS usage_source_dirty ON usage_ledger_sources(agent,dirty,path);
             CREATE INDEX IF NOT EXISTS usage_request_source ON usage_request_events(agent,source);",
-        )
-        .map_err(|_| "无法创建请求来源索引")?;
+            )
+            .map_err(|_| "无法创建请求来源索引")?;
+            super::storage::migrate(&tx)?;
+        }
         tx.commit()
             .map_err(|_| "用量账本升级未能落盘，已保留原数据")?;
+        super::storage::compact_migrated(&db);
         Ok(Self { db })
     }
 
@@ -205,14 +209,16 @@ impl Ledger {
             .map_err(|_| "无法读取累计用量")?;
         let rows = statement
             .query_map([agent], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    super::storage::decode::<FileCache>(row.get_ref(1)?)?,
+                ))
             })
             .map_err(|_| "无法读取累计用量")?;
         let mut files = BTreeMap::new();
         for row in rows {
             let (path, data) = row.map_err(|_| "无法读取累计用量记录")?;
-            let file = serde_json::from_str(&data).map_err(|_| "累计用量记录损坏，已保留原文件")?;
-            files.insert(path.into(), file);
+            files.insert(path.into(), data);
         }
         Ok(files)
     }
@@ -248,23 +254,19 @@ impl Ledger {
                 continue;
             };
             // 事务内重读，避免两个应用进程同时采集时用旧快照覆盖另一个进程的新计量。
-            let existing: Option<String> = tx
+            let existing: Option<FileCache> = tx
                 .query_row(
                     "SELECT data FROM usage_ledger_sources WHERE agent=?1 AND path=?2",
                     params![agent, path.to_string_lossy()],
-                    |r| r.get(0),
+                    |r| super::storage::decode(r.get_ref(0)?),
                 )
                 .optional()
                 .map_err(|_| "无法读取累计用量")?;
             let combined = match existing {
-                Some(raw) => merge(
-                    agent,
-                    &serde_json::from_str(&raw).map_err(|_| "累计用量记录损坏，已保留原文件")?,
-                    incoming,
-                ),
+                Some(old) => merge(agent, &old, incoming),
                 None => incoming.clone(),
             };
-            let data = serde_json::to_string(&combined).map_err(|_| "无法编码累计用量")?;
+            let data = super::storage::encode(&combined)?;
             tx.execute(
                 "INSERT INTO usage_ledger_sources(agent,path,data) VALUES (?1,?2,?3)
                 ON CONFLICT(agent,path) DO UPDATE SET data=excluded.data,dirty=1",
@@ -299,13 +301,20 @@ pub(super) fn source_keys(
     path: &Path,
     file: &FileCache,
 ) -> Result<(), String> {
+    let source: i64 = db
+        .query_row(
+            "SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2",
+            params![agent, path.to_string_lossy()],
+            |r| r.get(0),
+        )
+        .map_err(|_| "无法定位请求来源")?;
     let mut insert = db
-        .prepare_cached("INSERT OR IGNORE INTO usage_source_keys VALUES (?1,?2,?3)")
+        .prepare_cached("INSERT OR IGNORE INTO usage_source_keys VALUES (?1,?2)")
         .map_err(|_| "无法更新请求来源索引")?;
     // 保留旧身份连接：日志改写或父历史迟到后，先前生成的差额仍需一起重新归并。
     for key in normalize::source_keys(agent, path, file) {
         insert
-            .execute(params![agent, path.to_string_lossy(), key])
+            .execute(params![source, key])
             .map_err(|_| "无法更新请求来源索引")?;
     }
     Ok(())

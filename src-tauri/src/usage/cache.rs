@@ -11,6 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// 压缩计量载荷的预算（字节）；未确认入账的旧缓存不参与淘汰，小型文件索引另计。
+const MAX_CACHED_USAGE_BYTES: i64 = 64 * 1024 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct Stamp {
     pub len: u64,
@@ -100,7 +103,8 @@ impl Store {
         Self::open_with_ledger(path, ledger.as_deref())
     }
     pub fn open_with_ledger(path: Option<&Path>, ledger_path: Option<&Path>) -> Self {
-        let disk = path.and_then(|path| {
+        let ledger = super::ledger::Ledger::open(ledger_path);
+        let disk = path.filter(|_| ledger.is_ok()).and_then(|path| {
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -118,7 +122,19 @@ impl Store {
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).ok()?;
             let db = Connection::open(path).ok()?;
-            Self::prepare(&db).ok()?;
+            if db
+                .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+                .ok()?
+                > 1
+            {
+                return None;
+            }
+            if Self::prepare(&db).is_err() {
+                // 升级失败仍读旧表，不能用空内存缓存遮住尚未入账、源已删除的历史。
+                eprintln!(
+                    "Usage cache upgrade deferred; existing records remain available for import"
+                );
+            }
             Some(db)
         });
         let db = disk.unwrap_or_else(|| {
@@ -129,7 +145,7 @@ impl Store {
         Self {
             db,
             ledger_path: ledger_path.map(Path::to_owned),
-            ledger: super::ledger::Ledger::open(ledger_path),
+            ledger,
             #[cfg(test)]
             snapshot: None,
             #[cfg(test)]
@@ -169,11 +185,58 @@ impl Store {
     }
     fn prepare(db: &Connection) -> rusqlite::Result<()> {
         db.busy_timeout(std::time::Duration::from_millis(200))?;
-        // 可重建索引，不使用 WAL，避免每次写数字生成额外敏感文件。
-        db.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        // 旧缓存可能是尚未导入账本的唯一历史副本；升级时使用可恢复的磁盘事务。
+        if version == 0 {
+            db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;
             CREATE TABLE IF NOT EXISTS usage_files(scope TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(scope,path));
             CREATE TABLE IF NOT EXISTS usage_file_stamps(scope TEXT,path TEXT,version INTEGER,stamps TEXT,PRIMARY KEY(scope,path));
-            CREATE TABLE IF NOT EXISTS usage_scans(scope TEXT PRIMARY KEY,updated INTEGER NOT NULL);")
+            CREATE TABLE IF NOT EXISTS usage_scans(scope TEXT PRIMARY KEY,updated INTEGER NOT NULL);")?;
+            let tx =
+                rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if current == 0 {
+                tx.execute_batch(
+                    "ALTER TABLE usage_files ADD COLUMN touched INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE usage_files ADD COLUMN durable INTEGER NOT NULL DEFAULT 0;",
+                )?;
+                {
+                    let mut stmt = tx.prepare("SELECT rowid,data FROM usage_files")?;
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        // 已损坏的旧缓存原样保留；不能因此丢掉其他仍可迁移的旧记录。
+                        if let Ok(data) = super::storage::compress_legacy(row.get_ref(1)?) {
+                            tx.execute(
+                                "UPDATE usage_files SET data=?2 WHERE rowid=?1",
+                                params![row.get::<_, i64>(0)?, data],
+                            )?;
+                        }
+                    }
+                }
+                tx.pragma_update(None, "user_version", 1)?;
+            }
+            tx.commit()?;
+        }
+        if version == 0 || db.pragma_query_value::<i64, _>(None, "auto_vacuum", |r| r.get(0))? != 2
+        {
+            // 失败时下次打开仍会尝试启用增量回收；不删除或替换活跃文件。
+            let _ = db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;");
+        }
+        let uncommitted: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_files WHERE durable=0)",
+            [],
+            |r| r.get(0),
+        )?;
+        // 旧缓存可能仍是其他 Agent 的唯一历史副本。它们全部确认入账前，
+        // 后续普通缓存写入也保留磁盘回滚日志；下次打开确认安全后才使用轻量写入。
+        db.execute_batch(if uncommitted {
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"
+        } else {
+            "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;"
+        })
     }
     pub(super) fn load(&self, scope: &str) -> BTreeMap<PathBuf, FileCache> {
         let Ok(mut stmt) = self
@@ -183,12 +246,15 @@ impl Store {
             return BTreeMap::new();
         };
         let Ok(rows) = stmt.query_map([scope], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                super::storage::decode::<FileCache>(r.get_ref(1)?)?,
+            ))
         }) else {
             return BTreeMap::new();
         };
         rows.filter_map(Result::ok)
-            .filter_map(|(p, s)| serde_json::from_str(&s).ok().map(|v| (PathBuf::from(p), v)))
+            .map(|(p, file)| (PathBuf::from(p), file))
             .collect()
     }
     pub(super) fn load_file(&self, scope: &str, path: &Path) -> Option<FileCache> {
@@ -198,10 +264,9 @@ impl Store {
             .query_row(
                 "SELECT data FROM usage_files WHERE scope=?1 AND path=?2",
                 params![scope, path.to_string_lossy()],
-                |r| r.get::<_, String>(0),
+                |r| super::storage::decode(r.get_ref(0)?),
             )
             .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
     }
     /// 未变化来源只读这个小索引，不反序列化该文件的全部历史计量。
     pub(super) fn unchanged(
@@ -251,13 +316,21 @@ impl Store {
             }
             for path in changed {
                 if let Some(file) = files.get(path) {
-                    let Ok(data) = serde_json::to_string(file) else {
+                    let Ok(data) = super::storage::encode(file) else {
                         continue;
                     };
-                    tx.execute(
-                        "INSERT OR REPLACE INTO usage_files VALUES (?1,?2,?3)",
-                        params![scope, path.to_string_lossy(), data],
-                    )?;
+                    if data.len() as i64 <= MAX_CACHED_USAGE_BYTES {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO usage_files VALUES (?1,?2,?3,?4,1)",
+                            params![scope, path.to_string_lossy(), data, at],
+                        )?;
+                    } else {
+                        // 单份超预算来源只留读取版本，避免挤掉所有其他活跃来源的缓存。
+                        tx.execute(
+                            "DELETE FROM usage_files WHERE scope=?1 AND path=?2 AND durable=1",
+                            params![scope, path.to_string_lossy()],
+                        )?;
+                    }
                     if file.problem.is_none() {
                         tx.execute(
                             "INSERT OR REPLACE INTO usage_file_stamps VALUES (?1,?2,?3,?4)",
@@ -280,15 +353,119 @@ impl Store {
                 "INSERT OR REPLACE INTO usage_scans VALUES (?1,?2)",
                 params![scope, at],
             )?;
-            // 格式/数据根升级后旧数字索引可重建，限制保留量，避免长期积累多个完整副本。
-            tx.execute("DELETE FROM usage_file_stamps WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)",[])?;
-            tx.execute("DELETE FROM usage_files WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)",[])?;
-            tx.execute("DELETE FROM usage_scans WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)",[])?;
+            Self::trim(&tx, MAX_CACHED_USAGE_BYTES)?;
+            // 旧数据根的读取位置无需长期保留；未入账的旧计量仍单独保留。
+            tx.execute("DELETE FROM usage_file_stamps WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
+            tx.execute("DELETE FROM usage_files WHERE durable=1 AND scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
+            tx.execute("DELETE FROM usage_scans WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
             Ok(())
         };
         if save().is_ok() {
             let _ = tx.commit();
+        } else {
+            drop(tx);
         }
+        // 限制已淘汰缓存留下的空闲页；每次最多回收 1 MiB，避免大整理阻塞增量采集。
+        self.reclaim();
+    }
+
+    pub(super) fn trim(db: &Connection, budget: i64) -> rusqlite::Result<()> {
+        let mut bytes: i64 = db.query_row(
+            "SELECT coalesce(sum(length(data)),0) FROM usage_files",
+            [],
+            |r| r.get(0),
+        )?;
+        if bytes <= budget {
+            return Ok(());
+        }
+        let mut stmt = db.prepare(
+            "SELECT rowid,length(data) FROM usage_files WHERE durable=1 ORDER BY touched,rowid",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            if bytes <= budget {
+                break;
+            }
+            let (id, len) = row?;
+            db.execute("DELETE FROM usage_files WHERE rowid=?1", [id])?;
+            bytes -= len;
+        }
+        // 保留小型 stamps：被淘汰但未变化的日志仍无需重读；再次变化时才重新解析。
+        Ok(())
+    }
+
+    pub(super) fn mark_durable(&mut self, scope: &str, files: &BTreeMap<PathBuf, FileCache>) {
+        let Ok(tx) = self.db.transaction() else {
+            return;
+        };
+        // 只标记确实解码并入账的来源；同一 scope 内不可读的旧记录仍不能淘汰。
+        for path in files.keys() {
+            if tx
+                .execute(
+                    "UPDATE usage_files SET durable=1 WHERE scope=?1 AND path=?2",
+                    params![scope, path.to_string_lossy()],
+                )
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = tx.commit();
+    }
+
+    fn reclaim(&self) {
+        // 此 PRAGMA 每回收一页返回一行，必须读到结束；execute_batch 只会执行第一步。
+        let run = || -> rusqlite::Result<()> {
+            let mut stmt = self.db.prepare("PRAGMA incremental_vacuum(256)")?;
+            let mut rows = stmt.query([])?;
+            while rows.next()?.is_some() {}
+            Ok(())
+        };
+        let _ = run();
+    }
+
+    /// 仅在完整发现和采集成功后清理消失来源；指定文件通知不能代表完整目录。
+    pub(super) fn prune_missing(
+        &mut self,
+        scope: &str,
+        paths: &std::collections::BTreeSet<PathBuf>,
+    ) {
+        let Ok(tx) = self.db.transaction() else {
+            return;
+        };
+        let prune = || -> rusqlite::Result<()> {
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM usage_file_stamps WHERE scope=?1",
+                [scope],
+                |r| r.get(0),
+            )?;
+            if count <= paths.len() as i64 {
+                return Ok(());
+            }
+            let mut stmt = tx.prepare("SELECT path FROM usage_file_stamps WHERE scope=?1")?;
+            let obsolete = stmt
+                .query_map([scope], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for path in obsolete {
+                if !paths.contains(Path::new(&path)) {
+                    tx.execute(
+                        "DELETE FROM usage_files WHERE scope=?1 AND path=?2 AND durable=1",
+                        params![scope, path],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM usage_file_stamps WHERE scope=?1 AND path=?2",
+                        params![scope, path],
+                    )?;
+                }
+            }
+            Ok(())
+        };
+        if prune().is_ok() {
+            let _ = tx.commit();
+        } else {
+            drop(tx);
+        }
+        self.reclaim();
     }
 }
 

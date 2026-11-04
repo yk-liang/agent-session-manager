@@ -141,16 +141,17 @@ pub(super) fn refresh(
             .map_err(|_| "无法读取请求事件来源")?;
         let rows = statement
             .query_map([agent], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    super::storage::decode::<FileCache>(r.get_ref(1)?)?,
+                ))
             })
             .map_err(|_| "无法读取请求事件来源")?;
         for row in rows {
             if cancel() {
                 return Err("请求事件读取已取消".into());
             }
-            let (path, data) = row.map_err(|_| "无法读取请求事件来源")?;
-            let file: FileCache =
-                serde_json::from_str(&data).map_err(|_| "用量账本记录损坏，已保留原文件")?;
+            let (path, file) = row.map_err(|_| "无法读取请求事件来源")?;
             super::ledger::source_keys(&tx, agent, &PathBuf::from(path), &file)?;
         }
         tx.execute(
@@ -175,27 +176,29 @@ pub(super) fn refresh(
         // 共享请求 ID、分页或父子关系的来源一起归并；无关会话的 data 不会被读取。
         let mut statement = tx
             .prepare(
-                "WITH RECURSIVE affected(path) AS (
-            SELECT ?2 UNION
-            SELECT b.path FROM affected a
-            JOIN usage_source_keys k ON k.agent=?1 AND k.path=a.path
-            JOIN usage_source_keys b ON b.agent=?1 AND b.key=k.key
+                "WITH RECURSIVE affected(id) AS (
+            SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2 UNION
+            SELECT b.source FROM affected a
+            JOIN usage_source_keys k ON k.source=a.id
+            JOIN usage_source_keys b ON b.key=k.key
+            JOIN usage_ledger_sources related ON related.id=b.source AND related.agent=?1
         ) SELECT s.path,s.data FROM affected a JOIN usage_ledger_sources s
-            ON s.agent=?1 AND s.path=a.path ORDER BY s.path",
+            ON s.id=a.id ORDER BY s.path",
             )
             .map_err(|_| "无法查询相关会话")?;
         let rows = statement
             .query_map(params![agent, seed], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    super::storage::decode::<FileCache>(r.get_ref(1)?)?,
+                ))
             })
             .map_err(|_| "无法读取相关会话")?;
         for row in rows {
             if cancel() {
                 return Err("请求事件读取已取消".into());
             }
-            let (path, data) = row.map_err(|_| "无法读取相关会话")?;
-            let mut file: FileCache =
-                serde_json::from_str(&data).map_err(|_| "用量账本记录损坏，已保留原文件")?;
+            let (path, mut file) = row.map_err(|_| "无法读取相关会话")?;
             for sample in file.samples.iter_mut().chain(&mut file.failures) {
                 if sample.request.source.is_none() {
                     sample.request.source = file
@@ -252,10 +255,17 @@ fn update_sources(
             .chain(samples),
     );
     let owner = files.keys().next().ok_or("请求来源为空")?.to_string_lossy();
+    let owner_id: i64 = tx
+        .query_row(
+            "SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2",
+            params![agent, owner],
+            |r| r.get(0),
+        )
+        .map_err(|_| "无法定位请求来源")?;
     let mut obsolete = BTreeSet::new();
     for path in files.keys() {
         let mut stmt = tx
-            .prepare_cached("SELECT id FROM usage_request_events WHERE agent=?1 AND source=?2")
+            .prepare_cached("SELECT id FROM usage_request_events WHERE agent=?1 AND source=(SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2)")
             .map_err(|_| "无法读取原请求事件")?;
         let ids = stmt
             .query_map(params![agent, path.to_string_lossy()], |r| {
@@ -298,7 +308,7 @@ fn update_sources(
                     event.model,
                     event.status,
                     data,
-                    owner
+                    owner_id
                 ])
                 .map_err(|_| "无法保存请求事件")?;
         }

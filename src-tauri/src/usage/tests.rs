@@ -494,7 +494,7 @@ fn a_future_ledger_schema_is_rejected_without_replacing_user_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("CREATE TABLE future_data(value INTEGER);INSERT INTO future_data VALUES(123);PRAGMA user_version=5;").unwrap();
+    db.execute_batch("CREATE TABLE future_data(value INTEGER);INSERT INTO future_data VALUES(123);PRAGMA user_version=6;").unwrap();
     drop(db);
     assert!(ledger::Ledger::open(Some(&path)).is_err());
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -506,7 +506,7 @@ fn a_future_ledger_schema_is_rejected_without_replacing_user_data() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }
 
@@ -669,12 +669,11 @@ fn mixed_availability_survives_aggregation_stream_completion_and_legacy_ledger_l
     // Old persisted observations have no availability marker. Explicit all-zero complete calls
     // remain measured zero; total-only partial observations remain unknown after upgrade.
     let db = rusqlite::Connection::open(&ledger).unwrap();
-    let raw: String = db
+    let mut file: Value = db
         .query_row("SELECT data FROM usage_ledger_sources LIMIT 1", [], |r| {
-            r.get(0)
+            storage::decode(r.get_ref(0)?)
         })
         .unwrap();
-    let mut file: Value = serde_json::from_str(&raw).unwrap();
     for sample in file["samples"].as_array_mut().unwrap() {
         for key in [
             "availabilityKnown",
@@ -817,12 +816,11 @@ fn opencode_fork_with_new_ids_does_not_rebill_history_but_keeps_real_new_calls()
     // messages must enrich those observations rather than retaining their old "original" status.
     drop(store);
     let legacy = rusqlite::Connection::open(&ledger).unwrap();
-    let raw: String = legacy
+    let mut file: Value = legacy
         .query_row("SELECT data FROM usage_ledger_sources LIMIT 1", [], |r| {
-            r.get(0)
+            storage::decode(r.get_ref(0)?)
         })
         .unwrap();
-    let mut file: Value = serde_json::from_str(&raw).unwrap();
     file["parser_version"] = json!(0);
     for sample in file["samples"].as_array_mut().unwrap() {
         sample["copy_fingerprint"] = Value::Null;
@@ -1171,11 +1169,12 @@ fn claude_fragments_replays_and_final_usage_are_counted_once_without_body_cache(
     assert_eq!(total(&report), 50);
     assert!(!report.partial);
     let cached = rusqlite::Connection::open(&db).unwrap();
-    let data: String = cached
-        .query_row("SELECT group_concat(data) FROM usage_files", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
+    let mut stmt = cached.prepare("SELECT data FROM usage_files").unwrap();
+    let data = stmt
+        .query_map([], |r| storage::decode::<Value>(r.get_ref(0)?))
+        .unwrap()
+        .map(|row| row.unwrap().to_string())
+        .collect::<String>();
     assert!(!data.contains("PRIVATE_BODY"));
     assert!(!data.contains("content"));
 }

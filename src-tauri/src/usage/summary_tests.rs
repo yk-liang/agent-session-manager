@@ -186,7 +186,7 @@ fn summary_upgrades_v2_without_deleted_sources_or_losing_events() {
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        storage::VERSION
     );
 }
 
