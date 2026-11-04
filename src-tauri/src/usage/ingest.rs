@@ -70,7 +70,7 @@ pub(super) fn collect_with_progress(
         }
         match std::fs::metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err("采集来源暂时无法读取".into()),
+            Err(error) => return Err(crate::agents::diagnostics::io("usage_sync", "path_metadata", path, &error)),
             Ok(m) if !m.is_file() => continue,
             _ => {}
         }
@@ -80,7 +80,7 @@ pub(super) fn collect_with_progress(
         } else {
             cache::stamp(path).map(|s| vec![s])
         }
-        .map_err(|_| "无法读取用量文件元数据")?;
+        .map_err(|error| crate::agents::diagnostics::io("usage_sync", "source_stamps", path, &error))?;
         if store.unchanged(&key, path, &stamps, if agent == "opencode" { 4 } else { 3 }) {
             continue;
         }

@@ -121,10 +121,10 @@ try {
 
  await page.evaluate(() => window.__USAGE__.failSync = 'claude');
  await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); });
- await page.locator('.usage-source-error').waitFor(); await waitSynced(2); assert.equal(await total(), '2090');
+ await page.locator('.usage-sync-error').waitFor(); await waitSynced(2); assert.equal(await total(), '2090');
  await page.evaluate(() => window.__USAGE__.failSync = null);
  await page.getByRole('button', { name: '重试同步', exact: true }).click(); await waitSynced(3);
- await page.waitForFunction(() => !document.querySelector('.usage-source-error'));
+ await page.waitForFunction(() => !document.querySelector('.usage-sync-error'));
  await page.evaluate(() => window.__USAGE__.holdSummary = 'today');
  await page.getByRole('button', { name: '今日', exact: true }).click();
  await page.waitForFunction(() => window.__USAGE__.releaseSummary !== null);

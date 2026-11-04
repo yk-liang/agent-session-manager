@@ -29,6 +29,8 @@ export interface SessionMeta {
   sizeBytes: number;
   hasTranscript: boolean;
   statsPending?: boolean;
+  /** 本次应用运行中实际打开正文失败的诊断；摘要刷新不能视为正文恢复。 */
+  readError?: string;
 }
 
 export interface SessionDeleteFailure {

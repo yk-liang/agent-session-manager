@@ -1,5 +1,6 @@
 //! 累计用量的持久化原始计量账本。源日志消失只影响读取缓存，不删除已采集计量。
 use super::{cache::FileCache, normalize, types::Sample};
+use crate::agents::diagnostics;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
@@ -25,14 +26,15 @@ impl SyncLock {
             .recursive(true)
             .mode(0o700)
             .create(parent)
-            .map_err(|e| format!("无法创建用量账本目录：{e}"))?;
+            .map_err(|e| diagnostics::io("usage_sync", "create_ledger_directory", parent, &e))?;
         if fs::symlink_metadata(parent)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| diagnostics::io("usage_sync", "ledger_directory_metadata", parent, &e))?
             .file_type()
             .is_symlink()
         {
             return Err("用量账本目录不能是符号链接".into());
         }
+        let lock_path = path.with_extension("sync.lock");
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -40,9 +42,13 @@ impl SyncLock {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path.with_extension("sync.lock"))
-            .map_err(|e| format!("无法打开用量同步锁：{e}"))?;
-        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            .open(&lock_path)
+            .map_err(|e| diagnostics::io("usage_sync", "open_sync_lock", &lock_path, &e))?;
+        if !file
+            .metadata()
+            .map_err(|e| diagnostics::io("usage_sync", "sync_lock_metadata", &lock_path, &e))?
+            .is_file()
+        {
             return Err("用量同步锁必须是普通文件".into());
         }
         loop {
@@ -57,7 +63,7 @@ impl SyncLock {
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) {
-                return Err(format!("无法锁定用量同步：{error}"));
+                return Err(diagnostics::io("usage_sync", "lock", &lock_path, &error));
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
@@ -75,7 +81,14 @@ impl Drop for SyncLock {
 pub(super) fn reader(path: &Path) -> Result<Connection, String> {
     let db = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ledger::open(None)?.db),
-        Err(e) => return Err(format!("无法读取用量账本：{e}")),
+        Err(e) => {
+            return Err(diagnostics::io(
+                "usage_query",
+                "ledger_path_metadata",
+                path,
+                &e,
+            ))
+        }
         Ok(meta) if !meta.is_file() => return Err("用量账本必须是普通文件".into()),
         Ok(_) => {
             // macOS 的 /var 本身是符号链接；只规范化父目录，仍拒绝账本文件被替换成链接。
@@ -83,7 +96,7 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
                 .parent()
                 .ok_or("用量账本路径无效")?
                 .canonicalize()
-                .map_err(|e| format!("无法定位用量账本：{e}"))?
+                .map_err(|e| diagnostics::io("usage_query", "resolve_ledger_directory", path, &e))?
                 .join(path.file_name().ok_or("用量账本路径无效")?);
             Connection::open_with_flags(
                 canonical,
@@ -91,14 +104,14 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                     | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )
-            .map_err(|e| format!("无法打开用量账本：{e}"))?
+            .map_err(|e| diagnostics::database("usage_query", "open_ledger", path, &e))?
         }
     };
     db.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| diagnostics::database("usage_query", "ledger_busy_timeout", path, &e))?;
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
+        .map_err(|e| diagnostics::database("usage_query", "ledger_read_version", path, &e))?;
     if version > super::storage::VERSION {
         return Err("用量账本来自较新版本，请先升级应用".into());
     }
@@ -120,9 +133,13 @@ impl Ledger {
                 .recursive(true)
                 .mode(0o700)
                 .create(parent)
-                .map_err(|_| "无法创建用量账本目录")?;
+                .map_err(|e| {
+                    diagnostics::io("usage_sync", "create_ledger_directory", parent, &e)
+                })?;
             if fs::symlink_metadata(parent)
-                .map_err(|_| "无法读取用量账本目录")?
+                .map_err(|e| {
+                    diagnostics::io("usage_sync", "ledger_directory_metadata", parent, &e)
+                })?
                 .file_type()
                 .is_symlink()
             {
@@ -134,21 +151,36 @@ impl Ledger {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(path)
-                .map_err(|_| "无法打开用量账本，已保留原文件")?;
-            if !file.metadata().map_err(|_| "无法读取用量账本")?.is_file() {
+                .map_err(|e| diagnostics::io("usage_sync", "open_ledger_file", path, &e))?;
+            if !file
+                .metadata()
+                .map_err(|e| diagnostics::io("usage_sync", "ledger_file_metadata", path, &e))?
+                .is_file()
+            {
                 return Err("用量账本必须是普通文件".into());
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|_| "无法保护用量账本权限")?;
-            Connection::open(path).map_err(|_| "用量账本无法读取，已保留原文件")?
+                .map_err(|e| diagnostics::io("usage_sync", "ledger_permissions", path, &e))?;
+            Connection::open(path)
+                .map_err(|e| diagnostics::database("usage_sync", "open_ledger", path, &e))?
         } else {
-            Connection::open_in_memory().map_err(|_| "无法初始化用量账本")?
+            Connection::open_in_memory().map_err(|e| {
+                diagnostics::database("usage_sync", "open_ledger", Path::new(":memory:"), &e)
+            })?
+        };
+        let error = |stage, e| {
+            diagnostics::database(
+                "usage_sync",
+                stage,
+                path.unwrap_or(Path::new(":memory:")),
+                &e,
+            )
         };
         db.busy_timeout(std::time::Duration::from_millis(1500))
-            .map_err(|_| "无法初始化用量账本")?;
+            .map_err(|e| error("ledger_busy_timeout", e))?;
         let version: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|_| "用量账本损坏，已保留原文件")?;
+            .map_err(|e| error("ledger_read_version", e))?;
         if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
@@ -158,13 +190,13 @@ impl Ledger {
             PRAGMA journal_size_limit=16777216;
             CREATE TABLE IF NOT EXISTS usage_ledger_sources(agent TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(agent,path));
             CREATE TABLE IF NOT EXISTS usage_ledger_updates(agent TEXT PRIMARY KEY,updated INTEGER NOT NULL);")
-            .map_err(|_| "用量账本损坏或不可写，已保留原文件")?;
+            .map_err(|e| error("ledger_initialize", e))?;
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|_| "无法锁定用量账本进行升级")?;
+            .map_err(|e| error("ledger_migration_lock", e))?;
         let version: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|_| "无法读取用量账本版本")?;
+            .map_err(|e| error("ledger_read_version", e))?;
         if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
@@ -176,14 +208,14 @@ impl Ledger {
                 ALTER TABLE usage_request_events ADD COLUMN source TEXT NOT NULL DEFAULT '';
                 DROP TABLE IF EXISTS usage_request_health;",
             )
-            .map_err(|_| "无法升级请求事件账本")?;
+            .map_err(|e| error("ledger_migrate_events", e))?;
             tx.execute("UPDATE usage_request_index SET indexed=0", [])
-                .map_err(|_| "无法更新请求事件索引版本")?;
+                .map_err(|e| error("ledger_migrate_event_index", e))?;
             tx.pragma_update(None, "user_version", 4)
-                .map_err(|_| "无法保存用量账本版本")?;
+                .map_err(|e| error("ledger_write_version", e))?;
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS usage_sync_state(agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);")
-            .map_err(|_| "无法创建用量同步状态")?;
+            .map_err(|e| error("ledger_initialize_sync_state", e))?;
         if version < super::storage::VERSION {
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS usage_source_keys(
@@ -192,11 +224,11 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS usage_source_dirty ON usage_ledger_sources(agent,dirty,path);
             CREATE INDEX IF NOT EXISTS usage_request_source ON usage_request_events(agent,source);",
             )
-            .map_err(|_| "无法创建请求来源索引")?;
+            .map_err(|e| error("ledger_initialize_source_index", e))?;
             super::storage::migrate(&tx)?;
         }
         tx.commit()
-            .map_err(|_| "用量账本升级未能落盘，已保留原数据")?;
+            .map_err(|e| error("ledger_migration_commit", e))?;
         super::storage::compact_migrated(&db);
         Ok(Self { db })
     }

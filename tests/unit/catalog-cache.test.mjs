@@ -12,6 +12,29 @@ const meta = (id, model = null) => ({ sessionId: id, projectDir: "real-dir", tit
 const catalog = (...sessions) => ({ sessions, warnings: [], projects: sessions.length ?
   [{ dirName: "real-dir", displayPath: "/tmp/real", sessionCount: sessions.length, lastActivity: null }] : [] });
 
+test("cached metadata never clears a body read failure; only a successful body retry does", async () => {
+  const row = {...meta("same", "mode-id"), realUserCount:1};
+  const refresh = deferred(); let pending = false;
+  const cache = new AgentCatalogCache(async () => pending ? refresh.promise : catalog(row), async () => ({"mode-id":"Readable"}));
+  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty);
+  pending = true;
+  const load = cache.load("qoder", false);
+  cache.setReadError("qoder", row, "stage: open\nos_code: 24");
+  refresh.resolve(catalog(row)); await load;
+  await cache.enrich("qoder", true);
+  for (const empty of [false, true]) assert.match(cache.peek("qoder", empty).sessions[0].readError, /os_code: 24/);
+  assert.equal(cache.peek("claude", false).sessions[0].readError, undefined);
+  await cache.refine("qoder", false, async () => ({...catalog(), warnings:["Directory cannot be read"]}));
+  assert.equal(cache.peek("qoder", false).sessions[0].sessionId, "same");
+  assert.equal(cache.peek("qoder", false).projects[0].displayPath, "/tmp/real");
+  cache.setReadError("qoder", row, null);
+  for (const empty of [false, true]) assert.equal(cache.peek("qoder", empty).sessions[0].readError, undefined);
+  cache.setReadError("qoder", row, "failed again");
+  cache.remove("qoder", [row]);
+  await cache.refine("qoder", false, async () => ({...catalog(), warnings:["Directory unavailable"]}));
+  assert.equal(cache.peek("qoder", false).sessions.length, 0, "deleted failure must not revive the cached card");
+});
+
 test("switching back exposes the matching snapshot while a coalesced refresh is pending", async () => {
   let calls = 0;
   const held = deferred();

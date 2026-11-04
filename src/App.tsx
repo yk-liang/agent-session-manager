@@ -11,6 +11,7 @@ import ConfigPanel from "./components/ConfigPanel";
 import UsagePanel from "./components/UsagePanel";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
+import ReadDiagnostics from "./components/ReadDiagnostics";
 import * as api from "./api";
 import { sessionKey, shortPath } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
@@ -38,11 +39,13 @@ export default function App() {
   const [groupHints, setGroupHints] = useState<ReadonlyMap<string, string | null>>(new Map());
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [readRequest, setReadRequest] = useState<{ session: SessionMeta; pending: boolean; error: string | null } | null>(null);
   const [searchTarget, setSearchTarget] = useState<ConversationSearchTarget | null>(null);
   const [showEmpty, setShowEmpty] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogWarnings, setCatalogWarnings] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
   const [pendingBatch, setPendingBatch] = useState<{ agent: AgentInfo; sessions: SessionMeta[] } | null>(null);
@@ -146,6 +149,7 @@ export default function App() {
   const applyCatalog = useCallback((cat: Catalog) => {
     setProjects(cat.projects);
     setSessions(cat.sessions);
+    setCatalogWarnings(cat.warnings);
     setProjectlessIds(new Set(cat.projectlessSessionIds ?? []));
     setGroupHints(new Map((cat.sessionGroupHints ?? []).map((hint) => [sessionKey(hint), hint.root])));
   }, []);
@@ -174,9 +178,6 @@ export default function App() {
           applyCatalog(cat);
           const available = new Set(cat.sessions.map(sessionKey));
           setCheckedKeys((keys) => new Set([...keys].filter((key) => available.has(key))));
-          if (cat.warnings.length > 0) {
-            showToast(`部分数据读取失败（${cat.warnings.length} 处）：${cat.warnings[0]}`, true);
-          }
         }
         if (!cancelled && supportsFastCatalog && cat.sessions.some((s) => s.statsPending)) {
           const generation = api.nextRefinementGeneration();
@@ -185,7 +186,6 @@ export default function App() {
               if (cancelled || !refined) return;
               if (pauseAutoRefreshRef.current) { scheduler.request("focus"); return; }
               applyCatalog(refined);
-              if (refined.warnings.length) showToast(`部分数据读取失败（${refined.warnings.length} 处）：${refined.warnings[0]}`, true);
             })
             .catch(() => { /* 首屏仍可打开；下一次日志变化或刷新会重试摘要。 */ });
         }
@@ -230,7 +230,7 @@ export default function App() {
     detailGen.current += 1;
     setSelectedAgent(id);
     setSelectedProject(null);
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
     // 与 Agent 选择一起切换数据，任何一帧都不能把旧 Agent 的卡片当成新 Agent 操作。
     applyCatalog(catalogCache.peek(id, showEmpty) ?? EMPTY_CATALOG);
   };
@@ -251,7 +251,7 @@ export default function App() {
     setBatchMode(false);
     detailGen.current += 1;
     setSelectedProject(dirName);
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
   };
 
   const sidebarGroups = useMemo(() => groupSessions(projects, sessions, projectlessIds, groupHints), [projects, sessions, projectlessIds, groupHints]);
@@ -262,7 +262,7 @@ export default function App() {
     // 归属刷新后分组可能消失，回到全部会话，避免停在没有侧栏入口的空筛选中。
     detailGen.current++;
     setSelectedProject(null);
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
     setSearchTarget(null);
     setBatchMode(false);
     setCheckedKeys(new Set());
@@ -287,15 +287,26 @@ export default function App() {
     const target = hit ? { ...hit, query: search.trim() } : null;
     // 选择变化后旧详情立即不可操作（删除/恢复/分叉按钮随之卸载）
     setDetail(null);
+    setReadRequest(current => ({
+      session: s, pending: true,
+      error: current && sessionKey(current.session) === sessionKey(s) ? current.error : null,
+    }));
     try {
       const d = await api.readSession(agentId, s.projectDir, s.sessionId);
       if (gen !== detailGen.current) return;
+      catalogCache.setReadError(agentId, s, null);
+      const cached = catalogCache.peek(agentId, showEmpty);
+      if (cached) applyCatalog(cached);
+      setReadRequest(null);
       setSearchTarget(target);
       setDetail({ ...d, meta: catalogCache.withNames(agentId, d.meta) });
-      if (d.warnings?.length) showToast("部分历史日志不可用，当前显示可读取内容。", true);
     } catch (e) {
       if (gen !== detailGen.current) return;
-      showToast(String(e), true);
+      const error = String(e);
+      catalogCache.setReadError(agentId, s, error);
+      const cached = catalogCache.peek(agentId, showEmpty);
+      if (cached) applyCatalog(cached);
+      setReadRequest({ session: s, pending: false, error });
     }
   };
 
@@ -304,14 +315,14 @@ export default function App() {
       catalogCache.remove(selectedAgent, [detail.meta]);
       applyCatalog(catalogCache.peek(selectedAgent, showEmpty) ?? EMPTY_CATALOG);
     }
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
     setRefreshKey((k) => k + 1);
   };
 
   const toggleBatch = () => {
     if (deleting || loading || batchRunning.current) return;
     detailGen.current += 1;
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
     setBatchMode(!batchMode);
     setCheckedKeys(new Set());
     setBatchFailures([]);
@@ -349,7 +360,7 @@ export default function App() {
     setBatchFailures([]);
     setBatchProgress({ completed: 0, total: targets.length });
     detailGen.current += 1;
-    setDetail(null);
+    setDetail(null); setReadRequest(null);
     const succeeded: SessionMeta[] = [];
     const failures: SessionDeleteFailure[] = [];
     for (const session of targets) {
@@ -412,10 +423,11 @@ export default function App() {
             selected={selectedProject}
             onSelect={selectProject}
             disabled={deleting}
+            catalogIncomplete={!!catalogError || catalogWarnings.length > 0}
           />}
           sessionList={<SessionList
             sessions={filtered}
-            selectedKey={detail ? sessionKey(detail.meta) : null}
+            selectedKey={detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null}
             search={search}
             onSearch={changeSearch}
             onSelect={openSession}
@@ -430,6 +442,7 @@ export default function App() {
             deleting={deleting}
             loading={loading}
             loadError={catalogError}
+            warnings={catalogWarnings}
             onRetryLoad={() => setRefreshKey(key => key + 1)}
             progress={batchProgress}
             failures={batchFailures}
@@ -451,7 +464,19 @@ export default function App() {
               onDeletingChange={setSingleDeleting}
               toast={showToast}
               searchTarget={searchTarget?.query === search.trim() ? searchTarget : null}
+              onRetryRead={() => void openSession(detail.meta)}
             />
+          ) : readRequest ? (
+            <div className="detail-read-state" aria-busy={readRequest.pending}>
+              {readRequest.error ? <ReadDiagnostics
+                className="session-read-error"
+                title={/^stage: (parse_json|decode_utf8)$/m.test(readRequest.error) ? "会话内容解析失败" : "正文读取失败"}
+                errors={[readRequest.error]}
+                description="当前列表保留的是会话摘要，正文未能读取。"
+                retry={() => void openSession(readRequest.session)}
+                busy={readRequest.pending}
+              /> : <p role="status">正在读取会话…</p>}
+            </div>
           ) : (
             <div className="placeholder">选择一个会话查看详情</div>
           )}

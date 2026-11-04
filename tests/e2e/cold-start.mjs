@@ -104,7 +104,7 @@ try {
   await page.getByText('暂时无法读取用量，请重试查询', { exact: true }).waitFor();
   await page.evaluate(() => { window.__COLD__.failSource = true; window.__COLD__.release(); });
   await page.waitForFunction(() => window.__COLD__.active === 'opencode');
-  await page.locator('.usage-source-error').waitFor();
+  await page.locator('.usage-sync-error').waitFor();
   await assertLayout();
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.screenshot({ path: path.join(artifactDir, 'cold-start-errors.png') });

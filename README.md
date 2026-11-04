@@ -90,6 +90,8 @@ Saved usage lives in `~/Library/Application Support/Agent Session Manager/`. Con
 
 Please include the app version, Agent version, and reproduction steps when opening an [issue](https://github.com/yk-liang/agent-session-manager/issues). Remove keys, private paths, and conversation content before sharing screenshots or logs.
 
+If a session body or usage sync fails, use **复制诊断详情 (Copy diagnostic details)** and the retry button in the error panel. Lists can contain cached summaries, so scan warning counts do not count every unreadable session. Copy diagnostics from the app window experiencing the failure and check local paths before sharing.
+
 See the [development guide](docs/DEVELOPMENT.md) (Chinese) for building, testing, and regenerating screenshots.
 
 ## License and acknowledgments

@@ -14,6 +14,7 @@ import type { AgentInfo, ContentBlock, ConversationSearchTarget, SessionDetail a
 import { fullTime, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../sessionModels";
 import * as api from "../api";
+import ReadDiagnostics from "./ReadDiagnostics";
 
 interface Props {
   detail: Detail;
@@ -22,6 +23,7 @@ interface Props {
   onDeletingChange: (deleting: boolean) => void;
   toast: (msg: string, isError?: boolean) => void;
   searchTarget?: ConversationSearchTarget | null;
+  onRetryRead?: () => void;
 }
 
 function contentBlocks(content: unknown): ContentBlock[] {
@@ -289,7 +291,7 @@ function eventVisible(ev: SessionEvent, tools: boolean, thinking: boolean, conte
   );
 }
 
-export default function SessionDetailView({ detail, agent, onDeleted, onDeletingChange, toast, searchTarget = null }: Props) {
+export default function SessionDetailView({ detail, agent, onDeleted, onDeletingChange, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
   const toTrash = agent.deletePolicy === "trash";
   const removing = useRef(false);
@@ -493,6 +495,7 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
           )}
         </div>
       </div>
+      {detail.warnings?.length ? <ReadDiagnostics className="detail-warnings" title="部分会话内容未能读取" errors={detail.warnings} description="当前显示可读取的内容。" retry={onRetryRead} /> : null}
       <div className="detail-content">
         <div className="detail-body" ref={bodyRef}>
           <div className="virtual-events" style={{ height: virtual.getTotalSize() }}>

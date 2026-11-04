@@ -7,6 +7,8 @@ interface Props {
   selected: string | null;
   onSelect: (dirName: string | null) => void;
   disabled?: boolean;
+  /** A failed/incomplete scan cannot establish the total, even when it returns no rows. */
+  catalogIncomplete?: boolean;
 }
 
 export default function Sidebar({
@@ -15,8 +17,12 @@ export default function Sidebar({
   selected,
   onSelect,
   disabled = false,
+  catalogIncomplete = false,
 }: Props) {
   const total = projects.reduce((n, p) => n + p.sessionCount, 0);
+  const countLabel = catalogIncomplete
+    ? (total > 0 ? `已列出 ${total} 个会话` : "会话数量暂不可确认")
+    : `${total} 个会话`;
   return (
     <aside className="sidebar">
       <div className="sidebar-projects-header">
@@ -27,7 +33,7 @@ export default function Sidebar({
           onClick={() => onSelect(null)}
         >
           <div className="project-path">全部会话</div>
-          <div className="project-meta">{total} 个会话</div>
+          <div className="project-meta">{countLabel}</div>
         </button>
       </div>
       <div className="sidebar-project-list" key={selectedAgent}>
@@ -45,7 +51,7 @@ export default function Sidebar({
             </div>
           </button>
         ))}
-        {projects.length === 0 && <div className="empty-hint">未发现会话</div>}
+        {projects.length === 0 && <div className="empty-hint">{catalogIncomplete ? "会话列表读取不完整，请重试扫描" : "未发现会话"}</div>}
       </div>
     </aside>
   );

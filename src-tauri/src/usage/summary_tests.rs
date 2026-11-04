@@ -32,6 +32,77 @@ fn sum(result: &Summary) -> u64 {
 }
 
 #[test]
+fn sync_lock_and_database_open_preserve_failure_details_without_replacing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite");
+    let lock = path.with_extension("sync.lock");
+    std::os::unix::fs::symlink(&lock, &lock).unwrap();
+    let error = ledger::SyncLock::acquire(&path, &|| false).err().unwrap();
+    assert!(error.contains("stage: open_sync_lock"));
+    assert!(error.contains(&format!("os_code: {}", libc::ELOOP)));
+    assert!(fs::symlink_metadata(&lock)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let bytes = b"PRIVATE_DATA_this_is_not_a_database";
+    fs::write(&path, bytes).unwrap();
+    for error in [
+        ledger::Ledger::open(Some(&path)).err().unwrap(),
+        ledger::reader(&path).err().unwrap(),
+    ] {
+        assert!(error.contains("stage: ledger_read_version"));
+        assert!(error.contains("error_kind: SQLiteNotADatabase"));
+        assert!(error.contains("sqlite_code: 26"));
+        assert!(error.contains("os_code: none"));
+        assert!(!error.contains("PRIVATE_DATA"));
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn source_access_failure_keeps_errno_and_saved_usage_then_retries_without_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    let source = logs.join("aaaa.jsonl");
+    let saved = dir.path().join("original.jsonl");
+    write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
+    let mut store = Store::open(None);
+    summary::sync_at("qoder", &[logs.clone()], &mut store, &|| false).unwrap();
+    let before = read(&mut store, vec![]);
+    assert_eq!(sum(&before), 110);
+    // 文件循环链接能稳定制造真实 I/O 错误，不依赖测试用户是否有特权。
+    fs::rename(&source, &saved).unwrap();
+    std::os::unix::fs::symlink("aaaa.jsonl", &source).unwrap();
+    let error = summary::sync_at("qoder", &[logs.clone()], &mut store, &|| false)
+        .err()
+        .unwrap();
+    assert!(error.contains("operation: usage_sync"));
+    assert!(error.contains("stage: path_metadata"));
+    assert!(error.contains(&format!("os_code: {}", libc::ELOOP)));
+    assert!(error.contains(&format!(
+        "cause: {}",
+        std::io::Error::from_raw_os_error(libc::ELOOP)
+    )));
+    assert!(error.contains(&format!("pid: {}", std::process::id())));
+    assert!(!error.contains("PRIVATE_BODY"));
+    assert_eq!(sum(&read(&mut store, vec![])), 110);
+    fs::remove_file(&source).unwrap();
+    fs::rename(&saved, &source).unwrap();
+    summary::sync_at("qoder", &[logs], &mut store, &|| false).unwrap();
+    let after = read(&mut store, vec![]);
+    assert_eq!(sum(&after), sum(&before));
+    assert_eq!(
+        after
+            .rows
+            .iter()
+            .map(|r| r.metrics.request_count)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(after.synced_agents, ["qoder"]);
+}
+
+#[test]
 fn summary_coverage_requires_full_success_and_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");

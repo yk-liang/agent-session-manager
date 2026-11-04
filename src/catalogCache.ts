@@ -13,6 +13,7 @@ export class AgentCatalogCache {
   private revisions = new Map<string, number>();
   private names = new Map<string, Map<string, string>>();
   private pendingNames = new Map<string, Promise<void>>();
+  private readFailures = new Map<string, Map<string, SessionMeta>>();
   private loader: CatalogLoader;
   private nameLoader: NameLoader;
 
@@ -29,13 +30,53 @@ export class AgentCatalogCache {
     return name && name !== meta.modelName ? { ...meta, modelName: name } : meta;
   }
 
-  private decorate(agent: string, catalog: Catalog): Catalog {
+  private decorate(agent: string, catalog: Catalog, includeEmpty: boolean): Catalog {
     const names = new Map(this.names.get(agent));
     for (const session of catalog.sessions) {
       if (session.model && session.modelName) names.set(session.model, session.modelName);
     }
     this.names.set(agent, names);
-    return { ...catalog, sessions: catalog.sessions.map((session) => this.withNames(agent, session)) };
+    const failures = this.readFailures.get(agent);
+    const sessions = [...catalog.sessions];
+    const sessionKeys = new Set(sessions.map(sessionKey));
+    const restored: SessionMeta[] = [];
+    // 扫描也失败时保留已知失败会话的摘要，不能让正文打不开的卡片随刷新消失。
+    if (catalog.warnings.length) {
+      for (const failed of failures?.values() ?? []) {
+        if ((includeEmpty || failed.realUserCount > 0 || failed.statsPending) && !sessionKeys.has(sessionKey(failed))) {
+          restored.push(failed);
+          sessionKeys.add(sessionKey(failed));
+        }
+      }
+    }
+    const projects = new Map(catalog.projects.map(p => [p.dirName, p]));
+    const previous = new Map(this.peek(agent, includeEmpty)?.projects.map(p => [p.dirName, p]));
+    for (const session of restored) {
+      const project = projects.get(session.projectDir);
+      const metadata = project ?? previous.get(session.projectDir) ?? {
+        dirName: session.projectDir, displayPath: session.cwd ?? session.projectDir, lastActivity: session.lastTs,
+      };
+      projects.set(session.projectDir, {...metadata, sessionCount: (project?.sessionCount ?? 0) + 1});
+    }
+    return {
+      ...catalog,
+      projects: restored.length ? [...projects.values()] : catalog.projects,
+      sessions: [...sessions, ...restored].map(session => ({
+        ...this.withNames(agent, session), readError: failures?.get(sessionKey(session))?.readError,
+      })),
+    };
+  }
+
+  /** 只有同一会话的正文重试成功才清除失败；名称补全和摘要缓存命中都不代表正文可读。 */
+  setReadError(agent: string, session: SessionMeta, error: string | null) {
+    const failures = this.readFailures.get(agent) ?? new Map<string, SessionMeta>();
+    if (error !== null) failures.set(sessionKey(session), {...session, readError: error});
+    else failures.delete(sessionKey(session));
+    this.readFailures.set(agent, failures);
+    for (const empty of [false, true]) {
+      const current = this.peek(agent, empty);
+      if (current) this.snapshots.set(this.key(agent, empty), this.decorate(agent, current, empty));
+    }
   }
 
   load(agent: string, includeEmpty: boolean): Promise<Catalog> {
@@ -47,7 +88,7 @@ export class AgentCatalogCache {
     const request = this.loader(agent, includeEmpty).then((catalog) => {
       // 删除完成前启动的扫描不能把已删除卡片写回缓存。
       if (generation !== (this.generations.get(agent) ?? 0)) return this.peek(agent, includeEmpty) ?? EMPTY_CATALOG;
-      const next = this.decorate(agent, catalog);
+      const next = this.decorate(agent, catalog, includeEmpty);
       this.snapshots.set(key, next);
       return next;
     }).finally(() => { if (this.pending.get(key) === request) this.pending.delete(key); });
@@ -62,7 +103,7 @@ export class AgentCatalogCache {
     const generation = this.generations.get(agent) ?? 0;
     const result = await loader(agent, includeEmpty);
     if (revision !== this.revisions.get(key) || generation !== (this.generations.get(agent) ?? 0)) return undefined;
-    const next = this.decorate(agent, result);
+    const next = this.decorate(agent, result, includeEmpty);
     this.snapshots.set(key, next);
     return next;
   }
@@ -99,6 +140,7 @@ export class AgentCatalogCache {
 
   remove(agent: string, removed: SessionMeta[]) {
     const keys = new Set(removed.map(sessionKey));
+    for (const key of keys) this.readFailures.get(agent)?.delete(key);
     this.generations.set(agent, (this.generations.get(agent) ?? 0) + 1);
     for (const empty of [false, true]) {
       const key = this.key(agent, empty);

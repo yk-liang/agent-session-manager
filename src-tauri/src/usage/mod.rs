@@ -197,6 +197,9 @@ enum CollectionError {
     Other(String),
 }
 impl CollectionError {
+    fn io(path: &std::path::Path, stage: &str, cause: &std::io::Error) -> Self {
+        Self::source(path, crate::agents::diagnostics::io("usage_sync", stage, path, cause))
+    }
     fn source(path: &std::path::Path, cause: impl ToString) -> Self {
         Self::Source {
             path: path.into(),
@@ -242,17 +245,17 @@ fn discover(
         match fs::symlink_metadata(&dir) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && roots.contains(&dir) => continue,
-            Err(e) => return Err(CollectionError::source(&dir, e)),
+            Err(e) => return Err(CollectionError::io(&dir, "path_metadata", &e)),
         }
         let canonical = dir
             .canonicalize()
-            .map_err(|e| CollectionError::source(&dir, e))?;
+            .map_err(|e| CollectionError::io(&dir, "resolve_path", &e))?;
         if !visited.insert(canonical) {
             continue;
         }
         let entries = match fs::read_dir(&dir) {
             Ok(v) => v,
-            Err(e) if strict => return Err(CollectionError::source(&dir, e)),
+            Err(e) if strict => return Err(CollectionError::io(&dir, "read_directory", &e)),
             Err(_) => {
                 warnings.push("部分用量目录无法读取".into());
                 continue;
@@ -261,7 +264,7 @@ fn discover(
         for entry in entries {
             let entry = match entry {
                 Ok(v) => v,
-                Err(e) if strict => return Err(CollectionError::source(&dir, e)),
+                Err(e) if strict => return Err(CollectionError::io(&dir, "read_directory_entry", &e)),
                 Err(_) => {
                     warnings.push("部分用量文件无法列出".into());
                     continue;
@@ -270,7 +273,7 @@ fn discover(
             let path = entry.path();
             let kind = entry
                 .file_type()
-                .map_err(|e| CollectionError::source(&path, e))?;
+                .map_err(|e| CollectionError::io(&path, "file_type", &e))?;
             if kind.is_dir() && agent != "opencode" {
                 // Pi 扩展的 debug 导出会复制主记录，不是额外模型调用。
                 if path.file_name().is_none_or(|n| n != "subagent-artifacts") {

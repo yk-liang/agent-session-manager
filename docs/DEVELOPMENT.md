@@ -32,12 +32,38 @@ npm run test:e2e -- opencode opencode-v2  # 新旧 SQLite 结构，真实 Rust �
 npm run test:manual -- opencode-runtime # 已安装的官方 v2 CLI，隔离目录 + 本地模型接口，无需 API Key
 npm run test:manual -- agent-context-runtime # 已安装的 Claude Code / Pi，真实上下文日志与 WebKit 验证
 ENGINE=chrome npm run test:e2e -- opencode-v2
+npm run test:e2e -- session-diagnostics # 缓存摘要与正文故障、诊断复制、重试、用量同步
 npm run test:integration -- collector   # 先构建 release；后台采集进程使用自清理临时数据
 npm run test:manual -- real             # 本机真实 Qoder 日志，只读
 npm run test:manual -- codex-history    # 本机真实 Codex 分页历史，只读
 ```
 
 浏览器测试需要安装 Playwright WebKit（`npx playwright install webkit`）；`ENGINE=chrome` 使用已安装的 Google Chrome。`BASE_URL` 可指定已运行的开发服务器，默认使用独立临时端口，结束后自动关闭。完整浏览器回归包含生产 CSP 检查，会先构建前端。OpenCode/用量 fixture 导出需要 Cargo 在 PATH 中。真实日志检查不包含在 `npm test` 或 `test:e2e` 中；手动导出和截图在私有临时目录中自动清理。`TEST_ARTIFACTS` 可覆盖合成数据截图目录。
+
+## 会话读取诊断
+
+Qoder/Claude 系 JSONL 读取失败会区分打开、元数据检查、读取、UTF-8 解码与 JSON 解析阶段；用量同步同时保留来源文件、同步锁和账本打开阶段的原始错误。界面的“复制诊断详情”包含 `operation`、`stage`、`error_kind`、`os_code`、`cause`、路径、时间，以及产生错误的进程角色、PID、应用/系统版本、架构、UID/EUID 和文件描述符上限。SQLite 错误另列 `sqlite_code`，不会把 SQLite 扩展码冒充系统 errno。没有系统错误码时记为 `none`，不能据此推断权限正常或异常。诊断不复制原始日志行，但会包含本机路径，外发前按需脱敏。
+
+列表摘要缓存命中只代表文件版本相同，不证明当前 GUI 能打开正文。打开失败的卡片保留“正文读取失败”标记；摘要刷新与模型名称补全不会清除此状态，成功重读同一正文才清除。标记只保留在当前应用进程内。扫描告警条数不代表全部不可读会话；正文失败、扫描告警及用量同步失败都有持续可见的诊断和重试入口。部分 JSON 坏行允许继续显示合法内容，同时保留首条坏行的诊断；系统读取或 UTF-8 解码失败不再伪装成 JSON 坏行。
+
+排查远程反馈时，让用户在**发生故障的 GUI** 中打开原会话或重试用量同步，复制该次诊断。终端读取成功不能替代 GUI 的失败证据；在看到阶段和原始错误前，不推定权限、`O_NONBLOCK` 或文件内容是根因。保留会话、缓存和 FIFO 非阻塞保护。
+
+若所有文件访问均失败且没有可用摘要，界面显示“会话数量暂不可确认”，不能把本次空结果当作历史为空。部分扫描成功时只标明“已列出”的数量；无告警的正常空目录仍显示零个会话。
+
+对于 GUI 明确返回 `open / PermissionDenied / os_code: 1`、授权后仍失败的情况，可让反馈用户保留当前安装包并运行 `bash scripts/asm-access-diagnostics.command`（也可单独转发此脚本）。脚本使用 macOS 自带命令，提示用户在当前 GUI 重试后回车，采集应用签名与校验、进程及父进程、系统扩展、设备管理状态、Qoder 路径元数据和关联的 TCC/sandbox 系统日志；报告保存在仅当前用户可读的临时目录并在 Finder 中定位。不读取会话正文，不修改权限、缓存、签名或系统日志设置，不上传报告。可附带一个加引号的故障文件路径；未提供时只检查第一份普通 JSONL 的元数据，不把该样本当作原故障文件。`--collect-only` 跳过交互与实时日志，适合检查脚本或采集已有事件。系统可能不记录/公开拦截原因，没有关联日志不能排除某种访问控制；发现安全扩展也不等于证明它造成了拦截。外发前检查报告中的路径、软件名和系统日志。
+
+日志按应用身份及相关路径筛选，不限制发送进程，避免遗漏终端安全软件自己的记录。若下载的脚本本身无法读取，可直接在终端粘贴以下只读命令，并在 45 秒采集窗口内从当前 GUI 重试读取原失败会话；结束后连同该次 GUI 的 PID、时间和路径对照分析，无需重新安装或修改权限：
+
+```bash
+/usr/bin/log stream --timeout 45 --style compact --level debug \
+  --predicate 'eventMessage CONTAINS[c] "agent-session" OR eventMessage CONTAINS[c] "Agent Session Manager" OR eventMessage CONTAINS[c] "/.qoder/" OR eventMessage CONTAINS[c] "asm-access-diagnostics"'
+```
+
+区分旁支日志与故障证据：`anchor apple; status: -67050` 表示不满足指定的 Apple 代码要求，不等于签名损坏；应与不加额外要求的 `codesign --verify --strict --all-architectures` 校验分开。`Microphone`、`Camera`、`ListenEvent`、`AppleEvents` 的权限检查也不证明 JSONL 打开被拦截，不能据此添加无关 entitlement。网络扩展列表不是文件访问拦截证据；需要同一次重试的拒绝记录或由管理员确认命中策略。只有启动时的检查、或没有匹配日志，均不能确定读取失败的根因。
+
+`cached_summary_does_not_hide_detail_open_error` 在独立测试子进程中降低文件描述符上限，先命中摘要缓存，再制造真实打开失败，验证原始 errno 到详情错误的传递；这只验证错误传播，不证明用户故障是描述符耗尽。其余 Rust 回归覆盖中途 I/O 失败、UTF-8/JSON 区分、FIFO/普通符号链接、同步失败后的历史保留与重试去重。WebKit 回归检查多个失败卡片与单条扫描告警并存、跨 Agent 隔离、过期请求、复制及重试。
+
+## 数据源与性能验证
 
 `agent-context` 浏览器回归通过 Rust 适配器生成 Claude Code、Qoder、Pi 和 OpenCode v1/v2 的合成日志，检查上下文折叠、消息计数、引用标签和搜索定位。`agent-context-runtime` 使用实际 Claude Code/Pi 程序及本地模型服务，生成提示词快照、环境附件、扩展消息和压缩摘要，再验证只读解析与界面；可用 `CLAUDE_BIN`、`PI_BIN` 指定可执行文件。Qoder 的未登录运行会被官方 CLI 拒绝，因此不把格式样例测试描述为完整的真实会话测试。
 

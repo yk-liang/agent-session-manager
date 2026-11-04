@@ -1,5 +1,6 @@
 mod catalog_cache;
 mod context;
+pub(crate) mod diagnostics;
 #[cfg(test)]
 mod context_test_support;
 pub mod claude;

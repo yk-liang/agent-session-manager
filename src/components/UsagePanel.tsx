@@ -13,6 +13,7 @@ import RequestEvents from "./RequestEvents";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 import { ModelLabel } from "./SessionModel";
+import ReadDiagnostics from "./ReadDiagnostics";
 
 const snapshots = new Map<string, UsageSummary>();
 const periods: [UsagePeriod, string][] = [["today", "今日"], ["week", "近 7 天"], ["month", "近 30 天"], ["all", "全部"]];
@@ -157,10 +158,14 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
         </HelpTip>{partial && available && !incomplete && <span className="usage-partial">部分统计</span>}</div>
         <div className="usage-heading-status"><CollectorControl /></div>
       </div>
-      {queryError && <div className="usage-query-error" role="alert">用量查询失败：{queryError}<button onClick={() => setEventsRevision(n => n + 1)}>重试查询</button></div>}
-      {errors.size > 0 && <div className="usage-sync-error" role="alert"><span>
-        {[...errors].map(([id, error], index) => <span key={id} className="usage-source-error" title={error}>{index > 0 && "、"}{agents.find(a => a.id === id)?.displayName ?? id}</span>)}
-        暂时无法更新，已保存记录仍可查看。</span><button disabled={busy} onClick={() => setRetryKey(key => key + 1)}>重试同步</button></div>}
+      {queryError && <ReadDiagnostics className="usage-query-error" title="用量查询失败" errors={[queryError]} retry={() => setEventsRevision(n => n + 1)} retryLabel="重试查询" />}
+      {errors.size > 0 && <ReadDiagnostics
+        className="usage-sync-error"
+        title={`${[...errors.keys()].map(id => agents.find(a => a.id === id)?.displayName ?? id).join("、")} 暂时无法更新`}
+        description="已保存记录仍可查看。"
+        errors={[...errors].map(([id, error]) => `${agents.find(a => a.id === id)?.displayName ?? id}：${error}`)}
+        retry={() => setRetryKey(key => key + 1)} retryLabel="重试同步" busy={busy}
+      />}
       <div className="usage-filters">
         <div className="usage-periods" role="group" aria-label="统计时间">
           {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} className={period === id ? "active" : ""} onClick={() => setPeriod(id)}>{label}</button>)}

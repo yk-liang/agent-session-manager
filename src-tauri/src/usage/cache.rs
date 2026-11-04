@@ -1,5 +1,5 @@
 use super::{parse, types::*};
-use crate::agents::open_jsonl;
+use crate::agents::{diagnostics, scanning::open_jsonl_diagnosed};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -469,11 +469,13 @@ impl Store {
     }
 }
 
-fn fingerprint(path: &Path, start: u64, len: u64) -> std::io::Result<String> {
-    let mut f = open_jsonl(path)?;
-    f.seek(SeekFrom::Start(start))?;
+fn fingerprint(path: &Path, start: u64, len: u64) -> Result<String, String> {
+    let mut f = open_jsonl_diagnosed(path, "usage_sync")?;
+    f.seek(SeekFrom::Start(start))
+        .map_err(|e| diagnostics::io("usage_sync", "fingerprint_seek", path, &e))?;
     let mut data = Vec::new();
-    f.take(len).read_to_end(&mut data)?;
+    f.take(len).read_to_end(&mut data)
+        .map_err(|e| diagnostics::io("usage_sync", "fingerprint_read", path, &e))?;
     Ok(format!("{:x}", Sha256::digest(data)))
 }
 
@@ -485,7 +487,7 @@ pub(super) fn read_file(
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
     let force = force || old.is_some_and(|old| old.parser_version < 3);
-    let current = stamp(path).map_err(|e| e.to_string())?;
+    let current = stamp(path).map_err(|e| diagnostics::io("usage_sync", "path_metadata", path, &e))?;
     if !force && old.is_some_and(|old| old.problem.is_none() && old.stamps == [current.clone()]) {
         return Ok((old.unwrap().clone(), 0));
     }
@@ -515,13 +517,14 @@ pub(super) fn read_file(
     if result.state.session.is_empty() {
         result.state.session = path.to_string_lossy().into_owned();
     }
-    let mut file = open_jsonl(path).map_err(|e| e.to_string())?;
+    let mut file = open_jsonl_diagnosed(path, "usage_sync")?;
     let start = if compressed { 0 } else { result.offset };
     file.seek(SeekFrom::Start(start))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| diagnostics::io("usage_sync", "seek", path, &e))?;
     let mut reader: Box<dyn BufRead> = if compressed {
         Box::new(BufReader::new(
-            zstd::stream::read::Decoder::new(file).map_err(|e| e.to_string())?,
+            zstd::stream::read::Decoder::new(file)
+                .map_err(|e| diagnostics::io("usage_sync", "decompress_init", path, &e))?,
         ))
     } else {
         Box::new(BufReader::with_capacity(
@@ -538,8 +541,10 @@ pub(super) fn read_file(
         if cancel() {
             return Err("统计已取消".into());
         }
-        let (bytes, terminated, oversized) =
-            bounded_line(reader.as_mut(), &mut line).map_err(|e| e.to_string())?;
+        let (bytes, terminated, oversized) = bounded_line(reader.as_mut(), &mut line).map_err(|e| {
+            let stage = if compressed { "decompress_read" } else { "read" };
+            format!("{}\nbyte_offset: {position}", diagnostics::io("usage_sync", stage, path, &e))
+        })?;
         if bytes == 0 {
             break;
         }
@@ -604,13 +609,12 @@ pub(super) fn read_file(
     result.stamps = vec![current];
     if !compressed {
         result.head_len = result.offset.min(2048);
-        result.head = fingerprint(path, 0, result.head_len).map_err(|e| e.to_string())?;
+        result.head = fingerprint(path, 0, result.head_len)?;
         result.tail = fingerprint(
             path,
             result.offset.saturating_sub(64),
             result.offset.min(64),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
     Ok((result, bytes_read))
 }

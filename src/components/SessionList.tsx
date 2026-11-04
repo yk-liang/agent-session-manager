@@ -4,6 +4,7 @@ import UiIcon from "./UiIcon";
 import { formatSize, relativeTime, sessionKey, shortPath } from "../utils";
 import SessionModel from "./SessionModel";
 import HighlightedText from "./HighlightedText";
+import ReadDiagnostics from "./ReadDiagnostics";
 
 interface Props {
   sessions: SessionMeta[];
@@ -22,6 +23,7 @@ interface Props {
   deleting: boolean;
   loading: boolean;
   loadError: string | null;
+  warnings: string[];
   onRetryLoad: () => void;
   progress: { completed: number; total: number } | null;
   failures: SessionDeleteFailure[];
@@ -52,6 +54,7 @@ export default function SessionList({
   deleting,
   loading,
   loadError,
+  warnings,
   onRetryLoad,
   progress,
   failures,
@@ -66,6 +69,9 @@ export default function SessionList({
 }: Props) {
   const selectedCount = new Set(sessions.filter((s) => checkedKeys.has(sessionKey(s))).map(sessionKey)).size;
   const allSelected = sessions.length > 0 && sessions.every((s) => checkedKeys.has(sessionKey(s)));
+  const emptyHint = loading ? "正在读取会话…"
+    : loadError || warnings.length > 0 ? "会话列表读取不完整，请重试扫描；当前结果不能说明历史会话为空。"
+    : "没有匹配的会话";
   return (
     <div className="session-list" aria-busy={loading}>
       <div className="search-box">
@@ -89,7 +95,8 @@ export default function SessionList({
             {searchPending ? "正在搜索对话…" : searchError ? <>正文搜索失败 <button onClick={onRetrySearch} disabled={deleting}>重试搜索</button></> : `${searchSkipped} 个会话未能搜索`}
           </div>
         )}
-        {loadError && <div className="catalog-error" role="alert"><span>读取会话失败：{loadError}</span><button onClick={onRetryLoad} disabled={deleting || loading}>重试读取</button></div>}
+        {loadError && <ReadDiagnostics className="catalog-error" title="读取会话列表失败" errors={[loadError]} retry={onRetryLoad} busy={deleting || loading} />}
+        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`本次扫描有 ${warnings.length} 条告警`} errors={warnings} description="列表可能包含缓存摘要；告警条数不代表全部不可读会话，正文在打开时验证。" retry={onRetryLoad} retryLabel="重试扫描" busy={deleting || loading} />}
         <div className="session-list-options">
           <label className="toggle show-empty-toggle">
             <input
@@ -153,6 +160,7 @@ export default function SessionList({
                 {formatSize(s.sizeBytes)}
               </div>
               <div className="session-card-badges">
+                {s.readError && <span className="badge read-error-badge" title="正文未能读取，当前保留列表摘要；点击会话可查看诊断或重试。">正文读取失败</span>}
                 {isEmpty && <span className="badge empty-badge">空会话</span>}
                 <SessionModel session={s} badge />
                 {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
@@ -182,7 +190,7 @@ export default function SessionList({
             </button>
           );
         })}
-        {sessions.length === 0 && !searchPending && <div className="empty-hint">没有匹配的会话</div>}
+        {sessions.length === 0 && !searchPending && <div className="empty-hint">{emptyHint}</div>}
       </div>
     </div>
   );

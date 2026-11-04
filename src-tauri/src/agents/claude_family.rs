@@ -5,6 +5,8 @@
 mod context;
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod diagnostic_tests;
 
 use serde_json::Value;
 #[cfg(test)]
@@ -73,10 +75,26 @@ pub fn parse_meta(
     project_dir: &str,
     opts: FamilyOptions,
 ) -> super::ParseOutcome<SessionMeta> {
-    let Ok(file) = super::open_jsonl(path) else {
-        return super::ParseOutcome::Failed(format!("无法读取会话文件 {:?}", path));
+    parse_meta_with(path, project_dir, opts, "catalog_metadata", |_| {})
+}
+
+fn parse_meta_with(
+    path: &Path,
+    project_dir: &str,
+    opts: FamilyOptions,
+    operation: &str,
+    mut observe: impl FnMut(Value),
+) -> super::ParseOutcome<SessionMeta> {
+    let file = match super::scanning::open_jsonl_diagnosed(path, operation) {
+        Ok(file) => file,
+        Err(error) => return super::ParseOutcome::Failed(error),
     };
-    let size_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let size_bytes = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(error) => return super::ParseOutcome::Failed(super::diagnostics::io(
+            operation, "file_metadata", path, &error,
+        )),
+    };
     let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
         return super::ParseOutcome::Failed(format!("会话文件名非法: {:?}", path));
     };
@@ -108,7 +126,7 @@ pub fn parse_meta(
     let mut last_prompt: Option<String> = None;
     let mut first_user_text: Option<String> = None;
 
-    let bad_lines = super::for_each_jsonl_line(BufReader::new(file).lines(), |v| {
+    let result = super::scanning::read_jsonl_checked(BufReader::new(file), path, operation, |v| {
         let Some(t) = v.get("type").and_then(Value::as_str) else {
             return;
         };
@@ -203,16 +221,18 @@ pub fn parse_meta(
             }
             _ => {}
         }
+        observe(v);
     });
 
     meta.title = custom_title
         .or(ai_title)
         .or(last_prompt)
         .or(first_user_text);
-    if bad_lines > 0 {
-        return super::ParseOutcome::Degraded(meta, super::degraded_message(path, bad_lines));
+    match result {
+        Ok(None) => super::ParseOutcome::Ok(meta),
+        Ok(Some(warning)) => super::ParseOutcome::Degraded(meta, warning),
+        Err(error) => super::ParseOutcome::Failed(error),
     }
-    super::ParseOutcome::Ok(meta)
 }
 
 /// 是否为该 family 下应展示的本地 CLI 会话
@@ -367,9 +387,23 @@ pub fn read_session(
         return Err("非法会话 ID".into());
     }
     let path = base.join(project_dir).join(format!("{session_id}.jsonl"));
-    if !path.exists() {
+    let missing = match std::fs::metadata(&path) {
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(error),
+        Err(error) => return Err(super::diagnostics::io(
+            "session_detail", "path_metadata", &path, &error,
+        )),
+    };
+    if let Some(missing_error) = missing {
         let state_dir = base.join(project_dir).join(session_id);
-        if state_dir.exists() {
+        let state_exists = match std::fs::metadata(&state_dir) {
+            Ok(meta) => meta.is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(super::diagnostics::io(
+                "session_detail", "state_directory_metadata", &state_dir, &error,
+            )),
+        };
+        if state_exists {
             return Ok(SessionDetail {
                 warnings: Vec::new(),
                 meta: SessionMeta {
@@ -396,18 +430,13 @@ pub fn read_session(
                 events: Vec::new(),
             });
         }
-        return Err("会话文件不存在".to_string());
+        return Err(super::diagnostics::io(
+            "session_detail", "path_metadata", &path, &missing_error,
+        ));
     }
-    // 详情沿用可解析事件，Degraded 告警由目录扫描统一展示；
-    // 坏行同样被跳过，不影响事件渲染
-    let (meta, _) = parse_meta(&path, project_dir, opts).split();
-    let Some(meta) = meta else {
-        return Err(format!("会话文件无法解析: {:?}", path));
-    };
-
-    let file = super::open_jsonl(&path).map_err(|e| e.to_string())?;
     let mut events = Vec::new();
-    super::for_each_jsonl_line(BufReader::new(file).lines(), |v| {
+    // 同一份读取同时提取摘要和详情，保留阶段错误，避免二次打开时错误被替换。
+    let outcome = parse_meta_with(&path, project_dir, opts, "session_detail", |v| {
         match v.get("type").and_then(Value::as_str) {
             Some("user" | "assistant" | "system" | "developer" | "attachment") => {
                 events.extend(context::normalize(v));
@@ -415,10 +444,15 @@ pub fn read_session(
             _ => {}
         }
     });
+    let (meta, warnings) = match outcome {
+        super::ParseOutcome::Ok(meta) => (meta, Vec::new()),
+        super::ParseOutcome::Degraded(meta, warning) => (meta, vec![warning]),
+        super::ParseOutcome::Failed(error) => return Err(error),
+    };
     Ok(SessionDetail {
         meta,
         events,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 

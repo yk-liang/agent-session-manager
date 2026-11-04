@@ -102,7 +102,7 @@ try {
   await page.goto(baseURL); await tab('用量');
   await page.waitForFunction(() => window.__COVERAGE__.release !== null);
   await page.evaluate(() => { const state = window.__COVERAGE__; state.failAgent = 'codex'; state.release(); });
-  await page.locator('.usage-source-error').waitFor();
+  await page.locator('.usage-sync-error').waitFor();
   await coverage.getByText('统计尚未完整', { exact: true }).waitFor();
   await waitTotal('110'); await waitLabel('已统计 Token');
   await chooseAgent(page, 'codex'); await waitTotal('—');

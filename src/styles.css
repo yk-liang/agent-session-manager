@@ -103,7 +103,6 @@
 .usage-chart-empty { display: flex; align-items: center; justify-content: center; height: 222px; color: var(--text-dim); font-size: 12px; }
 .usage-breakdowns { display: grid; grid-template-columns: minmax(0,1fr); gap: 20px; }
 .usage-sync-error { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 12px; color: var(--text-dim); }
-.usage-source-error { color: var(--danger); }
 .usage-query-error,.usage-sync-error,.request-error { flex-wrap: wrap; overflow-wrap: anywhere; }.usage-query-error button,.usage-sync-error button,.request-error button { flex-shrink: 0; }
 .usage-model-table-scroll { max-width: 100%; overflow-x: auto; }
 .usage-models h2 { display: flex; align-items: center; gap: 8px; }
@@ -1995,6 +1994,30 @@ button.danger.solid:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+.read-diagnostics {
+  display: block;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.read-diagnostics > strong { color: var(--danger); }
+.read-diagnostics p { margin: 8px 0; }
+.read-error-summary { color: var(--text-dim); }
+.read-error-fields { font-family: monospace; }
+.read-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.read-diagnostics details { margin-top: 8px; }
+.read-diagnostics summary { cursor: pointer; }
+.read-diagnostics pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; user-select: text; font-size: 11px; line-height: 1.6; }
+.read-diagnostics .diagnostic-privacy { color: var(--text-dim); font-size: 11px; }
+.detail-read-state { padding: 24px; min-width: 0; overflow: auto; flex: 1; }
+.read-error-badge { color: var(--danger); border: 1px solid var(--danger); }
+.detail-warnings { margin: 0 16px 12px; }
 
 /* ---------- scrollbars ---------- */
 ::-webkit-scrollbar {
