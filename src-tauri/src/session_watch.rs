@@ -81,6 +81,15 @@ impl WatchSpec {
                     return path
                         .extension()
                         .is_some_and(|ext| ext == "jsonl" || self.all_usage && ext == "zst")
+                        || path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                self.paths
+                                    .extra_transcript_suffixes
+                                    .iter()
+                                    .any(|suffix| name.ends_with(suffix))
+                            })
                         || path.is_dir()
                         || event.kind.is_remove() && path.extension().is_none();
                 }
@@ -320,12 +329,14 @@ mod tests {
         let codex = WatchSpec::new("codex", root.clone());
         for path in [
             "sessions/2099/01/01/a.jsonl",
+            "sessions/2099/01/01/a.jsonl.zst",
             "session_index.jsonl",
             ".codex-global-state.json",
         ] {
             assert!(codex.relevant(&change(root.join(path))));
         }
         assert!(!codex.relevant(&change(root.join("auth.json"))));
+        assert!(!codex.relevant(&change(root.join("sessions/2099/01/01/cache.zst"))));
         let sqlite = WatchSpec::new("opencode", root.clone());
         assert!(sqlite.relevant(&change(root.join("opencode.db-wal"))));
         assert!(!sqlite.relevant(&change(root.join("opencode.db-shm"))));

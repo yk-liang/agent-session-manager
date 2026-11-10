@@ -215,6 +215,8 @@ pub struct AgentInfo {
 #[derive(Clone, Default)]
 pub struct AgentWatchPaths {
     pub transcript_dirs: Vec<PathBuf>,
+    /// 默认 .jsonl 之外的日志文件后缀，由各 Adapter 声明，监听器无需识别 Agent 类型。
+    pub extra_transcript_suffixes: Vec<&'static str>,
     pub max_depth: Option<usize>,
     pub root_files: Vec<&'static str>,
     pub root_file_patterns: Vec<(&'static str, &'static str)>,

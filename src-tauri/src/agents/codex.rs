@@ -1,9 +1,11 @@
-//! Codex 本地数据源（CLI、IDE、桌面）：~/.codex/sessions/年/月/日/rollout-<时间戳>-<uuid>.jsonl
+//! Codex 本地数据源（CLI、IDE、桌面）：读取 sessions 下的 .jsonl 与 .jsonl.zst 日志。
 //!
 //! 与 Claude 系完全不同：OpenAI Responses 格式（session_meta + response_item）。
 //! 转换为统一对话事件，运行指令与状态通知独立标记为 context。
 //! 项目按 session_meta 里的 cwd 分组。
 
+#[cfg(test)]
+mod compressed_tests;
 mod context;
 #[cfg(test)]
 mod context_tests;
@@ -12,6 +14,7 @@ mod history;
 #[cfg(test)]
 mod history_tests;
 mod projects;
+mod storage;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -87,6 +90,8 @@ struct ParsedRollout {
     first_user_text: Option<String>,
     events: Vec<Value>,
     size_bytes: u64,
+    /// 正文字节数；压缩页只读文件头时未知，完整读取后补齐，供分页边界与删除复核使用。
+    decoded_size_bytes: Option<u64>,
 }
 
 fn text_of_content(items: &[Value]) -> String {
@@ -265,16 +270,13 @@ fn read_rollout(
     limit: ReadLimit,
     mut dedup: Option<&mut history::EventDedup>,
 ) -> super::ParseOutcome<ParsedRollout> {
-    let file = match super::open_jsonl(path) {
+    let file = match storage::Reader::open(path) {
         Ok(f) => f,
         Err(e) => return super::ParseOutcome::Failed(format!("无法读取 rollout {:?}: {e}", path)),
     };
-    let metadata = file.metadata().ok();
-    let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-    let identity = metadata
-        .as_ref()
-        .map(|m| (m.dev(), m.ino()))
-        .unwrap_or_default();
+    let size_bytes = file.metadata().len();
+    let identity = (file.metadata().dev(), file.metadata().ino());
+    let decoded_size_bytes = file.decoded_size_hint();
     // history_base 的字节边界限定旧页有效前缀，不能把分页后补写的旧尾部混进当前历史。
     let mut reader =
         BufReader::with_capacity(64 * 1024, file.take(limit.bytes.unwrap_or(u64::MAX)));
@@ -300,6 +302,7 @@ fn read_rollout(
         first_user_text: None,
         events: Vec::new(),
         size_bytes,
+        decoded_size_bytes,
     };
 
     let mut bad_lines = 0;
@@ -310,9 +313,10 @@ fn read_rollout(
         let len = match reader.read_until(b'\n', &mut line) {
             Ok(0) => break,
             Ok(len) => len,
-            Err(_) => {
-                bad_lines += 1;
-                break;
+            Err(error) => {
+                return super::ParseOutcome::Failed(format!(
+                    "无法读取或解压 rollout {:?}: {error}", path
+                ));
             }
         };
         let line_offset = offset;
@@ -527,6 +531,18 @@ fn read_rollout(
         }
     }
 
+    if mode != ReadMode::Header {
+        if limit.bytes.is_some_and(|end| offset < end) {
+            return super::ParseOutcome::Failed(format!(
+                "历史分页被截断，读取边界超出解压后日志大小：{:?}",
+                path
+            ));
+        }
+        if limit.bytes.is_none() {
+            parsed.decoded_size_bytes = Some(offset);
+        }
+    }
+
     // 不用文件名兜底生成 ID：缺少有效 session_meta（含内容损坏）即解析失败。
     // 删除路径按解析出的 ID 匹配，绝不能信任文件名推导的身份
     if parsed.session_id.is_empty() {
@@ -551,7 +567,9 @@ fn all_rollouts_in(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
             for day in super::read_dir_warned(&month.path(), warnings) {
                 for f in super::read_dir_warned(&day.path(), warnings) {
                     let name = f.file_name().to_string_lossy().to_string();
-                    if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                    if name.starts_with("rollout-")
+                        && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
+                    {
                         let path = f.path();
                         // 零字节文件没有会话身份或正文，也可能尚未写入，扫描时忽略。
                         // 仅跳过已确认的空普通文件；特殊文件和读取失败仍交给解析器告警。
@@ -902,6 +920,7 @@ impl AgentSource for CodexSource {
     }
     fn watch_paths(&self, usage: bool) -> super::AgentWatchPaths {
         let mut paths = super::AgentWatchPaths::transcripts("sessions", None);
+        paths.extra_transcript_suffixes.push(".jsonl.zst");
         if usage {
             paths
                 .transcript_dirs
@@ -1081,6 +1100,7 @@ mod tests {
                 first_user_text: None,
                 events: Vec::new(),
                 size_bytes: 0,
+                decoded_size_bytes: Some(0),
             }
         }
         // 可交互：交互来源 × 用户线程（vscode+user 曾被旧实现误过滤）

@@ -96,6 +96,8 @@ cargo test --release --offline --locked --lib usage::storage_bench::storage_comp
 
 Codex 首屏及长会话复测：`cd src-tauri && cargo run --release --offline --locked --example session_perf`（`-- --quick-only` 可验证重启后摘要命中）。
 
+Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib compressed -- --test-threads=1`。覆盖压缩与普通日志混合分页、解压后字节边界、按需工具读取、追加帧、缓存刷新和删除保护。分叉起点引用父线程的物理页时不误报缺页，也不将父线程文件加入删除范围；子线程自身缺页仍告警并拒绝删除。压缩格式在读取时流式解压，不向磁盘落正文副本；卡片大小表示实际文件占用。会话页仍只扫描 `sessions/`，归档与子代理不能直接计入该页应显示的主会话数量。仅核对本机目录可运行 `cargo run --release --offline --locked --example session_perf -- --catalog-only`，输出数量与耗时，不导出正文。
+
 本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
 输出各 Agent 三轮目录耗时与 Qoder 后台名称补全耗时，不输出会话正文。
 

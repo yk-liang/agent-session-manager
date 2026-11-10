@@ -34,12 +34,15 @@ impl EventDedup {
         let hash: [u8; 32] = Sha256::digest(bytes).into();
         let count = self.current.entry(hash).or_default();
         *count += 1;
-        let previous = self.seen.entry(hash).or_default();
-        if *count <= *previous {
-            return false;
+        *count > self.seen.get(&hash).copied().unwrap_or(0)
+    }
+
+    pub fn commit_page(&mut self) {
+        // 本页解压或边界校验失败时会被丢弃，不能提前吞掉后续页里重放的有效消息。
+        for (hash, count) in self.current.drain() {
+            let previous = self.seen.entry(hash).or_default();
+            *previous = (*previous).max(count);
         }
-        *previous = *count;
-        true
     }
 }
 
@@ -49,10 +52,29 @@ pub(super) fn headers(paths: Vec<PathBuf>, warnings: &mut Vec<String>) -> Vec<Pa
         let (header, ws) =
             read_rollout(&path, ReadMode::Header, ReadLimit::default(), None).split();
         warnings.extend(ws);
-        if let Some(header) = header.filter(is_relevant_session) {
+        if let Some(header) = header {
             pages.push(Page { path, header });
         }
     }
+    let by_path: HashMap<_, _> = pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.clone(), i))
+        .collect();
+    let mut compressed_copies = HashSet::new();
+    for page in &pages {
+        if page.path.extension().is_some_and(|ext| ext == "zst") {
+            if let Some(&i) = by_path.get(&page.path.with_extension("")) {
+                // 压缩替换的短暂交叠期优先使用仍可追加的原文。删除另行枚举、复核所有副本。
+                if same_rollout_identity(&page.header, &pages[i].header) {
+                    compressed_copies.insert(page.path.clone());
+                } else {
+                    warnings.push(format!("原文与压缩副本的会话身份不一致：{:?}", page.path));
+                }
+            }
+        }
+    }
+    pages.retain(|page| is_relevant_session(&page.header) && !compressed_copies.contains(&page.path));
     pages.sort_by(|a, b| {
         a.header
             .created_ts
@@ -74,12 +96,19 @@ pub(super) fn scan(root: &Path, warnings: &mut Vec<String>) -> BTreeMap<String, 
     groups
 }
 
-fn storage_id(page: &Page) -> String {
-    let stem = page
+fn storage_stem(page: &Page) -> &str {
+    let name = page
         .path
-        .file_stem()
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
+    name.strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_suffix(".jsonl"))
+        .unwrap_or(name)
+}
+
+fn storage_id(page: &Page) -> String {
+    let stem = storage_stem(page);
     // 文件名仅用来定位 history_base 引用的物理页；会话身份始终来自已解析的 session_meta。
     stem.rsplit_once('_')
         .map(|(_, id)| id.to_string())
@@ -123,7 +152,13 @@ pub(super) fn resolve(pages: &[Page]) -> (Vec<(usize, ReadLimit)>, Vec<String>) 
         };
         let Some(&previous) = by_id.get(&base.thread_id) else {
             // fork 的父会话拥有独立逻辑 ID，不把父线程混进当前会话或计作缺失分段。
-            if pages[current].header.forked_from.as_deref() != Some(base.thread_id.as_str()) {
+            let page = &pages[current];
+            let parent = page.header.forked_from.as_deref();
+            // 分叉起点以本线程 ID 命名，但引用可能指向父线程后续的物理页 ID。
+            // 只有这个起点允许外部引用；子线程后续页的缺页仍须告警并阻止部分删除。
+            let fork_root = parent.is_some_and(|id| id != page.header.session_id)
+                && storage_stem(page).ends_with(&format!("-{}", page.header.session_id));
+            if parent != Some(base.thread_id.as_str()) && !fork_root {
                 warnings.push(format!(
                     "会话 {} 缺少历史分页 {}",
                     pages[current].header.session_id, base.thread_id
@@ -135,9 +170,11 @@ pub(super) fn resolve(pages: &[Page]) -> (Vec<(usize, ReadLimit)>, Vec<String>) 
             warnings.push("历史分页引用缺少有效读取边界".into());
             break;
         }
+        // 压缩页的文件头无法确定正文长度；完整解析或读取受限前缀时再复核该边界。
         if base
             .end_byte_offset
-            .is_some_and(|end| end > pages[previous].header.size_bytes)
+            .zip(pages[previous].header.decoded_size_bytes)
+            .is_some_and(|(end, size)| end > size)
         {
             warnings.push("历史分页被截断，读取边界超出文件大小".into());
             break;
@@ -189,6 +226,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         if p.session_id != meta.session_id || !is_relevant_session(&p) {
             return Err("会话来源已变化，请刷新后重试".into());
         }
+        dedup.commit_page();
         if p.first_ts.is_some() && (meta.first_ts.is_none() || p.first_ts < meta.first_ts) {
             meta.first_ts = p.first_ts;
         }

@@ -2,7 +2,6 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex, OnceLock};
 
@@ -11,6 +10,7 @@ struct Location {
     path: PathBuf,
     device: u64,
     inode: u64,
+    /// 解压后的正文字节偏移；与压缩文件在磁盘上的长度无关。
     offset: u64,
     len: usize,
     hash: [u8; 32],
@@ -61,16 +61,18 @@ pub(crate) fn read(token: &str) -> Result<Value, String> {
         .get(token)
         .cloned()
         .ok_or("内容引用已过期，请重新打开会话")?;
-    let mut file =
-        super::super::open_jsonl(&location.path).map_err(|e| format!("无法读取工具内容：{e}"))?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let mut file = storage::Reader::open(&location.path)
+        .map_err(|e| format!("无法读取工具内容：{e}"))?;
+    let meta = file.metadata();
     // 允许 CLI 继续追加；原位改写、替换和截断必须重新验证。
     if (meta.dev(), meta.ino()) != (location.device, location.inode)
-        || location.offset.saturating_add(location.len as u64) > meta.len()
+        || file
+            .decoded_size_hint()
+            .is_some_and(|size| location.offset.saturating_add(location.len as u64) > size)
     {
         return Err("会话文件已变化，请重新打开会话".into());
     }
-    file.seek(SeekFrom::Start(location.offset))
+    file.skip_prefix(location.offset)
         .map_err(|e| e.to_string())?;
     let mut bytes = vec![0; location.len];
     file.read_exact(&mut bytes).map_err(|e| e.to_string())?;

@@ -1,6 +1,6 @@
 use super::*;
 
-fn page(
+pub(super) fn page(
     root: &Path,
     storage: &str,
     id: &str,
@@ -30,10 +30,39 @@ fn page(
     path
 }
 
-fn message(ordinal: u64, role: &str, text: &str) -> Value {
+pub(super) fn message(ordinal: u64, role: &str, text: &str) -> Value {
     json!({"timestamp":format!("2099-12-31T00:00:{ordinal:02}Z"), "ordinal":ordinal,
         "type":"response_item", "payload":{"type":"message", "role":role,
             "id":format!("message-{ordinal}"), "content":[{"type":"text","text":text}]}})
+}
+
+#[test]
+fn compressed_rollout_keeps_interactive_session_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let path = page(
+        &root,
+        "compressed-storage",
+        "compressed-session",
+        0,
+        None,
+        vec![message(1, "user", "A synthetic user request")],
+    );
+    assert_eq!(catalog_in(&root, false).unwrap().sessions.len(), 1);
+
+    // 仅改变同一日志的存储格式，模拟 Codex 对历史日志的压缩，保持会话内容不变。
+    let bytes = fs::read(&path).unwrap();
+    let compressed = path.with_extension("jsonl.zst");
+    fs::write(&compressed, zstd::stream::encode_all(bytes.as_slice(), 0).unwrap()).unwrap();
+    fs::remove_file(&path).unwrap();
+
+    let catalog = catalog_in(&root, false).unwrap();
+    assert_eq!(
+        catalog.sessions.len(),
+        1,
+        "压缩存储不应使非空交互式会话从列表消失；warnings={:?}",
+        catalog.warnings
+    );
 }
 
 #[test]

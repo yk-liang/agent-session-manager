@@ -24,6 +24,8 @@ Screenshots show the current source build with fictional projects, conversations
 
 Codex support includes local sessions from the CLI, IDE integrations, and desktop app. OpenCode supports both v1 and v2 data formats.
 
+Codex session browsing supports both `.jsonl` and Zstandard-compressed `.jsonl.zst` logs, with log pages merged into one conversation. The Sessions view lists unarchived user conversations; Usage also covers archived logs.
+
 ### Understand usage, down to each request
 
 - Filter by Agent, model, and date range. View hourly trends for today and daily trends for the last 7 or 30 days.
