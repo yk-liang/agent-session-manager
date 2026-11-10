@@ -108,6 +108,16 @@ fn fork_later_page_still_reports_a_missing_page_of_its_own_thread() {
 
 #[test]
 fn mixed_pages_use_decoded_boundaries_and_keep_search_and_deletion_consistent() {
+    check_mixed_pages(true);
+}
+
+#[test]
+fn compressed_first_page_is_restored_before_two_plain_continuations() {
+    // 首段 ID 与逻辑会话 ID 相同；漏扫压缩首段会误报“会话缺少自身 ID 的分页”。
+    check_mixed_pages(false);
+}
+
+fn check_mixed_pages(compress_middle: bool) {
     use std::io::Write;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -144,7 +154,11 @@ fn mixed_pages_use_decoded_boundaries_and_keep_search_and_deletion_consistent() 
         vec![message(4, "user", "last request")],
     );
     let first = compress(&first);
-    let second = compress(&second);
+    let second = if compress_middle {
+        compress(&second)
+    } else {
+        second
+    };
     assert!(first.metadata().unwrap().len() < boundary);
 
     let quick = catalog_with(&root, false, true, &|| false).unwrap();

@@ -477,32 +477,48 @@ fn paginated_deletion_refuses_malformed_history_identity() {
 
 #[test]
 fn real_paginated_history_is_unique_and_complete_if_present() {
+    let requested = std::env::var("ASM_TEST_CODEX_SESSION").ok();
     let root = sessions_root();
     if !root.exists() {
+        assert!(
+            requested.is_none(),
+            "Requested Codex session root does not exist"
+        );
         return;
     }
     let catalog = catalog_in(&root, false).unwrap();
     let ids: std::collections::HashSet<_> =
         catalog.sessions.iter().map(|m| &m.session_id).collect();
     assert_eq!(ids.len(), catalog.sessions.len());
-    let requested = std::env::var("ASM_TEST_CODEX_SESSION").ok();
     let Some(meta) = catalog.sessions.iter().find(|m| {
         requested
             .as_ref()
             .map_or(m.source_files.len() > 2, |id| &m.session_id == id)
     }) else {
+        assert!(
+            requested.is_none(),
+            "Requested Codex session was not found in the catalog"
+        );
         return;
     };
     let detail = read_session_in(&root, &meta.session_id).unwrap();
+    if requested.is_some() {
+        assert!(
+            detail.warnings.is_empty(),
+            "History is incomplete: {:?}",
+            detail.warnings
+        );
+    }
     assert_eq!(detail.meta.real_user_count, meta.real_user_count);
     assert_eq!(detail.meta.assistant_text_count, meta.assistant_text_count);
     assert_eq!(detail.meta.source_files, meta.source_files);
     eprintln!(
-        "Codex merged history: {} files, {} user messages, {} assistant messages, {} events",
+        "Codex merged history: {} files, {} user messages, {} assistant messages, {} events, {} history warnings",
         meta.source_files.len(),
         meta.real_user_count,
         meta.assistant_text_count,
-        detail.events.len()
+        detail.events.len(),
+        detail.warnings.len()
     );
     // 显式指定私有临时输出路径时，供本地 WebKit 回归读取；默认不导出真实对话。
     if let Ok(path) = std::env::var("ASM_TEST_CODEX_EXPORT") {
