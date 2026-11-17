@@ -1,7 +1,7 @@
 {
   "name": "agent-session-manager",
   "private": true,
-  "version": "0.1.38",
+  "version": "0.1.39",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "icons": "node scripts/generate-icons.mjs",
+    "dmg:background": "swift scripts/generate-dmg-background.swift src-tauri/dmg/background.png",
+    "package:dmg": "node scripts/package-dmg.mjs",
     "docs:screenshots": "node scripts/readme-screenshots.mjs",
     "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
     "test:rust": "cd src-tauri && cargo test --offline --locked -- --test-threads=1",

@@ -18,7 +18,24 @@ npm run tauri build   # 打包（产物在 src-tauri/target/release/bundle/）
 CI=true npm run tauri -- build --ci --target universal-apple-darwin --bundles app,dmg -- --offline --locked
 ```
 
-需要预先安装 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 两个 Rust target；产物在 `src-tauri/target/universal-apple-darwin/release/bundle/`。`CI=true` 避免构建时通过 AppleScript 操作 Finder。分发前验证 DMG、双架构签名、系统最低版本与实际启动；仅附应用、面向接收者的说明及校验值，不附本机 CLI 数据。当前本地签名包未做 Developer ID 公证，接收者首次打开的确认步骤见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。本地整理的分发包放在已忽略的 `release/`。
+需要预先安装 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 两个 Rust target；产物在 `src-tauri/target/universal-apple-darwin/release/bundle/`。`CI=true` 跳过 Finder 布局设置，生成的 DMG 仅作中间产物，发布前必须执行下方的安装窗口打包流程。分发前验证 DMG、双架构签名、系统最低版本与实际启动；仅附应用、面向接收者的说明及校验值，不附本机 CLI 数据。当前本地签名包未做 Developer ID 公证，接收者首次打开的确认步骤见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。本地整理的分发包放在已忽略的 `release/`。
+
+### DMG 安装窗口
+
+安装窗口采用中性浅灰背景，只保留应用、Applications 文件夹及灰色箭头，文件名由 Finder 原生绘制。`scripts/generate-dmg-background.swift` 是背景源文件，`npm run dmg:background` 生成 `src-tauri/dmg/background.png`（Retina 2×、144 DPI）；布局位置保存在 `tauri.conf.json` 的 `bundle.macOS.dmg` 中。
+
+在已登录的 macOS 桌面会话中，对已经验证的 `.app` 重新打包；输出目录须存在，输出文件不能覆盖现有文件：
+
+```bash
+mkdir -p release/v0.1.39/repacked
+npm run package:dmg -- \
+  'src-tauri/target/universal-apple-darwin/release/bundle/macos/Agent Session Manager.app' \
+  release/v0.1.39/repacked/Agent-Session-Manager_0.1.39_universal.dmg
+```
+
+脚本复用 Tauri 首次通用 DMG 构建下载的 create-dmg 工具，重新生成背景，检查应用版本与签名，通过 Finder 保存布局；首次运行可能需要允许宿主应用自动化控制 Finder。源应用复制到临时目录打包，不修改原件。应用内容不重编译、不重签名，安装包背景更新后仍应与既有 ZIP 中的 `.app` 逐文件一致。沿用上游将隐藏资源放到窗口右侧的方式；开启显示隐藏文件时 Finder 可能显示横向滚动条，不改变用户的全局偏好。不要使用负坐标隐藏资源，Finder 重新挂载时可能重排全部图标。
+
+发布前只读挂载成品，确认窗口尺寸、箭头与图标对齐、文件名可读、Applications 指向 `/Applications`，并在当前显示隐藏文件的设置下检查资源不会挤占安装区。背景素材预览不能替代实际 Finder 窗口截图。重新核验 DMG、包内应用签名与文件清单后，更新 DMG 及 `SHA256SUMS.txt`；若应用文件未变化，保留原 ZIP 和发布标签。替换 Release 附件前在 `release/` 中保留旧附件，上传后对比 GitHub 返回的 SHA-256 与本地文件。
 
 测试统一放在 `tests/`：`unit/` 为 Node 单元测试，`e2e/` 为使用模拟 Tauri 接口和合成数据的浏览器回归，`integration/` 为后台进程集成测试，`manual/` 为依赖本机日志或已安装 CLI 的显式检查，`fixtures/` 为共用数据，`helpers/` 为浏览器配置。测试源码提交 Git；截图等产物写入已忽略的 `test-results/<浏览器>/`。
 
