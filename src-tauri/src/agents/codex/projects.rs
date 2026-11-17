@@ -4,12 +4,18 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
-pub(super) fn projectless_ids(home: &Path, warnings: &mut Vec<String>) -> HashSet<String> {
+#[derive(Default)]
+struct Ownership {
+    projectless: HashSet<String>,
+    assigned: HashSet<String>,
+}
+
+fn load_ownership(home: &Path, warnings: &mut Vec<String>) -> Option<Ownership> {
     let path = home.join(".codex-global-state.json");
-    let read = || -> Result<HashSet<String>, String> {
+    let read = || -> Result<Ownership, String> {
         let file = match super::super::open_jsonl(&path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ownership::default()),
             Err(_) => return Err("无法读取 Codex 项目归属，暂按工作目录分组".into()),
         };
         // 状态可能由桌面端同时重写；损坏或超限时保留目录分组，不猜测归属，也不回写状态。
@@ -44,10 +50,13 @@ pub(super) fn projectless_ids(home: &Path, warnings: &mut Vec<String>) -> HashSe
                 .unwrap_or_default(),
             _ => return Err("Codex 无项目会话标记格式异常，暂按工作目录分组".into()),
         };
-        if let Some(assignments) = state
-            .get("thread-project-assignments")
-            .and_then(Value::as_object)
-        {
+        let mut assigned = HashSet::new();
+        let assignments = match state.get("thread-project-assignments") {
+            Some(Value::Object(assignments)) => Some(assignments),
+            None | Some(Value::Null) => None,
+            _ => return Err("Codex 项目归属格式异常，暂按工作目录分组".into()),
+        };
+        if let Some(assignments) = assignments {
             for (id, assignment) in assignments {
                 let project = assignment
                     .get("projectId")
@@ -56,18 +65,48 @@ pub(super) fn projectless_ids(home: &Path, warnings: &mut Vec<String>) -> HashSe
                 // 会话被移入项目后，显式项目归属优先于遗留的无项目标记与产出目录。
                 if project.is_some_and(|p| !p.trim().is_empty()) {
                     ids.remove(id);
+                    assigned.insert(id.clone());
                 }
             }
         }
-        Ok(ids)
+        Ok(Ownership {
+            projectless: ids,
+            assigned,
+        })
     };
     match read() {
-        Ok(ids) => ids,
+        Ok(ownership) => Some(ownership),
         Err(error) => {
             warnings.push(error);
-            HashSet::new()
+            None
         }
     }
+}
+
+pub(super) fn apply(catalog: &mut super::super::Catalog, home: &Path, warnings: &mut Vec<String>) {
+    let Some(ownership) = load_ownership(home, warnings) else {
+        // 无法读取用户选择时，不能让临时路径推断覆盖未知的显式项目归属。
+        catalog.session_group_hints.clear();
+        catalog.projectless_session_ids.clear();
+        return;
+    };
+    catalog.session_group_hints.retain(|hint| {
+        !ownership.projectless.contains(&hint.session_id)
+            && !ownership.assigned.contains(&hint.session_id)
+    });
+    catalog.projectless_session_ids = catalog
+        .sessions
+        .iter()
+        .filter(|session| ownership.projectless.contains(&session.session_id))
+        .map(|session| session.session_id.clone())
+        .collect();
+}
+
+#[cfg(test)]
+fn projectless_ids(home: &Path, warnings: &mut Vec<String>) -> HashSet<String> {
+    load_ownership(home, warnings)
+        .map(|state| state.projectless)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -170,5 +209,58 @@ mod tests {
         })
         .unwrap();
         assert_eq!(fs::read_to_string(&state).unwrap(), text);
+    }
+
+    #[test]
+    fn native_ownership_overrides_temporary_inference_and_unreadable_state_stays_conservative() {
+        use super::super::{catalog_in, escape_cwd, read_session_in};
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("sessions");
+        let day = root.join("2099/12/31");
+        fs::create_dir_all(&day).unwrap();
+        let cwd = "/tmp/pytest-of-demo/pytest-42/test_case0";
+        for id in ["assigned", "marked", "fallback"] {
+            fs::write(day.join(format!("rollout-{id}.jsonl")), format!("{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":id,"cwd":cwd}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}})
+            )).unwrap();
+        }
+        // CLI-only 用户没有桌面状态文件，仍应得到公共临时目录规则。
+        let missing_state = catalog_in(&root, false).unwrap();
+        assert_eq!(missing_state.session_group_hints.len(), 3);
+        assert!(missing_state.warnings.is_empty());
+
+        let state = home.path().join(".codex-global-state.json");
+        let text = json!({"projectless-thread-ids":["marked","assigned"],
+            "thread-project-assignments":{"assigned":{"projectId":"real-project"}}})
+        .to_string();
+        fs::write(&state, &text).unwrap();
+        let data = catalog_in(&root, false).unwrap();
+        assert_eq!(data.projectless_session_ids, vec!["marked"]);
+        assert_eq!(data.session_group_hints.len(), 1);
+        assert_eq!(data.session_group_hints[0].session_id, "fallback");
+        assert!(data.session_group_hints[0].root.is_none());
+        for session in &data.sessions {
+            assert_eq!(session.project_dir, escape_cwd(cwd));
+            assert_eq!(session.cwd.as_deref(), Some(cwd));
+            assert_eq!(
+                read_session_in(&root, &session.session_id)
+                    .unwrap()
+                    .meta
+                    .project_dir,
+                session.project_dir
+            );
+        }
+        assert_eq!(fs::read_to_string(&state).unwrap(), text);
+
+        for invalid in ["{broken", r#"{"thread-project-assignments": []}"#] {
+            fs::write(&state, invalid).unwrap();
+            let data = catalog_in(&root, false).unwrap();
+            assert_eq!(data.sessions.len(), 3);
+            assert_eq!(data.warnings.len(), 1);
+            assert!(data.session_group_hints.is_empty());
+            assert!(data.projectless_session_ids.is_empty());
+            assert_eq!(fs::read_to_string(&state).unwrap(), invalid);
+        }
     }
 }

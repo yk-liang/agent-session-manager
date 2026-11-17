@@ -84,6 +84,8 @@ Codex 会话页支持普通 `.jsonl` 和 Zstandard 压缩的 `.jsonl.zst` 日志
 | OpenCode | `~/.local/share/opencode/` |
 | Pi | `~/.pi/agent/sessions/` |
 
+五类 Agent 中可识别的自动临时工作区（如系统临时目录中的 pytest 运行目录）会归入“未归属项目”。真实 Git 仓库和 Codex 显式项目归属优先；普通手工临时目录仍保留原分组。归组仅影响展示，不移动日志或修改会话工作目录。
+
 已保存用量位于 `~/Library/Application Support/Agent Session Manager/`；配置方案与备份位于 `~/.agent-session-manager/`。退出应用后可备份这些完整目录；如果使用了支持后台采集的构建，请先关闭后台采集。原始会话仍由各 Agent 管理。
 
 </details>

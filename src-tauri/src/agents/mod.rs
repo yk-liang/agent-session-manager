@@ -14,6 +14,7 @@ pub mod qoder;
 pub mod safety;
 pub mod scanning;
 pub mod search;
+mod workspace_groups;
 
 pub use ids::escape_path_id;
 pub use safety::{present, verify_within_root, TargetKind};
@@ -178,13 +179,15 @@ pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
         .collect();
     projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
     sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
-    Catalog {
+    let mut catalog = Catalog {
         projects,
         sessions,
         warnings: Vec::new(),
         projectless_session_ids: Vec::new(),
         session_group_hints: Vec::new(),
-    }
+    };
+    workspace_groups::apply(&mut catalog);
+    catalog
 }
 
 /// 一个 agent 的单个配置文件描述符（用于配置快照）。

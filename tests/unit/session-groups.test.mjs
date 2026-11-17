@@ -3,6 +3,22 @@ import assert from "node:assert/strict";
 import { groupSessions, sessionGroup, PROJECTLESS_GROUP } from "../../src/sessionGroups.ts";
 import { sessionKey } from "../../src/utils.ts";
 
+test("temporary workspaces merge without losing same-ID sessions from different source directories", () => {
+  const sessions = ["pytest-run-a", "pytest-run-b", "manual-project"].map(projectDir => ({
+    sessionId: "same-session-id", projectDir, cwd: `/tmp/${projectDir}`, lastTs: null,
+  }));
+  const originalKeys = sessions.map(sessionKey);
+  const projects = sessions.map(s => ({dirName: s.projectDir, displayPath: s.cwd, sessionCount: 1, lastActivity: null}));
+  const hints = new Map(sessions.slice(0, 2).map(s => [sessionKey(s), null]));
+  const groups = groupSessions(projects, sessions, new Set(), hints);
+  assert.equal(groups.length, 2);
+  assert.equal(groups.find(g => g.dirName === PROJECTLESS_GROUP).sessionCount, 2);
+  assert.equal(groups.reduce((n, g) => n + g.sessionCount, 0), sessions.length);
+  assert.deepEqual(sessions.filter(s => sessionGroup(s, new Set(), hints) === PROJECTLESS_GROUP).map(sessionKey), originalKeys.slice(0, 2));
+  assert.deepEqual(sessions.map(sessionKey), originalKeys);
+  assert.equal(new Set(originalKeys).size, 3);
+});
+
 test("projectless groups use explicit IDs, keep real projects and preserve source identity", () => {
   const sessions = [
     {sessionId:"a",projectDir:"dir-a",cwd:"/tmp/a",lastTs:"2026-10-16T00:00:00Z"},

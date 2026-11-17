@@ -1,6 +1,6 @@
 //! Qoder 的展示归属：识别受控自动工作区，并把项目内运行目录归并到项目根目录。
 use super::super::{Catalog, SessionGroupHint, SessionMeta};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 fn automatic_workspace(cwd: &Path, session_id: &str, home: &Path) -> bool {
@@ -64,7 +64,16 @@ fn workspace_root(cwd: &Path, home: &Path) -> Option<PathBuf> {
 
 pub(super) fn apply(catalog: &mut Catalog, home: &Path) {
     let mut roots: HashMap<String, Option<PathBuf>> = HashMap::new();
+    let classified: HashSet<_> = catalog
+        .session_group_hints
+        .iter()
+        .map(|hint| (hint.project_dir.clone(), hint.session_id.clone()))
+        .collect();
     for session in &catalog.sessions {
+        // 通用临时目录规则已处理生成的 AGENTS.md 和真实 Git 根，不能再被单 Agent 规则覆盖。
+        if classified.contains(&(session.project_dir.clone(), session.session_id.clone())) {
+            continue;
+        }
         let Some(cwd) = session.cwd.as_deref() else {
             continue;
         };
@@ -94,6 +103,33 @@ fn hint(session: &SessionMeta, root: Option<String>) -> SessionGroupHint {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn pytest_runtime_is_projectless_without_changing_source_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join(".qoder/projects/source-a");
+        fs::create_dir_all(&base).unwrap();
+        let id = "1234abcd-1111-4444-8888-000000000000";
+        let cwd = format!("/private/var/folders/zz/asm-grouping-fixture/T/pytest-of-demo/pytest-42/test_runtime0/runtime with spaces/sessions/{id}");
+        fs::write(base.join(format!("{id}.jsonl")), format!("{}\n",
+            serde_json::json!({"type":"user","sessionId":id,"entrypoint":"cli","cwd":cwd,"message":{"content":"synthetic request"}}))).unwrap();
+        let mut catalog = super::super::claude_family::catalog(
+            &temp.path().join(".qoder/projects"),
+            super::super::OPTS,
+            false,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&catalog.sessions).unwrap();
+        apply(&mut catalog, temp.path());
+        assert_eq!(
+            catalog.session_group_hints.len(),
+            1,
+            "pytest runtime was not classified"
+        );
+        assert!(catalog.session_group_hints[0].root.is_none());
+        assert_eq!(catalog.session_group_hints[0].project_dir, "source-a");
+        assert_eq!(serde_json::to_value(&catalog.sessions).unwrap(), before);
+    }
 
     #[test]
     fn automatic_workspace_requires_managed_layout_and_matching_session_prefix() {

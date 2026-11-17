@@ -749,16 +749,9 @@ fn catalog_with(
         }
     }
     let mut catalog = super::assemble_catalog(items);
-    let projectless = root
-        .parent()
-        .map(|home| projects::projectless_ids(home, &mut warnings))
-        .unwrap_or_default();
-    catalog.projectless_session_ids = catalog
-        .sessions
-        .iter()
-        .filter(|session| projectless.contains(&session.session_id))
-        .map(|session| session.session_id.clone())
-        .collect();
+    if let Some(home) = root.parent() {
+        projects::apply(&mut catalog, home, &mut warnings);
+    }
     catalog.warnings = warnings;
     if cancelled() {
         return Err("目录更新已取消".into());
