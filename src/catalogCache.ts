@@ -30,6 +30,15 @@ export class AgentCatalogCache {
     return name && name !== meta.modelName ? { ...meta, modelName: name } : meta;
   }
 
+  /** 改名/切换模型只更新已打开详情的展示信息，保留这份正文对应的统计与来源身份。 */
+  withCurrentMetadata(agent: string, includeEmpty: boolean, meta: SessionMeta): SessionMeta {
+    const latest = this.peek(agent, includeEmpty)?.sessions.find(s => sessionKey(s) === sessionKey(meta));
+    if (!latest) return this.withNames(agent, meta);
+    const named = this.withNames(agent, latest);
+    return meta.title === named.title && meta.model === named.model && meta.modelName === named.modelName
+      ? meta : {...meta, title:named.title, model:named.model, modelName:named.modelName};
+  }
+
   private decorate(agent: string, catalog: Catalog, includeEmpty: boolean): Catalog {
     const names = new Map(this.names.get(agent));
     for (const session of catalog.sessions) {

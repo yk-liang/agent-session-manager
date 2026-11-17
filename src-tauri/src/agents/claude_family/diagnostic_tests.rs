@@ -121,7 +121,7 @@ fn cached_summary_does_not_hide_detail_open_error() {
     let io_error = super::super::open_jsonl(&path).unwrap_err();
     assert_eq!(io_error.raw_os_error(), Some(libc::EMFILE));
     let cached = super::super::catalog_cache::summary(
-        "family-context-v2:true:true:true:project",
+        "family-context-v3:true:true:true:project",
         &[path],
         || panic!("warm summary must come from cache"),
     );

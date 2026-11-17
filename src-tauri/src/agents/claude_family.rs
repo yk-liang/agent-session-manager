@@ -18,7 +18,7 @@ use super::{SessionDetail, SessionMeta};
 
 #[derive(Clone, Copy)]
 pub struct FamilyOptions {
-    /// 是否有 Qoder 特有的标题事件（ai-title / custom-title / last-prompt）
+    /// Qoder 的标题事件及运行配置规则；其他 Claude 系来源保留各自的消息模型行为。
     pub title_events: bool,
     /// 过滤 entrypoint 非 cli 的会话（QoderWork/云端）
     pub filter_non_cli_entrypoint: bool,
@@ -125,6 +125,8 @@ fn parse_meta_with(
     let mut custom_title: Option<String> = None;
     let mut last_prompt: Option<String> = None;
     let mut first_user_text: Option<String> = None;
+    let mut configured_model: Option<String> = None;
+    let mut last_assistant_model: Option<String> = None;
 
     let result = super::scanning::read_jsonl_checked(BufReader::new(file), path, operation, |v| {
         let Some(t) = v.get("type").and_then(Value::as_str) else {
@@ -135,12 +137,14 @@ fn parse_meta_with(
                 ai_title = v
                     .get("aiTitle")
                     .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string());
             }
             "custom-title" if opts.title_events => {
                 custom_title = v
                     .get("customTitle")
                     .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string());
             }
             "last-prompt" if opts.title_events => {
@@ -150,7 +154,16 @@ fn parse_meta_with(
                     .map(|s| s.chars().take(80).collect());
             }
             "runtime-config" => {
-                if meta.model.is_none() {
+                if opts.title_events {
+                    if let Some(model) = v
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|m| !m.trim().is_empty() && *m != "<synthetic>")
+                    {
+                        configured_model = Some(model.to_string());
+                    }
+                }
+                if !opts.title_events && meta.model.is_none() {
                     if let Some(m) = v.get("model").and_then(Value::as_str) {
                         if !m.is_empty() {
                             meta.model = Some(m.to_string());
@@ -203,6 +216,15 @@ fn parse_meta_with(
                     }
                 } else {
                     meta.assistant_count += 1;
+                    if opts.title_events {
+                        if let Some(model) = v
+                            .pointer("/message/model")
+                            .and_then(Value::as_str)
+                            .filter(|m| !m.trim().is_empty() && *m != "<synthetic>")
+                        {
+                            last_assistant_model = Some(model.to_string());
+                        }
+                    }
                     let has_text = v["isMeta"] != true
                         && v["isCompactSummary"] != true
                         && v.pointer("/message/content")
@@ -210,7 +232,7 @@ fn parse_meta_with(
                     if has_text {
                         meta.assistant_text_count += 1;
                     }
-                    if meta.model.is_none() {
+                    if !opts.title_events && meta.model.is_none() {
                         meta.model = v
                             .pointer("/message/model")
                             .and_then(Value::as_str)
@@ -224,10 +246,14 @@ fn parse_meta_with(
         observe(v);
     });
 
+    if opts.title_events {
+        // SDK 消息可能只写 auto；用户最后选择的运行配置比这一占位值更准确。
+        meta.model = configured_model.or(last_assistant_model);
+    }
     meta.title = custom_title
         .or(ai_title)
-        .or(last_prompt)
-        .or(first_user_text);
+        .or(first_user_text)
+        .or(last_prompt);
     match result {
         Ok(None) => super::ParseOutcome::Ok(meta),
         Ok(Some(warning)) => super::ParseOutcome::Degraded(meta, warning),
@@ -318,8 +344,11 @@ fn sessions_in_dir(
         let path = entry.path();
         if name.ends_with(".jsonl") {
             let kind = format!(
-                "family-context-v2:{}:{}:{}:{dir_name}",
-                opts.title_events, opts.filter_non_cli_entrypoint, opts.filter_qoderwork_cwd
+                "family-context-{}:{}:{}:{}:{dir_name}",
+                if opts.title_events { "v3" } else { "v2" },
+                opts.title_events,
+                opts.filter_non_cli_entrypoint,
+                opts.filter_qoderwork_cwd
             );
             let (parsed, ws) = match super::catalog_cache::summary(&kind, &[path.clone()], || {
                 match parse_meta(&path, dir_name, opts) {
@@ -763,13 +792,13 @@ mod tests {
     }
 
     #[test]
-    fn title_falls_back_to_last_prompt_then_first_user_text() {
+    fn unnamed_title_prefers_first_user_text_over_last_prompt() {
         let f = write_fixture(&[
             r#"{"type":"user","message":{"role":"user","content":"第一条用户消息"},"isMeta":false}"#,
             r#"{"type":"last-prompt","lastPrompt":"最后的提问"}"#,
         ]);
         let meta = meta_of(f.path(), "p", QODER_OPTS);
-        assert_eq!(meta.title.as_deref(), Some("最后的提问"));
+        assert_eq!(meta.title.as_deref(), Some("第一条用户消息"));
 
         let f2 = write_fixture(&[
             r#"{"type":"user","message":{"role":"user","content":"<local-command-caveat>忽略</local-command-caveat>"},"isMeta":true}"#,
@@ -777,6 +806,44 @@ mod tests {
         ]);
         let meta2 = meta_of(f2.path(), "p", QODER_OPTS);
         assert_eq!(meta2.title.as_deref(), Some("真正的问题"));
+    }
+
+    #[test]
+    fn qoder_metadata_uses_latest_runtime_selection_and_a_stable_unnamed_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aaaa.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"runtime-config\",\"model\":\"mode-old\"}\n",
+                "{\"type\":\"user\",\"message\":{\"content\":\"Initial task\"}}\n",
+                "{\"type\":\"runtime-config\",\"model\":\"mode-new\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"model\":\"auto\",\"content\":\"Reply\"}}\n",
+                "{\"type\":\"last-prompt\",\"lastPrompt\":\"Continue\"}\n"
+            ),
+        )
+        .unwrap();
+        let meta = meta_of(&path, "project", QODER_OPTS);
+        assert_eq!(meta.model.as_deref(), Some("mode-new"));
+        assert_eq!(meta.title.as_deref(), Some("Initial task"));
+    }
+
+    #[test]
+    fn qoder_model_fallback_ignores_synthetic_records_and_does_not_change_claude_policy() {
+        let file = write_fixture(&[
+            r#"{"type":"assistant","message":{"model":"mode-old","content":"first"}}"#,
+            r#"{"type":"assistant","message":{"model":"mode-new","content":"second"}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":"summary"}}"#,
+            r#"{"type":"runtime-config","model":" "}"#,
+        ]);
+        assert_eq!(
+            meta_of(file.path(), "p", QODER_OPTS).model.as_deref(),
+            Some("mode-new")
+        );
+        assert_eq!(
+            meta_of(file.path(), "p", CLAUDE_OPTS).model.as_deref(),
+            Some("mode-old")
+        );
     }
 
     #[test]

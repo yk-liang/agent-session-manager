@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use super::claude_family::{self, FamilyOptions};
 use super::{shell_quote, AgentSource, ConfigFile, SessionDetail};
 
+mod desktop;
 mod grouping;
 mod models;
 
 /// 用量查询只读已有名称快照，不启动 CLI 或等待联网补全。
-pub(crate) fn usage_model_names(ids: &[String]) -> std::collections::HashMap<String,String> {
-    models::usage_names(&qoder_dir(),ids)
+pub(crate) fn usage_model_names(ids: &[String]) -> std::collections::HashMap<String, String> {
+    models::usage_names(&qoder_dir(), ids)
 }
 
 const OPTS: FamilyOptions = FamilyOptions {
@@ -28,8 +29,13 @@ fn projects_dir() -> PathBuf {
     qoder_dir().join("projects")
 }
 
-fn load_catalog(root: &std::path::Path, include_empty: bool) -> Result<super::Catalog, String> {
+fn load_catalog(
+    root: &std::path::Path,
+    desktop_db: Option<&std::path::Path>,
+    include_empty: bool,
+) -> Result<super::Catalog, String> {
     let mut catalog = claude_family::catalog(&root.join("projects"), OPTS, include_empty)?;
+    desktop::apply(desktop_db, &mut catalog.sessions, &mut catalog.warnings);
     models::apply_cached(root, &mut catalog.sessions);
     if let Some(home) = root.parent() {
         grouping::apply(&mut catalog, home);
@@ -39,11 +45,17 @@ fn load_catalog(root: &std::path::Path, include_empty: bool) -> Result<super::Ca
 
 fn load_session(
     root: &std::path::Path,
+    desktop_db: Option<&std::path::Path>,
     project_dir: &str,
     session_id: &str,
 ) -> Result<SessionDetail, String> {
     let mut detail =
         claude_family::read_session(&root.join("projects"), project_dir, session_id, OPTS)?;
+    desktop::apply(
+        desktop_db,
+        std::slice::from_mut(&mut detail.meta),
+        &mut detail.warnings,
+    );
     models::apply_cached(root, std::slice::from_mut(&mut detail.meta));
     Ok(detail)
 }
@@ -82,13 +94,22 @@ impl AgentSource for QoderSource {
         true
     }
     fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
-        load_catalog(&qoder_dir(), include_empty)
+        load_catalog(
+            &qoder_dir(),
+            desktop::database_path().as_deref(),
+            include_empty,
+        )
     }
     fn resolve_model_names(&self, ids: &[String]) -> std::collections::HashMap<String, String> {
         models::resolve(&qoder_dir(), ids)
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
-        load_session(&qoder_dir(), project_dir, session_id)
+        load_session(
+            &qoder_dir(),
+            desktop::database_path().as_deref(),
+            project_dir,
+            session_id,
+        )
     }
     fn search_events(&self, meta: &super::SessionMeta) -> Result<Vec<serde_json::Value>, String> {
         // 搜索不需要再次解析模型目录，直接复用统一的会话事件顺序。
@@ -152,6 +173,35 @@ mod tests {
     }
 
     #[test]
+    fn desktop_title_replaces_last_prompt_in_catalog_and_detail_without_changing_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("projects/source-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join("aaaa.jsonl");
+        let transcript = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"aaaa\",\"cwd\":\"/work/project\",\"message\":{\"content\":\"Initial task\"}}\n",
+            "{\"type\":\"runtime-config\",\"model\":\"mode-original\"}\n",
+            "{\"type\":\"last-prompt\",\"lastPrompt\":\"Continue\"}\n");
+        std::fs::write(&path, transcript).unwrap();
+        let db = dir.path().join("desktop.sqlite");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("CREATE TABLE chat_sessions(session_id TEXT PRIMARY KEY,title TEXT,deleted_at INTEGER); INSERT INTO chat_sessions VALUES('aaaa','Named desktop session',NULL)").unwrap();
+        let before = std::fs::read(&db).unwrap();
+        let catalog = load_catalog(dir.path(), Some(&db), false).unwrap();
+        let meta = &catalog.sessions[0];
+        assert_eq!(meta.title.as_deref(), Some("Named desktop session"));
+        assert_eq!(meta.session_id, "aaaa");
+        assert_eq!(meta.project_dir, "source-project");
+        assert_eq!(meta.cwd.as_deref(), Some("/work/project"));
+        assert_eq!(meta.model.as_deref(), Some("mode-original"));
+        assert_eq!(meta.source_files, vec![path.clone()]);
+        let detail = load_session(dir.path(), Some(&db), "source-project", "aaaa").unwrap();
+        assert_eq!(detail.meta.title, meta.title);
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
+    }
+
+    #[test]
     fn catalog_and_detail_use_background_names_without_changing_original_model_ids() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("projects/-tmp-demo");
@@ -170,7 +220,7 @@ mod tests {
             records.push_str(&format!("2026-10-15T16:01:14.710+08:00 INFO  debug.message [QoderInferRequest details] model_config={{\"key\":\"{model}\",\"display_name\":\"{name}\"}}, custom_model=null\n"));
         }
         std::fs::write(logs.join("qodercli.log"), records).unwrap();
-        let catalog = load_catalog(dir.path(), false).unwrap();
+        let catalog = load_catalog(dir.path(), None, false).unwrap();
         assert_eq!(catalog.sessions.len(), cases.len());
         assert!(catalog
             .sessions
@@ -180,16 +230,16 @@ mod tests {
             .iter()
             .map(|(_, id, _)| id.to_string())
             .collect::<Vec<_>>();
-        let names = models::resolve(dir.path(), &ids);
+        let names = models::resolve_with(dir.path(), &ids, std::collections::HashMap::new);
         assert_eq!(names.len(), cases.len());
-        let catalog = load_catalog(dir.path(), false).unwrap();
+        let catalog = load_catalog(dir.path(), None, false).unwrap();
         for (id, model, name) in cases {
             let meta = catalog
                 .sessions
                 .iter()
                 .find(|s| s.session_id == id)
                 .unwrap();
-            let detail = load_session(dir.path(), "-tmp-demo", id).unwrap();
+            let detail = load_session(dir.path(), None, "-tmp-demo", id).unwrap();
             assert_eq!(meta.model.as_deref(), Some(model));
             assert_eq!(meta.model_name.as_deref(), Some(name));
             assert_eq!(detail.meta.model, meta.model);

@@ -161,8 +161,16 @@ export default function App() {
       return;
     }
     let cancelled = false;
+    const displayCatalog = (cat: Catalog) => {
+      applyCatalog(cat);
+      setDetail(current => {
+        if (!current) return current;
+        const meta = catalogCache.withCurrentMetadata(selectedAgent, showEmpty, current.meta);
+        return meta === current.meta ? current : {...current, meta};
+      });
+    };
     const cached = catalogCache.peek(selectedAgent, showEmpty);
-    if (cached) applyCatalog(cached);
+    if (cached) displayCatalog(cached);
     const scheduler = new AutoRefreshScheduler(() => reload());
     autoRefresh.current = scheduler;
     scheduler.setBlocked(pauseAutoRefreshRef.current);
@@ -175,7 +183,7 @@ export default function App() {
       try {
         const cat = await catalogCache.load(selectedAgent, showEmpty);
         if (!cancelled) {
-          applyCatalog(cat);
+          displayCatalog(cat);
           const available = new Set(cat.sessions.map(sessionKey));
           setCheckedKeys((keys) => new Set([...keys].filter((key) => available.has(key))));
         }
@@ -185,18 +193,13 @@ export default function App() {
             .then((refined) => {
               if (cancelled || !refined) return;
               if (pauseAutoRefreshRef.current) { scheduler.request("focus"); return; }
-              applyCatalog(refined);
+              displayCatalog(refined);
             })
             .catch(() => { /* 首屏仍可打开；下一次日志变化或刷新会重试摘要。 */ });
         }
         void catalogCache.enrich(selectedAgent, showEmpty, supportsModelNames).then((enriched) => {
           if (cancelled || !enriched) return;
-          applyCatalog(enriched);
-          setDetail((current) => {
-            if (!current) return current;
-            const meta = catalogCache.withNames(selectedAgent, current.meta);
-            return meta === current.meta ? current : { ...current, meta };
-          });
+          displayCatalog(enriched);
         }).catch(() => { /* 名称补全失败保留原始模型标识，下一次刷新可重试。 */ });
         if (!cancelled) setLoading(false);
         // 首屏已可操作；调度器仍等待统计完成，把这段 I/O 计入自动刷新的时间预算。

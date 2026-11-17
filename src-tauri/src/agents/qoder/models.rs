@@ -1,4 +1,4 @@
-//! Qoder 模型名称：历史请求日志优先，官方模型列表补全，原始会话 ID 始终保留。
+//! Qoder 会话模型名称：当前官方目录优先，历史日志作为离线/已下线模型的兜底。
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -67,19 +67,27 @@ pub(super) fn apply_cached(root: &Path, sessions: &mut [SessionMeta]) {
 }
 
 pub(super) fn resolve(root: &Path, models: &[String]) -> Names {
+    resolve_with(root, models, || {
+        let bin = find_executable("qodercli").or_else(|| {
+            let entry = root.join("entry/qoder");
+            entry.is_file().then_some(entry)
+        });
+        bin.map(|bin| registry_names(&bin, Duration::from_secs(10)))
+            .unwrap_or_default()
+    })
+}
+
+pub(super) fn resolve_with(
+    root: &Path,
+    models: &[String],
+    registry: impl FnOnce() -> Names,
+) -> Names {
     let wanted: HashSet<String> = models.iter().cloned().collect();
     if wanted.is_empty() {
         return Names::new();
     }
     let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
-    let names = cache.lookup(root, &wanted, || {
-        let bin = find_executable("qodercli").or_else(|| {
-            let entry = root.join("entry/qoder");
-            entry.is_file().then_some(entry)
-        });
-        bin.map(|bin| registry_names(&bin, Duration::from_secs(5)))
-            .unwrap_or_default()
-    });
+    let names = cache.lookup(root, &wanted, registry);
     cache.names = names.clone();
     names
         .into_iter()
@@ -131,27 +139,25 @@ impl ModelNames {
                 names.entry(id.clone()).or_insert_with(|| name.clone());
             }
         }
-        let missing: HashSet<_> = wanted
-            .iter()
-            .filter(|id| !names.contains_key(*id))
-            .cloned()
-            .collect();
         let expired = self
             .registry_checked
             .map(|t| t.elapsed() >= REGISTRY_TTL)
             .unwrap_or(true);
-        if !missing.is_empty() && (expired || missing.iter().any(|id| !self.queried.contains(id))) {
+        // 历史日志命中也必须定期查当前目录，同一个自定义模型 ID 可能被官方改名。
+        if expired
+            || wanted
+                .iter()
+                .any(|id| !self.registry.contains_key(id) && !self.queried.contains(id))
+        {
             self.registry.extend(registry());
             self.registry_checked = Some(Instant::now());
             if expired {
                 self.queried.clear();
             }
-            self.queried.extend(missing);
+            self.queried.extend(wanted.iter().cloned());
         }
-        // 请求当时确认的名称优先于今天的模型列表，避免当前配置改写历史含义。
-        for (id, name) in &self.registry {
-            names.entry(id.clone()).or_insert_with(|| name.clone());
-        }
+        // 只改变展示映射，原始会话模型 ID 和逐请求计量记录保持不变。
+        names.extend(self.registry.clone());
         names
     }
 }
@@ -334,6 +340,22 @@ mod tests {
     }
 
     #[test]
+    fn current_registry_name_replaces_an_old_log_label_for_the_same_model_id() {
+        let root = tempfile::tempdir().unwrap();
+        write_log(
+            root.path(),
+            "old",
+            &record("mode-same", "Qwen3.8-Max-DogFooding"),
+        );
+        let wanted = HashSet::from(["mode-same".to_string()]);
+        let mut cache = ModelNames::default();
+        let names = cache.lookup(root.path(), &wanted, || {
+            parse_registry("Qwen4-Max-DogFooding (mode-same)\n")
+        });
+        assert_eq!(names["mode-same"], "Qwen4-Max-DogFooding");
+    }
+
+    #[test]
     fn log_changes_refresh_names_without_requerying_missing_ids() {
         let root = tempfile::tempdir().unwrap();
         let path = write_log(root.path(), "run", &record("mode-old", "Recorded name"));
@@ -345,15 +367,52 @@ mod tests {
         let names = cache.lookup(root.path(), &wanted, || {
             parse_registry("New catalog name (mode-old)")
         });
-        assert_eq!(names["mode-old"], "Recorded name");
+        assert_eq!(names["mode-old"], "New catalog name");
         fs::write(&path, record("mode-old", "Updated recorded name")).unwrap();
         let names = cache.lookup(root.path(), &wanted, || {
             panic!("missing IDs should be cached")
         });
-        assert_eq!(names["mode-old"], "Updated recorded name");
+        assert_eq!(names["mode-old"], "New catalog name");
         fs::remove_file(path).unwrap();
         let names = cache.lookup(root.path(), &wanted, Names::new);
         assert_eq!(names["mode-old"], "New catalog name");
+    }
+
+    #[test]
+    fn known_ids_refresh_after_ttl_and_offline_queries_keep_the_last_confirmed_name() {
+        let root = tempfile::tempdir().unwrap();
+        write_log(root.path(), "old", &record("mode-id", "Old log label"));
+        let wanted = HashSet::from(["mode-id".to_string()]);
+        let mut cache = ModelNames::default();
+        assert_eq!(
+            cache.lookup(root.path(), &wanted, Names::new)["mode-id"],
+            "Old log label"
+        );
+        cache.registry_checked = Instant::now().checked_sub(REGISTRY_TTL);
+        assert_eq!(
+            cache.lookup(root.path(), &wanted, || parse_registry(
+                "Current label (mode-id)"
+            ))["mode-id"],
+            "Current label"
+        );
+        assert_eq!(
+            cache.lookup(root.path(), &wanted, || panic!(
+                "TTL must throttle CLI calls"
+            ))["mode-id"],
+            "Current label"
+        );
+        cache.registry_checked = Instant::now().checked_sub(REGISTRY_TTL);
+        assert_eq!(
+            cache.lookup(root.path(), &wanted, || parse_registry(
+                "Renamed again (mode-id)"
+            ))["mode-id"],
+            "Renamed again"
+        );
+        cache.registry_checked = Instant::now().checked_sub(REGISTRY_TTL);
+        assert_eq!(
+            cache.lookup(root.path(), &wanted, Names::new)["mode-id"],
+            "Renamed again"
+        );
     }
 
     #[test]

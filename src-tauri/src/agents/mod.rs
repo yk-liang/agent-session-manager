@@ -72,7 +72,7 @@ pub struct SessionMeta {
     pub project_dir: String,
     pub cwd: Option<String>,
     pub title: Option<String>,
-    /// 会话原始模型标识，保留用于排查，不以当前默认模型覆盖历史记录。
+    /// 会话记录中的模型标识；Qoder 取最后一次运行配置，不以全局默认模型覆盖。
     pub model: Option<String>,
     /// 数据源确认的可读名称；缺失时由界面显示原始标识。
     #[serde(skip_serializing_if = "Option::is_none")]

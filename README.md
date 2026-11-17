@@ -86,6 +86,8 @@ The app reads existing local Agent data. If no sessions appear, check that the A
 
 Recognized automatic temporary workspaces, such as pytest runs under a system temporary directory, appear under **未归属项目 (Unassigned)** for all five Agents. Real Git repositories and explicit Codex project assignments take precedence; ordinary manual temporary directories keep their existing groups. Grouping only affects display: logs and session working directories are unchanged.
 
+Qoder sessions use saved desktop titles when available, then log titles or the first meaningful user prompt. Model badges use the session's latest runtime selection and prefer names from the current official model list, falling back to previously resolved names or historical logs when offline.
+
 Saved usage lives in `~/Library/Application Support/Agent Session Manager/`. Configuration profiles and backups live in `~/.agent-session-manager/`. Quit the app before backing up these complete directories; if you use a build with background collection enabled, disable it first. Original sessions remain managed by each Agent.
 
 </details>

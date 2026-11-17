@@ -103,6 +103,10 @@ Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib 
 本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
 输出各 Agent 三轮目录耗时与 Qoder 后台名称补全耗时，不输出会话正文。
 
+Qoder 展示元数据：只读 `com.qoder.app.stable/main.sqlite` 的 `chat_sessions`，按精确会话 ID 补充标题，跳过已删除与空标题记录，不替换日志定位键或正文。每次会话刷新均读取最新 WAL，沿用切回窗口时的刷新机制获取桌面改名，不新增后台轮询；库缺失时正常兜底，库损坏/锁定时保留日志标题并告警。模型配置取日志最后一次有效运行配置，当前官方模型目录优先于历史名称；后台补全按 5 分钟 TTL 刷新，也重查已有历史名称的 ID。离线时保留已确认名称，原始模型 ID 和计量记录不改写。
+
+真实会话只读核验：在 `src-tauri/` 运行 `cargo run --release --offline --locked --example qoder_metadata -- '<会话ID>' '<预期会话名>' '<预期模型名>'`。只输出所选会话的标题、模型标识/名称和告警数；同时检查列表与详情一致。后两个参数可省略，指定的会话不存在、重复或与预期不符时必须失败。
+
 删除前用量保存的回归：在 `src-tauri/` 运行 `cargo test --release --offline --locked --lib usage::deletion -- --test-threads=1`。覆盖主日志与嵌套子会话、最后一轮增量、重启后持久化、无关来源隔离、缓存保留、读取/账本失败和同步期间日志变化。
 
 真实数据性能复测使用 `usage::deletion::tests::real_qoder_deletion_preservation_benchmark`，必须显式加 `--ignored --exact --nocapture --test-threads=1`，并提供 `ASM_DELETE_PROBE_SESSION`（真实会话 ID）、`ASM_DELETE_PROBE_PROJECT`（源项目目录键）和 `ASM_DELETE_PROBE_STORE`。后者必须是独立目录，包含用 SQLite backup API 从应用数据库生成的 `cache.sqlite3` 与 `ledger.sqlite3`，不要直接复制运行中数据库的主文件。测试分别复制这份已关闭的备份，交替测量全量与局部保存，输出耗时和日志数量；实际日志只读，删除回调为空操作。目标缺失或检查失败必须报错，不能静默跳过。此测量不包含 GUI 调度、共享账本锁等待或 Finder 移入回收站耗时。

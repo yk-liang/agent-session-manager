@@ -12,6 +12,28 @@ const meta = (id, model = null) => ({ sessionId: id, projectDir: "real-dir", tit
 const catalog = (...sessions) => ({ sessions, warnings: [], projects: sessions.length ?
   [{ dirName: "real-dir", displayPath: "/tmp/real", sessionCount: sessions.length, lastActivity: null }] : [] });
 
+test("desktop rename and model selection update an open detail without replacing its body statistics", async () => {
+  let row = {...meta("same", "mode-old"), title:"Continue"};
+  const oldNames = deferred();
+  const cache = new AgentCatalogCache(async () => catalog(row), async () => oldNames.promise);
+  await cache.load("qoder", false);
+  const detail = {...row, userCount:9, sizeBytes:123};
+  const pending = cache.enrich("qoder", false, true);
+  row = {...meta("same", "mode-new"), title:"Named desktop session", userCount:99};
+  await cache.load("qoder", false);
+  oldNames.resolve({"mode-old":"Historical name"});
+  await pending;
+  const current = cache.withCurrentMetadata("qoder", false, detail);
+  assert.equal(current.title,"Named desktop session");
+  assert.equal(current.model,"mode-new");
+  assert.equal(current.modelName,null);
+  assert.equal(current.userCount,9);
+  assert.equal(current.sizeBytes,123);
+  assert.equal(current.projectDir,detail.projectDir);
+  const unrelated={...detail,projectDir:"another-source"};
+  assert.equal(cache.withCurrentMetadata("qoder",false,unrelated).title,"Continue");
+});
+
 test("cached metadata never clears a body read failure; only a successful body retry does", async () => {
   const row = {...meta("same", "mode-id"), realUserCount:1};
   const refresh = deferred(); let pending = false;
