@@ -304,6 +304,15 @@ pub trait AgentSource: Send + Sync {
             .map(|detail| detail.events)
     }
     fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String>;
+    /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
+    /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
+    fn deletion_targets(
+        &self,
+        _project_dir: &str,
+        _session_id: &str,
+    ) -> Result<Option<Vec<PathBuf>>, String> {
+        Ok(None)
+    }
     /// 生成恢复会话的 shell 命令；None 表示该 agent 不支持恢复
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String>;
     /// 该 agent 的配置文件集合（用于配置快照）。

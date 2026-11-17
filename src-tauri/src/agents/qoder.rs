@@ -98,6 +98,13 @@ impl AgentSource for QoderSource {
     fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
         claude_family::delete_session(&projects_dir(), project_dir, session_id)
     }
+    fn deletion_targets(
+        &self,
+        project_dir: &str,
+        session_id: &str,
+    ) -> Result<Option<Vec<PathBuf>>, String> {
+        claude_family::deletion_targets(&projects_dir(), project_dir, session_id).map(Some)
+    }
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String> {
         Some(format!(
             "{} --resume {}{}",

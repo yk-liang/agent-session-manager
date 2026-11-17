@@ -3,6 +3,7 @@ mod cache;
 #[cfg(test)]
 mod cold_start_tests;
 pub mod collector;
+mod deletion;
 #[cfg(test)]
 mod event_tests;
 pub mod events;
@@ -172,12 +173,16 @@ fn store(agent: &str) -> &'static Mutex<Store> {
 /// 删除动作必须晚于账本的持久化提交；失败时保留会话，不能静默丢掉最后一轮用量。
 pub fn preserve_before_delete(
     agent: &str,
+    targets: Option<&[PathBuf]>,
     delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let roots = roots(agent)?;
     let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
     let mut store = store(agent).lock().unwrap_or_else(|e| e.into_inner());
-    preserve_before_delete_at(agent, &roots, &mut store, delete)
+    match targets {
+        Some(targets) => deletion::preserve_at(agent, &roots, &mut store, targets, delete),
+        None => preserve_before_delete_at(agent, &roots, &mut store, delete),
+    }
 }
 
 fn preserve_before_delete_at(

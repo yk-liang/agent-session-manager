@@ -103,6 +103,10 @@ Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib 
 本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
 输出各 Agent 三轮目录耗时与 Qoder 后台名称补全耗时，不输出会话正文。
 
+删除前用量保存的回归：在 `src-tauri/` 运行 `cargo test --release --offline --locked --lib usage::deletion -- --test-threads=1`。覆盖主日志与嵌套子会话、最后一轮增量、重启后持久化、无关来源隔离、缓存保留、读取/账本失败和同步期间日志变化。
+
+真实数据性能复测使用 `usage::deletion::tests::real_qoder_deletion_preservation_benchmark`，必须显式加 `--ignored --exact --nocapture --test-threads=1`，并提供 `ASM_DELETE_PROBE_SESSION`（真实会话 ID）、`ASM_DELETE_PROBE_PROJECT`（源项目目录键）和 `ASM_DELETE_PROBE_STORE`。后者必须是独立目录，包含用 SQLite backup API 从应用数据库生成的 `cache.sqlite3` 与 `ledger.sqlite3`，不要直接复制运行中数据库的主文件。测试分别复制这份已关闭的备份，交替测量全量与局部保存，输出耗时和日志数量；实际日志只读，删除回调为空操作。目标缺失或检查失败必须报错，不能静默跳过。此测量不包含 GUI 调度、共享账本锁等待或 Finder 移入回收站耗时。
+
 本机只读归组审计：`cd src-tauri && cargo run --release --offline --locked --example grouping_audit`，可追加 `-- qoder` 限定数据源。输出会话总数、展示分组数、未归属数量及 pytest 临时目录漏归组数量，不输出正文、标题或完整路径。真实 Git 项目中的 pytest 目录应保留项目归属，因此漏归组计数需结合样本判断。
 
 五类适配器共用 `agents/workspace_groups.rs`：系统临时根下的 `pytest-of-*/pytest-<数字或current>/...`，以及以 `sessions/<源会话ID>` 结尾的临时运行目录，可判定为自动工作区。规则支持 macOS `/private` 路径别名和已清理的历史目录；不将任意临时路径都视为无项目。实际 Git 仓库（包括 worktree、符号链接指向的仓库）优先，生成的 `AGENTS.md` 不作为这些自动目录的项目证据，权限异常时保留原分组。Codex 原生项目归属优先于公共推断；状态损坏时告警并保留目录分组。所有提示以 `(project_dir, session_id)` 定位，只影响展示，读取和删除仍使用原始来源身份。

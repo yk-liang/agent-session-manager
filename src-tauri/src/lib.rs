@@ -267,10 +267,18 @@ async fn delete_session(
     project_dir: String,
     session_id: String,
 ) -> Result<(), String> {
-    run_backend(move || usage::preserve_before_delete(&agent, || {
-        agents::find_source(&agent)?.delete_session(&project_dir, &session_id)
-    }))
-        .await
+    run_backend(move || {
+        let source = agents::find_source(&agent)?;
+        let targets = source.deletion_targets(&project_dir, &session_id)?;
+        usage::preserve_before_delete(&agent, targets.as_deref(), || {
+            // 保存期间可能新建主日志或状态目录；实际删除集合必须仍与已保存的范围一致。
+            if targets.is_some() && source.deletion_targets(&project_dir, &session_id)? != targets {
+                return Err("会话删除目标已变化，请重试删除".into());
+            }
+            source.delete_session(&project_dir, &session_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]

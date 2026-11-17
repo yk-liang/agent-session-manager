@@ -469,6 +469,15 @@ fn delete_session_with(
     session_id: &str,
     remove: impl FnOnce(&[PathBuf]) -> Result<(), String>,
 ) -> Result<(), String> {
+    remove(&deletion_targets(base, project_dir, session_id)?)
+}
+
+/// 与实际删除共用校验和目标集合，供删除前用量保存使用。
+pub(crate) fn deletion_targets(
+    base: &Path,
+    project_dir: &str,
+    session_id: &str,
+) -> Result<Vec<PathBuf>, String> {
     if !is_safe_name(project_dir) {
         return Err("非法项目目录名".into());
     }
@@ -508,7 +517,7 @@ fn delete_session_with(
         // 结构校验通过后再复核内容身份：sessionId 必须与文件名一致
         verify_jsonl_session_id(&jsonl, session_id)?;
     }
-    remove(&targets)
+    Ok(targets)
 }
 
 /// 复核 jsonl 身份与待删文件名一致：
