@@ -28,8 +28,8 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
         <>
           {batch ? <p>将删除 {agent.displayName} 的 <strong className="deletion-count">{sessions.length} 个会话</strong>。</p>
             : <p>「{session.title || session.sessionId.slice(0, 8) + "…"}」</p>}
-          <p>{toTrash ? "会话文件将移入废纸篓，可在访达中还原。" : "会话将永久删除，无法恢复。"}</p>
-          {(agent.id === "codex" || agent.id === "opencode") && <p>关联的子会话也会被删除。</p>}
+          <p>{toTrash ? "可从废纸篓还原。" : "删除后无法恢复。"}</p>
+          {(agent.id === "codex" || agent.id === "opencode") && <p>子会话也会一并删除。</p>}
           {batch && (
             <>
               <ul className="batch-targets">
@@ -40,7 +40,6 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
                   </li>
                 ))}
               </ul>
-              <p>应用会列出删除失败的会话，供你重试。</p>
             </>
           )}
         </>

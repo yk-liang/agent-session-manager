@@ -10,7 +10,6 @@ const clock: RefreshClock = {
   cancel: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 };
 
-/** 文件事件只置脏；安静期、前后台、交互保护和扫描预算共同决定何时读取目录。 */
 export class AutoRefreshScheduler {
   private active = false;
   private blocked = false;
@@ -54,7 +53,7 @@ export class AutoRefreshScheduler {
   request(reason: "change" | "focus") {
     if (this.disposed) return;
     this.dirty = true;
-    // 原生已合并极密集事件；再等写入安静 1.2 秒，避免每个 token 都重读大日志。
+    // 等待流式写入停顿，避免反复扫描大日志。
     this.quietUntil = Math.max(this.quietUntil, this.clock.now() + (reason === "change" ? 1200 : 150));
     this.schedule();
   }
@@ -79,12 +78,11 @@ export class AutoRefreshScheduler {
     this.running = true;
     const started = this.clock.now();
     try { await this.refresh(); }
-    // 刷新函数负责报告读取错误；调度器保留后续事件，失败也不形成紧密重试循环。
-    catch { /* The next file event or foreground check may retry. */ }
+    catch { /* 等待下一次文件变更或窗口聚焦后重试。 */ }
     finally {
       const elapsed = Math.max(0, this.clock.now() - started);
       this.running = false;
-      // 至少休息 5 秒；扫描越慢休息越久，将连续自动扫描的时间预算控制在约 5%。
+      // 将连续自动扫描的时间占比限制在约 5%。
       this.notBefore = this.clock.now() + Math.max(5000, elapsed * 19);
       this.schedule();
     }

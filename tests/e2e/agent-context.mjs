@@ -62,7 +62,7 @@ try {
     if (name === 'claude.json' || name === 'pi.json') {
       await page.waitForFunction(() => {
         const rows = [...document.querySelectorAll('.event-group')];
-        return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 10) < 1);
+        return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 8) < 1);
       });
       await page.screenshot({ path: path.join(artifactDir, `agent-context-${agent}-${engine}.png`) });
     }

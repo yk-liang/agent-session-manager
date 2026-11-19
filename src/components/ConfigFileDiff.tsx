@@ -5,9 +5,9 @@ import { configDiff } from "../configDiff";
 import type { ConfigFileChange } from "../types";
 
 const actionLabels = {
-  create: "新增",
+  create: "创建",
   replace: "覆盖",
-  remove: "移除",
+  remove: "删除",
   unchanged: "不变",
 };
 
@@ -59,7 +59,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
             <div className="diff-legend">
               <span>原行</span>
               <span>新行</span>
-              <span>− 移除 / + 新增</span>
+              <span>− 删除 / + 新增</span>
             </div>
             {visible.map(({ row, index }, position) => (
               <div key={index}>
@@ -67,7 +67,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
                   <div className="diff-gap">
                     … 省略{" "}
                     {index - (position ? visible[position - 1].index + 1 : 0)}{" "}
-                    行未变化内容
+                    行未改动内容
                   </div>
                 )}
                 <div className={`diff-line ${row.kind}`}>
@@ -86,7 +86,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
             ))}
             {visible.length > 0 &&
               visible[visible.length - 1].index < rows.length - 1 && (
-                <div className="diff-gap">… 其余内容未改动</div>
+                <div className="diff-gap">… 其余行未改动</div>
               )}
           </div>
           {rows.length >= 24 && (

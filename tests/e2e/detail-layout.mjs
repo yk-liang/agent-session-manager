@@ -21,12 +21,12 @@ const compact=async()=>{
   await page.waitForTimeout(100);
   const values=await page.evaluate(gaps);
   assert.ok(values.length>=2,'需要多个相邻行验证高度');
-  const wrong=values.filter(v=>v.gap<9||v.gap>11);
-  assert.deepEqual(wrong,[],'相邻消息必须保持 10px 间距');
+  const wrong=values.filter(v=>Math.abs(v.gap-8)>1);
+  assert.deepEqual(wrong,[],'相邻虚拟行的基础间距应为 8px');
 };
 const alignedActivity=async()=>{
   const { count, misaligned }=await page.evaluate(()=>{
-    const cards=[...document.querySelectorAll('.event-group > .collapsible')];
+    const cards=[...document.querySelectorAll('.event-group > :is(.collapsible, .response-group)')];
     const assistant=document.querySelector('.event-group > .message.assistant');
     const width=assistant && getComputedStyle(assistant).maxWidth;
     return { count:cards.length, misaligned:cards.flatMap(card=>{
@@ -38,13 +38,49 @@ const alignedActivity=async()=>{
   assert.ok(count>0,'需要展开或收起的活动卡片验证宽度');
   assert.deepEqual(misaligned,[],'活动卡片应与助手消息左对齐，并共用宽度上限');
 };
+const messageSpacing=async()=>{
+  const message=page.locator('#ev-1 .message');
+  const geometry=()=>message.evaluate(el=>{
+    const cards=[...document.querySelectorAll('.event-group[data-index]')].slice(0,8)
+      .flatMap(row=>[...row.querySelectorAll(':scope > :is(.message, .collapsible, .response-group)')]);
+    const gaps=cards.slice(1).map((next,index)=>{
+      const previous=cards[index];
+      const rect=node=>(node.querySelector(':scope > .msg')??node).getBoundingClientRect();
+      return Math.round(rect(next).top-rect(previous).bottom);
+    });
+    const bubble=el.querySelector('.msg').getBoundingClientRect();
+    const actions=el.querySelector('.message-actions');
+    const footer=actions.getBoundingClientRect();
+    return {gaps,actionGap:Math.round(footer.top-bubble.bottom),
+      actionHeight:Math.round(footer.height),opacity:getComputedStyle(actions).opacity};
+  });
+  const before=await geometry();
+  assert.deepEqual(before,{gaps:[32,32,32,32,32,32,32,32,8],actionGap:4,actionHeight:20,opacity:'0'});
+  await message.locator('.msg').hover();
+  assert.deepEqual(await geometry(),{...before,opacity:'1'});
+};
 try{
   let detail;
   if(process.env.ASM_LAYOUT_USE_REAL==='1') {
     await promisify(execFile)('cargo',['run','--offline','--locked','--example','opencode_perf'],{cwd:path.resolve('src-tauri'),env:{...process.env,ASM_OPENCODE_SESSION:'ses_f36bdb6b8ffe8aaxELwqmbD8tU',ASM_OPENCODE_VIEW_EXPORT:exported},timeout:180000});
     detail=JSON.parse(readFileSync(exported,'utf8'));
   } else {
-    const events=[{type:'user',uuid:'u1',message:{content:'# 用户请求\n\n'+('- 条件 **约束**\n').repeat(160)}}];
+    const shortTool=name=>({type:'assistant',message:{content:[{type:'tool_use',name}]}});
+    const events=[
+      shortTool('inspect'),
+      {type:'user',message:{content:'第一条补充信息'}},
+      {type:'user',message:{content:'第二条补充信息'}},
+      {type:'assistant',message:{content:[
+        {type:'text',text:'开始检查。'},
+        {type:'thinking',thinking:'检查字段和布局'},
+        {type:'text',text:'已确认字段。'},
+      ]}},
+      {type:'assistant',message:{content:'继续检查布局。'}},
+      {type:'user',message:{content:'也检查窄窗口。'}},
+      shortTool('read'),
+      shortTool('compare'),
+      {type:'user',uuid:'u1',message:{content:'# 用户请求\n\n'+('- 条件 **约束**\n').repeat(160)}},
+    ];
     for(let i=0;i<30;i++)events.push(
       {type:'assistant',uuid:`think-${i}`,message:{content:[{type:'thinking',thinking:'分析当前步骤'}]}},
       {type:'assistant',uuid:`text-${i}`,message:{content:`已完成当前检查 ${i}。`}},
@@ -68,6 +104,7 @@ try{
   },detail);
   await page.goto(baseURL);await page.locator('.session-card').click();
   await page.locator('.event-group').first().waitFor();await compact();
+  if(process.env.ASM_LAYOUT_USE_REAL!=='1')await messageSpacing();
   const markdown=page.getByRole('checkbox',{name:'Markdown',exact:true});await markdown.check();
   await page.locator('.markdown-body').first().waitFor();await page.waitForFunction(()=>!document.querySelector('[data-markdown-pending]'));
   await compact();

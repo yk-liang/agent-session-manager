@@ -36,13 +36,12 @@ export default function SessionActions({ agent, session, onRequestDelete, onTogg
   const resume = async (fork: boolean) => {
     try {
       await api.resumeInTerminal(agent.id, session.sessionId, session.cwd ?? undefined, fork);
-      toast(fork ? "已向终端发送分叉命令" : "已向终端发送恢复命令");
+      toast(fork ? "已在终端启动分叉命令" : "已在终端启动恢复命令");
     } catch (error) {
       toast(String(error), true);
     }
   };
 
-  // 卡片上是纯图标快捷操作，详情工具栏与同排按钮一样只用文字。
   const button = (label: string, icon: LucideIcon, onClick: () => void, danger = false) => (
     <button type="button" className={danger ? "danger" : undefined} disabled={disabled}
       aria-label={compact ? `${label}（${session.title || session.sessionId}）` : undefined} onClick={onClick}>

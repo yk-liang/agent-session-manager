@@ -95,7 +95,7 @@ export function useSessionOutline(
   };
 
   if (!entries.length) return { trigger: null, navigation: null, onKeyDown };
-  const collapseLabel = collapsed ? "展开导览" : "收起导览";
+  const toggleLabel = collapsed ? "展开导览" : "收起导览";
   return {
     onKeyDown,
     trigger: <button ref={button} type="button" className="outline-toggle button-with-icon"
@@ -107,10 +107,10 @@ export function useSessionOutline(
         <div className="toc-heading">
           <div className="toc-title"><strong>对话导览</strong><span className="status-tag">{entries.length} 条提问</span></div>
           <div className="toc-controls">
-            <button type="button" title="上一条提问 (Alt+↑)" aria-label="上一条提问" disabled={!previous} onClick={() => previous && jump(previous.idx, false)}><UiIcon icon={ArrowUp} /></button>
-            <button type="button" title="下一条提问 (Alt+↓)" aria-label="下一条提问" disabled={!next} onClick={() => next && jump(next.idx, false)}><UiIcon icon={ArrowDown} /></button>
+            <button type="button" title="上一条提问（Alt + ↑）" aria-label="上一条提问" disabled={!previous} onClick={() => previous && jump(previous.idx, false)}><UiIcon icon={ArrowUp} /></button>
+            <button type="button" title="下一条提问（Alt + ↓）" aria-label="下一条提问" disabled={!next} onClick={() => next && jump(next.idx, false)}><UiIcon icon={ArrowDown} /></button>
           </div>
-          <button type="button" className="toc-control toc-collapse" title={collapseLabel} aria-label={collapseLabel}
+          <button type="button" className="toc-control toc-collapse" title={toggleLabel} aria-label={toggleLabel}
             aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}>
             <UiIcon icon={collapsed ? PanelRightOpen : PanelRightClose} />
           </button>
@@ -122,7 +122,7 @@ export function useSessionOutline(
       <div className="toc-body" ref={list}>
         <ol className="toc-list">{items}</ol>
       </div>
-      <div className="toc-footer"><kbd>Alt</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切换</span></div>
+      <div className="toc-footer"><kbd>Alt</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切换提问</span></div>
     </nav>,
   };
 }

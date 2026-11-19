@@ -8,7 +8,7 @@ interface Props {
   onSelect: (dirName: string | null) => void;
   disabled?: boolean;
   loading: boolean;
-  /** A failed/incomplete scan cannot establish the total, even when it returns no rows. */
+  /** 扫描不完整时无法确认总数。 */
   catalogIncomplete?: boolean;
 }
 
@@ -54,7 +54,7 @@ export default function Sidebar({
             </div>
           </button>
         ))}
-        {!loading && projects.length === 0 && <div className="empty-hint">{catalogIncomplete ? "会话列表读取不完整" : "暂无会话"}</div>}
+        {!loading && projects.length === 0 && <div className="empty-hint">{catalogIncomplete ? "会话列表读取失败" : "暂无会话"}</div>}
       </div>
     </aside>
   );

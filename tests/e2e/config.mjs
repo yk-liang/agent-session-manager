@@ -112,7 +112,7 @@ try {
   await file("mcp.json").getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length === 1);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.splice(0).forEach((r) => r.resolve()); });
-  await page.getByRole("alert").filter({ hasText: "mcp.json 已保存，但无法重新读取状态。" }).waitFor();
+  await page.getByRole("alert").filter({ hasText: "mcp.json 已保存。请重试读取配置。" }).waitFor();
   assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   assert.ok(await page.getByRole("status").filter({ hasText: "1 个文件未保存" }).isVisible());
   assert.ok(await beforeUnloadBlocked(), "failed discard-refresh must still protect the surviving draft");
@@ -207,7 +207,7 @@ try {
   const personal = page.locator(".profile-card", { hasText: "个人" });
   await personal.getByRole("button", { name: "应用", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByText("移除", { exact: true }).waitFor();
+  await dialog.getByText("删除", { exact: true }).waitFor();
   assert.ok((await dialog.locator(".diff-line.add").allTextContents()).some((line) => line.includes("personal-model")));
   await page.evaluate(() => { window.__CONFIG_TEST__.configs.qoder[0].content = '{"external":"before-apply"}'; });
   await dialog.getByRole("button", { name: "应用方案", exact: true }).click();
@@ -220,7 +220,7 @@ try {
   await page.locator(".history-toggle").click();
   const operationBackup = page.locator(".backup-row", { hasText: "应用配置「个人」" }).first();
   await operationBackup.getByRole("button", { name: "恢复", exact: true }).click();
-  await dialog.getByText("新增", { exact: true }).waitFor();
+  await dialog.getByText("创建", { exact: true }).waitFor();
   await dialog.getByRole("button", { name: "恢复备份", exact: true }).click();
   await file("mcp.json").getByRole("button", { name: "编辑", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.configs.qoder[0].content), '{"external":"before-apply"}');
@@ -269,7 +269,7 @@ try {
   await file("settings.json").locator("textarea").fill('{"model":"saved-before-read-failure"}');
   await page.evaluate(() => { window.__CONFIG_TEST__.failNextRead = true; });
   await file("settings.json").getByRole("button", { name: "保存", exact: true }).click();
-  await page.getByRole("alert").filter({ hasText: "已保存，但无法重新读取" }).waitFor();
+  await page.getByRole("alert").filter({ hasText: "已保存。请重试读取配置" }).waitFor();
   assert.ok(await file("settings.json").getByRole("button", { name: "编辑", exact: true }).isDisabled());
   await refresh();
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();

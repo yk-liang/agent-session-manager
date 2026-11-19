@@ -3,7 +3,7 @@ import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight, Search, X } from "lucide-react";
 import UiIcon from "./UiIcon";
-import { formatSize, fullTime, relativeTime, sessionKey, shortPath } from "../utils";
+import { formatSize, formatLocalDateTime, relativeTime, sessionKey, shortPath } from "../utils";
 import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
 import ReadDiagnostics from "./ReadDiagnostics";
@@ -93,8 +93,7 @@ export default function SessionList({
     getItemKey, estimateSize: () => 76, gap: 6, paddingStart: 8, paddingEnd: 8, overscan: 5,
     useAnimationFrameWithResizeObserver: true });
   useLayoutEffect(() => { scroll.current?.scrollTo(0, 0); }, [scopeKey, search]);
-  // 目录刷新可能在视口上方插入或重排卡片。已向下浏览时，让原来位于视口顶部的会话留在原处；
-  // 位于顶部时不锚定，仍直接显示最新排序。只在列表数据变化时查找锚点，平时只记录可见行。
+  // 滚动后用首条可见会话定位，列表顶部则跟随最新排序。
   const layout = useRef<{ scope: string; sessions: SessionMeta[]; items: Pick<VirtualItem, "key" | "start" | "end">[] } | null>(null);
   const layoutScope = `${scopeKey}\n${search}`;
   useLayoutEffect(() => {
@@ -114,12 +113,12 @@ export default function SessionList({
     layout.current = { scope: layoutScope, sessions, items: list.getVirtualItems().map(({ key, start, end }) => ({ key, start, end })) };
   });
   const emptyHint = loading ? "正在读取会话…"
-    : loadError || warnings.length > 0 ? "会话列表读取不完整。请重试。"
-    : "没有匹配的会话";
+    : loadError || warnings.length > 0 ? "暂无可显示的会话"
+    : search.trim() ? "未找到匹配的会话" : "暂无会话";
   return (
     <div className="session-list" aria-busy={busy}>
       <div className="search-box">
-        <div className="session-search-field">
+        <div className="search-field">
           <UiIcon icon={Search} size={16} className="search-icon" />
           <input
             type="search"
@@ -141,7 +140,7 @@ export default function SessionList({
           </div>
         )}
         {loadError && <ReadDiagnostics className="catalog-error" title="无法读取会话列表" errors={[loadError]} retry={onRetryLoad} busy={disabled || busy} />}
-        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`${warnings.length} 条读取提示`} errors={warnings} description="部分会话未能读取。" retry={onRetryLoad} busy={disabled || busy} />}
+        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title="部分会话无法读取" errors={warnings} retry={onRetryLoad} busy={disabled || busy} />}
         <div className="session-list-options">
           <div className="session-list-filters">
             <CheckboxField label="显示空会话" checked={filter.includeEmpty} disabled={disabled}
@@ -161,7 +160,7 @@ export default function SessionList({
       {batchMode && (
         <div className="batch-toolbar">
           <div className="batch-status" role="status">
-            {progress ? `正在删除会话（${progress.completed}/${progress.total}）` : `已选 ${selectedCount} 个会话`}
+            {progress ? `正在删除会话（${progress.completed} / ${progress.total}）` : `已选中 ${selectedCount} 个会话`}
           </div>
           <div className="batch-actions">
             <button onClick={onToggleAll} disabled={disabled || busy || searchPending || sessions.length === 0}>
@@ -171,7 +170,7 @@ export default function SessionList({
               删除所选
             </button>
           </div>
-          <p className="batch-hint">更改筛选条件会取消选择。</p>
+          <p className="batch-hint">更改筛选会清除已选会话。</p>
         </div>
       )}
       {failures.length > 0 && (
@@ -209,10 +208,10 @@ export default function SessionList({
                     {statsKnown && <span>{s.realUserCount + s.assistantTextCount} 条消息</span>}
                     {s.sizeBytes != null && <span className="session-card-size">{formatSize(s.sizeBytes)}</span>}
                   </span>
-                  <time dateTime={s.lastTs ?? undefined} title={fullTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
+                  <time dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
                 </span>
                 <span className="session-card-badges">
-                  {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}
+                  {s.readError && <span className="badge read-error-badge" title="打开会话以重试或查看诊断">正文读取失败</span>}
                   {isEmpty && <span className="badge empty-badge">空会话</span>}
                   <ModelLabel model={s.model} badge />
                   {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}

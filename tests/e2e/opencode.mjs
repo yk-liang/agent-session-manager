@@ -51,7 +51,7 @@ try {
   assert.equal(await page.locator('#ev-1').getAttribute('title'),'模型：fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   const info=page.getByRole('group',{name:'会话信息',exact:true});
-  assert.equal(await info.locator('dt').first().textContent(),'最近模型');
+  assert.equal(await info.locator('dt').first().textContent(),'最近使用的模型');
   assert.equal(await info.locator('.model-label').first().textContent(),'fixture/model-b');
   assert.equal(await info.locator('.session-model-history .model-label').textContent(),'fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();

@@ -5,7 +5,7 @@ import type { SessionMeta } from "../types";
 import ModelLabel from "./ModelLabel";
 
 export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; models?: string[] }) {
-  const others = models.filter((model) => model !== meta.model);
+  const otherModels = models.filter((model) => model !== meta.model);
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -53,15 +53,15 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
           <dl>
             {meta.model && (
               <div>
-                <dt>{others.length ? "最近模型" : "模型"}</dt>
+                <dt>{otherModels.length ? "最近使用的模型" : "模型"}</dt>
                 <dd>
                   <ModelLabel model={meta.model} />
                 </dd>
               </div>
             )}
-            {others.length > 0 && <div className="session-model-history">
+            {otherModels.length > 0 && <div className="session-model-history">
               <dt>其他模型</dt>
-              <dd>{others.map((model) => <ModelLabel key={model} model={model} />)}</dd>
+              <dd>{otherModels.map((model) => <ModelLabel key={model} model={model} />)}</dd>
             </div>}
             {meta.cwd && (
               <div>
@@ -71,7 +71,7 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
             )}
             {meta.version && (
               <div>
-                <dt>CLI 版本</dt>
+                <dt>客户端版本</dt>
                 <dd>{meta.version}</dd>
               </div>
             )}

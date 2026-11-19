@@ -1,11 +1,12 @@
 import { createContext, memo, useContext, useEffect, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Layers, type LucideIcon } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, FileOutput, FileText, Wrench, type LucideIcon } from "lucide-react";
 import * as api from "../api";
 import type { ContentBlock } from "../types";
-import { attachmentLabel, hasActivity, isAttachment, messageBlockText, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
-import { absoluteTime } from "../utils";
+import { attachmentLabel, isAttachment, messageBlockText, visibleBlockKind, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
+import { formatMessageTimestamp } from "../utils";
 import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
+import { payloadText, ToolInput, ToolOutput, ToolSection } from "./ToolPayload";
 import UiIcon from "./UiIcon";
 
 function attachmentUrl(block: ContentBlock) {
@@ -22,60 +23,77 @@ function Attachment({ block }: { block: ContentBlock }) {
   return src ? <img className="message-image" src={src} alt={label} loading="lazy" /> : <span className="message-attachment">{label}</span>;
 }
 
-function ToolResult({ result, markdown }: { result: ContentBlock; markdown: boolean }) {
+function ToolResult({ result, markdown, failed, onCopyError }: {
+  result: ContentBlock;
+  markdown: boolean;
+  failed: boolean;
+  onCopyError: (error: unknown) => void;
+}) {
   const content = result.content;
-  if (content == null || content === "" || Array.isArray(content) && !content.length) {
-    return <p className="tool-loading">暂无结果内容</p>;
-  }
   if (!Array.isArray(content)) {
-    const text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
-    return <LongText text={text} code markdown={markdown} />;
+    return <ToolOutput text={content == null ? "" : payloadText(content)} markdown={markdown} error={failed} onCopyError={onCopyError} />;
   }
-  return <div className="tool-result-parts">{content.map((part, index) => {
-    if (part && typeof part === "object" && isAttachment(part)) return <Attachment key={index} block={part} />;
-    const text = typeof part?.text === "string" ? part.text : JSON.stringify(part, null, 2);
-    return <LongText key={index} text={text ?? ""} code markdown={markdown} />;
-  })}</div>;
+  const parts = content.map(part => {
+    if (part && typeof part === "object" && isAttachment(part)) return { attachment: part, text: attachmentLabel(part) };
+    return { text: typeof part?.text === "string" ? part.text : payloadText(part) };
+  });
+  return <ToolOutput text={parts.map(part => part.text).join("\n\n")} markdown={markdown} error={failed} onCopyError={onCopyError}>
+    {parts.some(part => part.attachment) && <div className="tool-result-parts">{parts.map((part, index) => part.attachment
+      ? <Attachment key={index} block={part.attachment} />
+      : <LongText key={index} text={part.text} code markdown={markdown} />)}</div>}
+  </ToolOutput>;
 }
 
-// 虚拟行移出视口后会卸载，展开状态和正在读取的内容仍属于本次会话。
-export const DetailState = createContext({ expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>(), markdown: false });
+export const DetailState = createContext({
+  expanded: new Set<string>(),
+  payloads: new Map<string, Promise<ContentBlock>>(),
+  markdown: false,
+  onCopyError: (_error: unknown) => {},
+});
 export const RowKey = createContext("");
 function LongText({ text, query = "", code = false, markdown = false }: { text: string; query?: string; code?: boolean; markdown?: boolean }) {
   const [limit, setLimit] = useState(1500);
   const long = text.length > 3000;
   const complete = !long || limit >= text.length;
-  const hit = query ? text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()) : -1;
-  const start = !complete && hit >= limit ? Math.max(0, hit - 400) : 0;
+  const matchOffset = query ? text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()) : -1;
+  const start = !complete && matchOffset >= limit ? Math.max(0, matchOffset - 400) : 0;
   const visible = complete ? text : text.slice(start, start + limit);
   const displayed = (start > 0 ? "…" : "") + visible + (!complete ? "…" : "");
   return <><MessageText text={displayed} query={query} markdown={markdown}
     fallback={code ? <pre className="code">{displayed}</pre> : undefined} />
-    {!complete && <button className="expand-text" onClick={() => setLimit(Math.max(limit + 15000, start + limit + 15000))}>显示更多</button>}
+    {!complete && <button type="button" className="content-action content-expand"
+      onClick={() => setLimit(Math.max(limit + 15000, start + limit + 15000))}>显示更多</button>}
   </>;
 }
-function ToolContent({ block, input = false }: { block: ContentBlock; input?: boolean }) {
-  const state = useContext(DetailState);
-  const [loaded, setLoaded] = useState<ContentBlock | null>(block.deferred ? null : block);
-  const [error, setError] = useState("");
+function ToolContent({ block, input = false, failed = false }: { block: ContentBlock; input?: boolean; failed?: boolean }) {
+  const { payloads, markdown, onCopyError } = useContext(DetailState);
+  const token = block.deferred;
+  const [loadedPayload, setLoadedPayload] = useState<{ token: string; value?: ContentBlock; error?: string }>();
   const [attempt, setAttempt] = useState(0);
+  const result = loadedPayload?.token === token ? loadedPayload : undefined;
+  const loaded = token ? result?.value : block;
+  const error = token ? result?.error : undefined;
+
   useEffect(() => {
+    if (!token) return;
     let cancelled = false;
-    if (!block.deferred) { setLoaded(block); return; }
-    const token = block.deferred;
-    let request = state.payloads.get(token);
-    if (!request) { request = api.readToolPayload(token); state.payloads.set(token, request); }
-    void request.then((value) => { if (!cancelled) setLoaded(value); }).catch((e) => {
-      state.payloads.delete(token);
-      if (!cancelled) setError(String(e));
+    const request = payloads.get(token) ?? api.readToolPayload(token);
+    payloads.set(token, request);
+    void request.then(value => {
+      if (!cancelled) setLoadedPayload({ token, value });
+    }).catch(error => {
+      if (payloads.get(token) === request) payloads.delete(token);
+      if (!cancelled) setLoadedPayload({ token, error: String(error) });
     });
     return () => { cancelled = true; };
-  }, [block, state, attempt]);
-  if (error) return <div role="alert">{error} <button onClick={() => { setError(""); setAttempt((n) => n + 1); }}>重试</button></div>;
-  if (!loaded) return <div className="tool-loading" role="status">加载中…</div>;
-  if (!input) return <ToolResult result={loaded} markdown={state.markdown} />;
-  const text = typeof loaded.input === "string" ? loaded.input : JSON.stringify(loaded.input, null, 2) ?? "";
-  return <LongText text={text} code />;
+  }, [token, payloads, attempt]);
+  if (error || !loaded) return <ToolSection kind={input ? "input" : failed ? "error" : "output"}>
+    {error ? <div className="tool-payload-message" role="alert">
+      {error} <button type="button" onClick={() => { setLoadedPayload(undefined); setAttempt(value => value + 1); }}>重试</button>
+    </div> : <div className="tool-loading tool-payload-message" role="status">正在读取…</div>}
+  </ToolSection>;
+  if (input) return <ToolInput value={loaded.input} onCopyError={onCopyError} />;
+  return <ToolResult result={loaded} markdown={markdown} failed={failed || !!loaded.is_error} onCopyError={onCopyError} />;
 }
 
 function Collapsible({
@@ -95,10 +113,10 @@ function Collapsible({
   summary?: string | null;
   preview?: string;
   trailing?: ReactNode;
-  icon?: LucideIcon;
+  icon: LucideIcon;
   children: ReactNode;
   error?: boolean;
-  kind: "thinking" | "tool" | "context" | "response-group";
+  kind: "thinking" | "tool" | "context";
   persistKey: string;
 }) {
   const { expanded } = useContext(DetailState);
@@ -109,10 +127,12 @@ function Collapsible({
   const toggle = () => { if (open) expanded.delete(key); else expanded.add(key); setOpen(!open); };
   return (
     <div className={`collapsible ${kind}${error ? " error" : ""}`}>
-      <button className="collapsible-head" aria-expanded={open} onClick={toggle}>
+      <button type="button" className="collapsible-head" aria-expanded={open} onClick={toggle}>
         <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
-        {icon && <UiIcon icon={icon} className="response-group-icon" />}
-        <span className="collapsible-label">{label}</span>
+        <span className="collapsible-type" title={label}>
+          <UiIcon icon={icon} size={16} />
+          <span className="sr-only">{label}</span>
+        </span>
         {name && <code className="collapsible-name" title={name}>{name}</code>}
         {description && <span className="collapsible-preview" title={description}>{description}</span>}
         {trailing && <span className="collapsible-status">{trailing}</span>}
@@ -125,7 +145,9 @@ function Collapsible({
 const toolStatusLabels = { pending: "等待中", running: "进行中", completed: "已完成", error: "失败" };
 
 function toolStatus(block: ContentBlock, result?: ContentBlock) {
-  return block.status ?? result?.status ?? (result && (result.is_error ? "error" : "completed"));
+  if (block.status === "error" || result?.status === "error" || result?.is_error) return "error";
+  if (block.status === "completed" || result?.status === "completed") return "completed";
+  return result?.status ?? block.status ?? (result && "completed");
 }
 
 function toolDescription(block: ContentBlock) {
@@ -143,18 +165,13 @@ function ToolCard({ block, result, index }: { block: ContentBlock; result?: Cont
       error={status === "error"}
       persistKey={`block:${index}`}
       label="工具调用"
+      icon={Wrench}
       name={block.name || "未知工具"}
-      preview={toolDescription(block)}
+      summary={toolDescription(block)}
       trailing={status && <span className={`tool-status ${status}`}>{toolStatusLabels[status]}</span>}
     >
-      <div className="tool-section-title">输入</div>
-      <ToolContent key={block.deferred} block={block} input />
-      {result && (
-        <>
-          <div className="tool-section-title">结果</div>
-          <ToolContent key={result.deferred} block={result} />
-        </>
-      )}
+      <ToolContent key={block.deferred ? `input:${block.deferred}` : "input"} block={block} input />
+      {result && <ToolContent key={result.deferred ? `output:${result.deferred}` : "output"} block={result} failed={status === "error"} />}
     </Collapsible>
   );
 }
@@ -162,58 +179,41 @@ function ToolCard({ block, result, index }: { block: ContentBlock; result?: Cont
 function ActivityCard({ part, markdown }: { part: SessionBlock; markdown: boolean }) {
   const { content: block, index, result } = part;
   if (block.type === "thinking") {
-    return <Collapsible persistKey={`block:${index}`} kind="thinking" label="思考过程"
+    return <Collapsible persistKey={`block:${index}`} kind="thinking" label="思考过程" icon={Brain}
       preview={block.thinking?.trim().replace(/\s+/g, " ").slice(0, 240)}>
       <LongText text={block.thinking ?? ""} code markdown={markdown} />
     </Collapsible>;
   }
   if (block.type === "tool_result") {
-    return <Collapsible persistKey={`block:${index}`} kind="tool" label="工具结果"
+    return <Collapsible persistKey={`block:${index}`} kind="tool" label="工具输出" icon={FileOutput}
       error={block.is_error} trailing={block.is_error && <span className="tool-status error">失败</span>}>
-      <ToolContent key={block.deferred} block={block} />
+      <ToolContent key={block.deferred} block={block} failed={block.is_error} />
     </Collapsible>;
   }
   return <ToolCard block={block} index={index} result={result} />;
 }
 
-function ResponseGroup({ parts, visibility, markdown }: {
+function ResponseGroup({ parts, markdown }: {
   parts: SessionBlock[];
-  visibility: Visibility;
   markdown: boolean;
 }) {
-  const visible = parts.filter(part => visibility[hasActivity(part)!]);
-  if (!visible.length) return null;
-  const rows = visible.map(part => <ActivityCard key={part.index} part={part} markdown={markdown} />);
-  if (parts.length === 1) return rows[0];
-  const thinkingCount = visible.filter(({ content }) => content.type === "thinking").length;
-  const toolCount = visible.filter(({ content }) => content.type === "tool_use").length;
-  const resultCount = visible.length - thinkingCount - toolCount;
-  const failureCount = visible.filter(({ content, result }) => content.type === "tool_result"
-    ? content.is_error : content.type === "tool_use" && toolStatus(content, result) === "error").length;
-  const label = thinkingCount && toolCount + resultCount ? "思考与工具调用"
-    : thinkingCount ? "思考过程" : toolCount ? "工具调用" : "工具结果";
-  const counts = [
-    [thinkingCount, "段思考"],
-    [toolCount, "次调用"],
-    [resultCount, "条结果"],
-    [failureCount, "次失败"],
-  ] as const;
-  return <Collapsible kind="response-group" persistKey={`group:${parts[0].index}`}
-    label={label} trailing={counts.map(([count, unit]) => count > 0 && <span key={unit}
-      className={unit === "次失败" ? "collapsible-count failed" : "collapsible-count"}><strong>{count}</strong> {unit}</span>)}
-    error={failureCount > 0} icon={Layers}>{rows}</Collapsible>;
+  const rows = parts.map(part => <ActivityCard key={part.index} part={part} markdown={markdown} />);
+  if (rows.length === 1) return rows[0];
+  const failed = parts.some(({ content, result }) => content.type === "tool_result"
+    ? content.is_error : content.type === "tool_use" && toolStatus(content, result) === "error");
+  return <div className={`response-group${failed ? " error" : ""}`}>{rows}</div>;
 }
 
-function MessageBubble({ role, timestamp, blocks, copyText, markdown, query, onCopyError }: {
+function MessageBubble({ role, timestamp, blocks, copyText, markdown, query }: {
   role: "user" | "assistant";
   timestamp?: string;
   blocks: SessionBlock[];
   copyText: string;
   markdown: boolean;
   query: string;
-  onCopyError: (error: unknown) => void;
 }) {
-  const time = timestamp && absoluteTime(timestamp);
+  const { onCopyError } = useContext(DetailState);
+  const time = timestamp && formatMessageTimestamp(timestamp);
   return <div className={`message ${role}`}>
     <div className={`msg ${role}`}>{blocks.map(({ index, content }) => content.type === "text"
       ? <div key={index} className="msg-text"><LongText text={content.text?.trim() ?? ""} query={query} markdown={markdown} /></div>
@@ -225,19 +225,18 @@ function MessageBubble({ role, timestamp, blocks, copyText, markdown, query, onC
   </div>;
 }
 
-export const EventView = memo(function EventView({ row, visibility, renderMarkdown, highlightQuery = "", onCopyError }: {
+export const EventView = memo(function EventView({ row, visibility, renderMarkdown, highlightQuery = "" }: {
   row: SessionRow;
   visibility: Visibility;
   renderMarkdown: boolean;
   highlightQuery?: string;
-  onCopyError: (error: unknown) => void;
 }) {
   const { event, blocks } = row;
   const { type, timestamp } = event;
   if (type === "context") {
     const text = event.message?.content;
     if (typeof text !== "string" || !text.trim()) return null;
-    return <Collapsible kind="context" persistKey="context" label={event.context?.label ?? "运行上下文"}
+    return <Collapsible kind="context" persistKey="context" label={event.context?.label ?? "运行上下文"} icon={FileText}
       summary={event.context?.summary}><LongText text={text} code /></Collapsible>;
   }
   if (type === "system") {
@@ -251,23 +250,24 @@ export const EventView = memo(function EventView({ row, visibility, renderMarkdo
   const copyText = blocks.flatMap(({ content }) => messageBlockText(content) ?? []).join("\n\n");
   const flushActivity = () => {
     if (!activity.length) return;
-    parts.push(<ResponseGroup key={activity[0].index} parts={activity} visibility={visibility} markdown={renderMarkdown} />);
+    parts.push(<ResponseGroup key={activity[0].index} parts={activity} markdown={renderMarkdown} />);
     activity = [];
   };
   const flushMessage = () => {
     if (!message.length) return;
     parts.push(<MessageBubble key={message[0].index} role={type} timestamp={timestamp} blocks={message}
-      copyText={copyText} markdown={renderMarkdown} query={highlightQuery} onCopyError={onCopyError} />);
+      copyText={copyText} markdown={renderMarkdown} query={highlightQuery} />);
     message = [];
   };
 
   for (const part of blocks) {
-    if (hasActivity(part)) {
+    const kind = visibleBlockKind(part, visibility);
+    if (!kind) continue;
+    if (kind === "activity") {
       flushMessage();
       activity.push(part);
       continue;
     }
-    if (!messageBlockText(part.content)?.trim()) continue;
     flushActivity();
     message.push(part);
   }

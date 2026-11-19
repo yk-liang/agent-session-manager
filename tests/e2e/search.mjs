@@ -124,7 +124,7 @@ try {
   pass('switching Agent isolates results and clearing the search removes highlighting');
 
   await search.fill('不存在的词');
-  await page.getByText('没有匹配的会话',{exact:true}).waitFor();
+  await page.getByText('未找到匹配的会话',{exact:true}).waitFor();
   assert.equal(await page.locator('.session-card').count(),0);
   await search.fill('部分失败');
   await page.getByRole('status').getByText('无法搜索 1 个会话',{exact:true}).waitFor();

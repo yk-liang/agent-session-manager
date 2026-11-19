@@ -22,25 +22,30 @@ export function useConversationScroll(
   body: RefObject<HTMLDivElement | null>,
   content: RefObject<HTMLDivElement | null>,
 ) {
-  const [position, setPosition] = useState({ current: 0, progress: 0 });
+  const [position, setPosition] = useState({ current: 0, progress: 0, atBottom: true });
   const frame = useRef(0);
   const jumpFrame = useRef(0);
   const anchor = useRef<{ index: number; offset?: number } | null>(null);
 
   const track = useCallback(() => {
     const viewport = body.current, list = content.current;
-    if (!viewport || !list || !prompts.length) return;
+    if (!viewport || !list) return;
     const { scrollTop, scrollHeight, clientHeight } = viewport;
     const max = Math.max(0, scrollHeight - clientHeight);
-    const readingLine = scrollTop + clientHeight * (max > 0 && scrollTop >= max - 4 ? 1 : 0.35);
-    const listStart = list.getBoundingClientRect().top - viewport.getBoundingClientRect().top + scrollTop;
-    const row = virtual.getVirtualItemForOffset(Math.max(0, readingLine - listStart));
-    if (anchor.current?.offset !== undefined && Math.abs(scrollTop - anchor.current.offset) > 1) {
-      anchor.current = null;
+    const atBottom = max - Math.max(0, scrollTop) <= 4;
+    let current = 0;
+    if (prompts.length) {
+      const readingLine = scrollTop + clientHeight * (max > 0 && atBottom ? 1 : 0.35);
+      const listStart = list.getBoundingClientRect().top - viewport.getBoundingClientRect().top + scrollTop;
+      const row = virtual.getVirtualItemForOffset(Math.max(0, readingLine - listStart));
+      if (anchor.current?.offset !== undefined && Math.abs(scrollTop - anchor.current.offset) > 1) {
+        anchor.current = null;
+      }
+      current = promptAt(prompts, anchor.current?.index ?? (typeof row?.key === "number" ? row.key : 0));
     }
-    const current = promptAt(prompts, anchor.current?.index ?? (typeof row?.key === "number" ? row.key : 0));
     const progress = max > 0 ? Math.round(Math.max(0, Math.min(1, scrollTop / max)) * 100) : 100;
-    setPosition(previous => previous.current === current && previous.progress === progress ? previous : { current, progress });
+    setPosition(previous => previous.current === current && previous.progress === progress && previous.atBottom === atBottom
+      ? previous : { current, progress, atBottom });
   }, [body, content, prompts, virtual]);
 
   const cancelJump = useCallback(() => {
@@ -124,5 +129,11 @@ export function useConversationScroll(
     jumpFrame.current = requestAnimationFrame(settle);
   }, [body, cancelJump, track, virtual, visible]);
 
-  return { position, jumpTo };
+  const jumpToBottom = () => {
+    cancelJump();
+    body.current?.focus({ preventScroll: true });
+    virtual.scrollToEnd();
+  };
+
+  return { position, jumpTo, jumpToBottom };
 }

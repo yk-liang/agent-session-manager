@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { CheckboxField } from "./Checkbox";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -7,16 +8,18 @@ import SessionInfo from "./SessionInfo";
 import { useSessionOutline } from "./SessionOutline";
 import { useConversationScroll } from "../useConversationScroll";
 import { DetailState, EventView, RowKey } from "./SessionEvent";
-import { DEFAULT_VISIBILITY, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
+import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
 import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
-import { fullTime, sessionKey } from "../utils";
+import { formatLocalDateTime, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../models";
 import ReadDiagnostics from "./ReadDiagnostics";
+import UiIcon from "./UiIcon";
 
 interface Props {
   detail: Detail;
+  reading: SessionReading;
   agent: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
   onToggleArchive: (session: SessionMeta) => void;
@@ -26,19 +29,16 @@ interface Props {
   onRetryRead?: () => void;
 }
 
-export default function SessionDetailView({ detail, agent, onRequestDelete, onToggleArchive, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
+export default function SessionDetailView({ detail, reading, agent, onRequestDelete, onToggleArchive, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
   const key = sessionKey(meta);
-  const reportCopyError = useCallback((error: unknown) => toast(`复制消息失败：${String(error)}`, true), [toast]);
+  const reportCopyError = useCallback((error: unknown) => toast(`复制失败：${String(error)}`, true), [toast]);
   const [showTools, setShowTools] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
   const [showContext, setShowContext] = useState(false);
   const [renderMarkdown, setRenderMarkdown] = useState(readMarkdownPreference);
 
-  // 同一会话的正文刷新沿用展开状态和已读取的工具正文；切换会话才重新开始。
-  const reading = useRef<{ key: string; state: SessionReading } | null>(null);
-  const content = sessionContent(detail.events, reading.current?.key === key ? reading.current.state : undefined);
-  useEffect(() => { reading.current = { key, state: content.reading }; }, [key, content]);
+  const content = sessionContent(detail.events);
   const { rows, toc, hasContext } = content;
   const visibility = useMemo(() => showTools && showThinking && !showContext ? DEFAULT_VISIBILITY
     : { tool: showTools, thinking: showThinking, context: showContext }, [showTools, showThinking, showContext]);
@@ -59,13 +59,14 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
     return detail.events.findIndex((event) => eventMatches(event, searchTarget.query));
   }, [detail.events, searchTarget]);
 
-  const state = useMemo(() => ({ ...content.reading, markdown: renderMarkdown }), [content, renderMarkdown]);
+  const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, onCopyError: reportCopyError }),
+    [reading, renderMarkdown, reportCopyError]);
   const visible = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
     : visibleSessionRows(content.rows, visibility), [content, visibility]);
   const itemKey = useCallback((index: number) => visible[index], [visible]);
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
-    estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 10, useAnimationFrameWithResizeObserver: true });
-  const { position, jumpTo } = useConversationScroll(key, toc, visible, virtual, bodyRef, contentRef);
+    estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 8, useAnimationFrameWithResizeObserver: true });
+  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, visible, virtual, bodyRef, contentRef);
   const outline = useSessionOutline(toc, key, position, jumpTo);
   const markdownAnchor = useRef<number | null>(null);
   const changeMarkdown = (enabled: boolean) => {
@@ -90,13 +91,13 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
       if (position >= 0) virtual.scrollToIndex(position, { align: "start" });
     }
   }, [renderMarkdown, virtual, visible, searchTarget]);
-  // 只在打开搜索结果或切换 Markdown 时定位；同一会话的正文刷新会更新命中位置和跳转函数，但不能把读者拉回命中处。
+  // 正文刷新只更新定位数据，避免把读者拉回搜索命中处。
   const latestHit = useRef({ hitIndex, jumpTo });
   useLayoutEffect(() => { latestHit.current = { hitIndex, jumpTo }; }, [hitIndex, jumpTo]);
   useEffect(() => {
     if (!searchTarget) return;
     const { hitIndex, jumpTo } = latestHit.current;
-    if (hitIndex < 0) { toast("找不到原来的匹配内容，请重新搜索。", true); return; }
+    if (hitIndex < 0) { toast("会话内容已变化，请重新搜索。", true); return; }
     jumpTo(hitIndex, { match: true });
   }, [searchTarget, toast, renderMarkdown]);
 
@@ -110,8 +111,8 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
-          {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${fullTime(meta.firstTs)} ~ ${fullTime(meta.lastTs)}`}>
-            {fullTime(meta.lastTs)}
+          {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${formatLocalDateTime(meta.firstTs)} ~ ${formatLocalDateTime(meta.lastTs)}`}>
+            {formatLocalDateTime(meta.lastTs)}
           </time>}
           <div className="detail-meta-actions">
             {outline.trigger}
@@ -127,7 +128,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
             <div className="view-toggles" role="group" aria-label="对话显示选项">
               <CheckboxField label="工具调用" checked={showTools} onChange={setShowTools} />
               <CheckboxField label="思考过程" checked={showThinking} onChange={setShowThinking} />
-              {hasContext && <CheckboxField label="上下文" checked={showContext} onChange={setShowContext} title="查看系统指令、环境信息和压缩摘要" />}
+              {hasContext && <CheckboxField label="上下文" checked={showContext} onChange={setShowContext} title="显示系统指令、环境信息和压缩摘要" />}
               <CheckboxField label="Markdown" checked={renderMarkdown} onChange={changeMarkdown} />
             </div>
           )}
@@ -135,29 +136,37 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
       </div>
       {detail.warnings?.length ? <ReadDiagnostics className="detail-warnings" title="部分会话内容无法读取" errors={detail.warnings} retry={onRetryRead} /> : null}
       <div className="detail-content">
-        <div className="detail-body" ref={bodyRef}>
-          <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
-          {virtual.getVirtualItems().map((row) => {
-            const i = visible[row.index];
-            return <div data-index={row.index} tabIndex={-1} title={agent.id === "opencode" ? eventModelTitle(detail.events[i]) : undefined} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
-              className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
-              <RowKey.Provider value={String(i)}><EventView
-                row={rows[i]}
-                visibility={visibility}
-                renderMarkdown={renderMarkdown}
-                highlightQuery={i === hitIndex ? searchTarget?.query : undefined}
-                onCopyError={reportCopyError}
-              /></RowKey.Provider>
-            </div>;
-          })}
-          </div>
-          {visible.length === 0 && (
-            <div className="empty-hint">
-              {hasContext && !showContext ? "启用「上下文」可查看运行记录。" : detail.events.length > 0
-                ? "当前筛选条件下没有消息" : meta.hasTranscript
-                ? "此会话暂无消息"
-                : "此会话没有对话记录"}
+        <div className="detail-conversation">
+          <div className="detail-body" ref={bodyRef} tabIndex={-1}>
+            <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
+              {virtual.getVirtualItems().map((row) => {
+                const i = visible[row.index];
+                const previous = rows[visible[row.index - 1]];
+                return <div data-index={row.index} tabIndex={-1} title={agent.id === "opencode" ? eventModelTitle(detail.events[i]) : undefined} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
+                  data-follows-activity={previous && !rowEndsWithMessage(previous, visibility) || undefined}
+                  className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
+                  <RowKey.Provider value={String(i)}><EventView
+                    row={rows[i]}
+                    visibility={visibility}
+                    renderMarkdown={renderMarkdown}
+                    highlightQuery={i === hitIndex ? searchTarget?.query : undefined}
+                  /></RowKey.Provider>
+                </div>;
+              })}
             </div>
+            {visible.length === 0 && (
+              <div className="empty-hint">
+                {hasContext && !showContext ? "勾选「上下文」查看运行记录。" : detail.events.length > 0
+                  ? "当前筛选下没有消息" : meta.hasTranscript
+                  ? "暂无对话消息"
+                  : "此会话没有正文记录"}
+              </div>
+            )}
+          </div>
+          {visible.length > 0 && !position.atBottom && (
+            <button type="button" className="detail-jump-bottom" title="回到底部" aria-label="回到底部" onClick={jumpToBottom}>
+              <UiIcon icon={ArrowDown} size={16} />
+            </button>
           )}
         </div>
         {outline.navigation}

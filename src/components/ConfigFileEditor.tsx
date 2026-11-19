@@ -54,7 +54,7 @@ export default function ConfigFileEditor({
           if (gen === validationGen.current)
             setValidation({
               valid: false,
-              error: `暂时无法校验：${String(e)}`,
+              error: `无法校验：${String(e)}`,
             });
         })
         .finally(() => {
@@ -129,7 +129,7 @@ export default function ConfigFileEditor({
           <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
           <strong>{file.label}</strong>
           {!file.present && !editing && (
-            <span className="status-tag muted">未创建</span>
+            <span className="status-tag muted">尚未创建</span>
           )}
           {dirty && <span className="status-tag amber">未保存</span>}
           {(file.present || editing) && (

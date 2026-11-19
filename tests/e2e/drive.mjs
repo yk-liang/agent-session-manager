@@ -367,7 +367,7 @@ await page.click(".session-card");
 await page.waitForSelector(".detail-body .msg", { timeout: 10000 });
 await page.screenshot({ path: `${artifactDir}/qsm-2-detail-${engine}.png` });
 console.log("STEP2 detail view OK, collapsibles:", await page.locator(".collapsible").count());
-const orphanResults = await page.locator('.collapsible.tool .collapsible-head:has-text("工具结果")').count();
+const orphanResults = await page.locator('.collapsible.tool .collapsible-head:has-text("工具输出")').count();
 console.log(
   `STEP2a malformed/orphan blocks: errors=${pageErrors.length}, orphanResults=${orphanResults} -> ${
     pageErrors.length === 0 && orphanResults === 1 ? "OK" : "FAILED"
@@ -432,7 +432,7 @@ await page.click(".modal-actions button.danger");
 await page.waitForTimeout(300);
 console.log("STEP8 confirm triggers delete_session:", invokeLog.includes("delete_session") ? "OK" : "FAILED");
 const toastText = (await page.locator(".toast").first().textContent()) ?? "";
-const toastOk = expectTrash ? toastText.includes("移入废纸篓") : toastText.includes("永久删除");
+const toastOk = expectTrash ? toastText.includes("移入废纸篓") : toastText.includes("已删除");
 console.log("STEP9 toast shown:", toastOk ? `OK (${toastText})` : `FAILED (${toastText})`);
 if (!toastOk) process.exit(1);
 
@@ -585,7 +585,7 @@ assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 3);
 assert.ok((await page.locator(".modal-body").textContent()).includes("将删除 Qoder 的 3 个会话。"));
-assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "永久删除，无法恢复" : "移入废纸篓"));
+assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "无法恢复" : "废纸篓还原"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
 const scansBeforeBatch = await page.evaluate(() => window.__CATALOG_CALLS__);
@@ -598,7 +598,7 @@ await page.evaluate(() => {
 });
 await page.waitForFunction(() => window.__PENDING_DELETES__.length === 1);
 assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), batchStart + 1);
-assert.ok((await page.locator(".batch-status").textContent()).includes("0/3"));
+assert.ok((await page.locator(".batch-status").textContent()).includes("0 / 3"));
 assert.ok(await page.getByRole("button", { name: "完成", exact: true }).isDisabled());
 assert.ok(await page.locator('.search-box input[type="search"]').isDisabled());
 assert.ok(await page.getByRole("checkbox", { name: "显示空会话", exact: true }).isDisabled());
@@ -615,7 +615,7 @@ assert.equal(await page.getByRole("listbox", { name: "Agent", exact: true }).cou
 assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).getAttribute("value"), "qoder");
 await page.evaluate(() => window.__PENDING_DELETES__.shift()());
 await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 2 && window.__PENDING_DELETES__.length === 1, batchStart);
-assert.ok((await page.locator(".batch-status").textContent()).includes("1/3"));
+assert.ok((await page.locator(".batch-status").textContent()).includes("1 / 3"));
 await page.evaluate(() => {
   window.__FAIL_NEXT_CATALOG__ = true;
   window.__HOLD_DELETES__ = false;
@@ -661,11 +661,11 @@ await chooseAgent(page, { label: "OpenCode" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
-assert.ok((await page.locator(".modal-body").textContent()).includes("会话将永久删除，无法恢复"));
-assert.ok((await page.locator(".modal-body").textContent()).includes("关联的子会话"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("删除后无法恢复"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
 assert.ok((await page.locator(".modal-actions .danger").textContent()).includes("永久删除（1）"));
 await page.locator(".modal-actions .danger").click();
-await page.locator(".session-cards .empty-hint", { hasText: "没有匹配的会话" }).waitFor();
+await page.locator(".session-cards .empty-hint", { hasText: "暂无会话" }).waitFor();
 assert.ok(await page.getByRole("button", { name: "全选结果", exact: true }).isDisabled());
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
 await page.getByRole("button", { name: "完成", exact: true }).click();

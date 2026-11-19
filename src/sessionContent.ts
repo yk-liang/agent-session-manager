@@ -69,19 +69,30 @@ export function messageBlockText(block: ContentBlock) {
   if (isAttachment(block)) return attachmentLabel(block);
 }
 
+export function visibleBlockKind(part: SessionBlock, visibility: Visibility) {
+  const activity = hasActivity(part);
+  if (activity) return visibility[activity] ? "activity" : undefined;
+  if (messageBlockText(part.content)?.trim()) return "message";
+}
+
 export function rowVisible({ event, blocks }: SessionRow, visibility: Visibility) {
   if (event.type === "context") return visibility.context && typeof event.message?.content === "string" && !!event.message.content.trim();
   if (event.type === "system") return !!String(event.content ?? event.subtype ?? "").trim();
-  return blocks.some(part => {
-    const activity = hasActivity(part);
-    return activity ? visibility[activity] : !!messageBlockText(part.content)?.trim();
-  });
+  return blocks.some(part => visibleBlockKind(part, visibility));
+}
+
+export function rowEndsWithMessage({ blocks }: SessionRow, visibility: Visibility) {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const kind = visibleBlockKind(blocks[i], visibility);
+    if (kind) return kind === "message";
+  }
+  return false;
 }
 
 /** 展开状态和已读取的工具正文；虚拟行卸载后仍保留，同一会话的正文刷新也沿用。 */
 export type SessionReading = { expanded: Set<string>; payloads: Map<string, Promise<ContentBlock>> };
 
-function createSessionContent(events: SessionEvent[], reading?: SessionReading) {
+function createSessionContent(events: SessionEvent[]) {
   const rows = sessionRows(events);
   const toc: { idx: number; text: string }[] = [];
   let hasContext = false;
@@ -94,17 +105,15 @@ function createSessionContent(events: SessionEvent[], reading?: SessionReading) 
   return {
     rows, toc, hasContext,
     visible: visibleSessionRows(rows, DEFAULT_VISIBILITY),
-    reading: reading ?? { expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>() },
   };
 }
 
 const sessionContents = new WeakMap<SessionEvent[], ReturnType<typeof createSessionContent>>();
 
-/** `reading` 只在首次为这份正文建立视图时采用，用于同一会话重读后接续阅读状态。 */
-export function sessionContent(events: SessionEvent[], reading?: SessionReading) {
+export function sessionContent(events: SessionEvent[]) {
   let content = sessionContents.get(events);
   if (!content) {
-    content = createSessionContent(events, reading);
+    content = createSessionContent(events);
     sessionContents.set(events, content);
   }
   return content;

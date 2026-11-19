@@ -66,6 +66,17 @@ try {
     Number(document.querySelector('.toc-progress')?.getAttribute('aria-valuenow')) >= 95);
   await page.locator('.detail-body').evaluate(body => { body.scrollTop = 0; });
   await page.waitForFunction(() => document.querySelector('.toc-item[aria-current="location"]')?.textContent.includes('第一条指令'));
+  const jumpBottom = page.getByRole('button', { name: '回到底部', exact: true });
+  await jumpBottom.click();
+  await page.waitForFunction(() => {
+    const body = document.querySelector('.detail-body');
+    return body.scrollHeight - body.clientHeight - body.scrollTop <= 4
+      && body.querySelector('#ev-6003');
+  });
+  await jumpBottom.waitFor({ state: 'hidden' });
+  assert.ok(await page.locator('.event-group').count()<50);
+  await page.locator('.detail-body').evaluate(body => { body.scrollTop = 0; });
+  await jumpBottom.waitFor();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
   await page.evaluate(()=>window.__PERF__.release());
   await page.waitForFunction(()=>document.querySelector('.session-card-sub').textContent.includes('条消息'));

@@ -55,7 +55,6 @@ export default function ConfigPanel({
   } | null>(null);
   const workspaceRequestGeneration = useRef(0);
   const working = busy || loading || fileSaveCount > 0;
-  // 读取可以取消或切页；写入期间需要阻止离开。
   const navigationBusy = busy || fileSaveCount > 0;
   const dirty = dirtyKeys.size > 0;
   const disabled = working || loadFailed;
@@ -119,7 +118,6 @@ export default function ConfigPanel({
 
   const onFileSaved = useCallback(
     async (key: string, content: string) => {
-      // 写入成功后先显示已保存内容，以便在重新读取失败时仍可查看。
       setWorkspace(
         (current) =>
           current && {
@@ -141,7 +139,7 @@ export default function ConfigPanel({
         refreshed
           ? null
           : {
-              text: `${key} 已保存，但无法重新读取状态。`,
+              text: `${key} 已保存。请重试读取配置。`,
               error: true,
             },
       );
@@ -191,7 +189,7 @@ export default function ConfigPanel({
       setNotice(
         refreshed
           ? null
-          : { text: "已保存，但无法重新读取状态。", error: true },
+          : { text: "配置已写入。请重试读取以更新界面。", error: true },
       );
       toast(preview.kind === "profile" ? "配置已应用" : "备份已恢复");
     } catch (e) {
@@ -271,8 +269,8 @@ export default function ConfigPanel({
                 className={`config-status ${matching.length ? "matched" : ""}`}
                 title={
                   matching.length
-                    ? "当前文件与这些方案一致"
-                    : "当前文件与已保存的方案均不同"
+                    ? "与当前配置一致的方案"
+                    : "当前配置未匹配任何方案"
                 }
               >
                 {matching.length ? matching.join("、") : "自定义"}
@@ -297,7 +295,7 @@ export default function ConfigPanel({
       </header>
 
       {hasOverview && (
-        <div className="config-overview" aria-label="当前配置摘要">
+        <div className="config-overview" aria-label="当前配置">
           {workspace.overview.model && (
             <div>
               <span>模型</span>
@@ -355,7 +353,7 @@ export default function ConfigPanel({
       )}
       {workspace.warnings.length > 0 && (
         <details className="config-warnings">
-          <summary><UiIcon icon={ChevronRight} className="details-caret" />{workspace.warnings.length} 条读取提示</summary>
+          <summary><UiIcon icon={ChevronRight} className="details-caret" />读取异常（{workspace.warnings.length} 条）</summary>
           {workspace.warnings.map((warning, i) => (
             <p key={i}>{warning}</p>
           ))}
@@ -367,7 +365,7 @@ export default function ConfigPanel({
           <div className="config-heading-label">
             <h2 id="profiles-title">配置方案</h2>
             <HelpTip label="配置方案">
-              项目设置或启动参数可能覆盖用户配置。应用方案后，可能需要重启 Agent。
+              项目配置和启动参数可能覆盖全局配置。应用方案后，可能需要重启 Agent。
             </HelpTip>
           </div>
           {workspace.profiles.length === 0 && !saveOpen && (
@@ -385,7 +383,7 @@ export default function ConfigPanel({
             <input
               className="control-input"
               autoFocus
-              placeholder="例如：工作"
+              placeholder="例如「工作」"
               value={profileName}
               onChange={(e) => setProfileName(e.target.value)}
               disabled={disabled}
@@ -457,9 +455,6 @@ export default function ConfigPanel({
         <div className="config-section-heading">
           <div className="config-heading-label">
             <h2 id="files-title">配置文件</h2>
-            <HelpTip label="配置文件">
-              格式错误或外部修改会阻止保存，草稿会保留。
-            </HelpTip>
           </div>
           {!validFiles && <span className="status-tag amber">格式有误</span>}
         </div>
@@ -500,7 +495,7 @@ export default function ConfigPanel({
               </button>
             </h2>
             <HelpTip label="备份" above>
-              保存文件或应用方案前会自动备份。可恢复单个文件或整份备份。
+              保存配置或应用方案时，应用会自动备份原有文件。
             </HelpTip>
           </div>
           {workspace.backups.length === 0 && (
@@ -547,7 +542,7 @@ export default function ConfigPanel({
           title="删除配置方案"
           message={
             <>
-              「{deleteTarget.name}」删除后无法恢复。当前配置文件和备份会保留。
+              删除「{deleteTarget.name}」后无法恢复。已应用的配置和备份会保留。
             </>
           }
           confirmLabel="删除方案"
@@ -586,8 +581,8 @@ export default function ConfigPanel({
             </div>
             <p className="hint">
               {changedFiles.length
-                ? `${changedFiles.length} 个文件将更改`
-                : "内容一致，无需更改"}
+                ? `${changedFiles.length} 个文件将变更`
+                : "配置一致"}
             </p>
             {previewError && (
               <div className="config-notice error" role="alert">

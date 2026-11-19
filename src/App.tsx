@@ -19,11 +19,12 @@ import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
 import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
+import type { SessionReading } from "./sessionContent";
 import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
 
-/** 目录对正文内容的变化标记；只比较已落定的统计，预览阶段的文件时间不可与之比较。 */
+// 目录预览的文件时间与最终统计口径不同。
 const sessionContentStamp = (session: SessionMeta) => `${session.sizeBytes ?? ""}|${session.lastTs ?? ""}`;
 
 const sameSearchTarget = (a: ConversationSearchTarget | null, b: ConversationSearchTarget | null) =>
@@ -41,11 +42,11 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("sessions");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  // 用量可查看全部 Agent，会话和配置保留当前 Agent。
   const [usageAgent, setUsageAgent] = useState("all");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [loadedSession, setLoadedSession] = useState<{ detail: SessionDetail; reading: SessionReading } | null>(null);
+  const detail = loadedSession?.detail ?? null;
   const [readRequest, setReadRequest] = useState<{ session: SessionMeta; pending: boolean; error: string | null } | null>(null);
   const [searchTarget, setSearchTarget] = useState<ConversationSearchTarget | null>(null);
   const [filter, setFilter] = useState(DEFAULT_CATALOG_FILTER);
@@ -58,11 +59,10 @@ export default function App() {
   const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
-  // 切换会话或离开当前项目后，丢弃尚未返回的正文请求。
   const detailRequestGeneration = useRef(0);
   const closeSessionDetail = useCallback(() => {
     detailRequestGeneration.current++;
-    setDetail(null);
+    setLoadedSession(null);
     setReadRequest(null);
     setSearchTarget(null);
   }, []);
@@ -81,7 +81,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (isTauri()) void api.setConfigGuard(configActivity).catch((e) => showToast(`无法设置编辑保护：${String(e)}`, true));
+    if (isTauri()) void api.setConfigGuard(configActivity).catch(() => showToast("暂时无法检查未保存的配置。", true));
   }, [configActivity, showToast]);
 
   useEffect(() => {
@@ -100,7 +100,7 @@ export default function App() {
 
   const protectConfig = (action: () => void, label: string) => {
     const activity = configActivityRef.current;
-    if (tab === "config" && activity.busy) { showToast("配置操作仍在进行，请稍后重试。", true); return; }
+    if (tab === "config" && activity.busy) { showToast("请等待配置操作完成。", true); return; }
     if (tab === "config" && activity.dirty) { setConfigNavigation({ label, action }); return; }
     action();
   };
@@ -125,7 +125,7 @@ export default function App() {
   const supportsArchive = currentAgent?.supportsArchive;
   const catalogFilter = useMemo(() => catalogFilterFor(filter, supportsArchive), [filter, supportsArchive]);
   const { includeArchived } = catalogFilter;
-  const onWatchError = useCallback(() => showToast("暂时无法监测会话更新。切回应用时会重试。", true), [showToast]);
+  const onWatchError = useCallback(() => showToast("会话可能无法自动更新。切回应用可重试。", true), [showToast]);
   const { cache: catalogCache, catalog, loading, refreshing, error: catalogError, refresh: refreshCatalog } = useSessionCatalog(
     currentAgent, catalogFilter, tab === "sessions", sessionActionsBusy || batchMode, onWatchError,
   );
@@ -230,17 +230,11 @@ export default function App() {
     void loadSession(selectedAgent, s);
   };
 
-  // 已读入正文对应的目录内容标记；null 表示读取时目录统计未落定，下次落定后直接采用而不重读。
-  // reading 是正在后台重读的目标标记，避免同一变化重复发起读取。
-  const contentStamp = useRef<{ key: string; stamp: string | null; reading?: string } | null>(null);
-  const catalogRow = ({ projectDir, sessionId }: SessionMeta) =>
+  // 若打开会话时目录统计尚未完成，首次完成时只建立基线。
+  const detailContentVersion = useRef<{ key: string; stamp: string | null; refreshingStamp?: string } | null>(null);
+  const findCatalogSession = ({ projectDir, sessionId }: SessionMeta) =>
     catalog.sessions.find(s => s.sessionId === sessionId && s.projectDir === projectDir);
 
-  /**
-   * 打开其他会话时清空详情并显示加载状态；重新读取正在显示的同一会话（再次点击、重试、归档后刷新）
-   * 则保留最后一份正文，读取完成后原地替换，阅读位置和展开状态由详情视图按会话保留。
-   * 传入 refreshStamp 表示文件变化触发的后台重读：不改动加载状态和搜索定位，失败时静默保留旧正文，下次目录变化再试。
-   */
   const loadSession = async (agentId: string, s: SessionMeta, refreshStamp?: string) => {
     const generation = ++detailRequestGeneration.current;
     const key = sessionKey(s);
@@ -249,9 +243,9 @@ export default function App() {
     const hit = refresh ? undefined : contentSearch.hits.get(key);
     const target = hit ? { ...hit, query: search.trim() } : null;
     if (!refresh) {
-      const row = catalogRow(s);
-      contentStamp.current = { key, stamp: row && !row.statsPending ? sessionContentStamp(row) : null };
-      if (!keep) setDetail(null);
+      const row = findCatalogSession(s);
+      detailContentVersion.current = { key, stamp: row && !row.statsPending ? sessionContentStamp(row) : null };
+      if (!keep) setLoadedSession(null);
       setReadRequest(current => ({
         session: s, pending: true,
         error: current && sessionKey(current.session) === key ? current.error : null,
@@ -262,24 +256,27 @@ export default function App() {
       if (generation !== detailRequestGeneration.current) return;
       catalogCache.setReadError(agentId, s, null);
       if (refresh) {
-        contentStamp.current = { key, stamp: refreshStamp };
+        detailContentVersion.current = { key, stamp: refreshStamp };
       } else {
         setReadRequest(null);
-        // 同一会话、同一命中重新读取时沿用原定位对象，避免把读者拉回命中处。
+        // 保持定位对象稳定，避免刷新时跳回命中处。
         setSearchTarget(current => keep && sameSearchTarget(current, target) ? current : target);
       }
-      setDetail(d);
+      setLoadedSession(current => ({
+        detail: d,
+        reading: keep && current ? current.reading : { expanded: new Set(), payloads: new Map() },
+      }));
     } catch (e) {
       if (generation !== detailRequestGeneration.current) return;
       const error = String(e);
       if (refresh) {
-        const known = contentStamp.current;
-        if (known?.key === key) contentStamp.current = { key, stamp: known.stamp };
+        const known = detailContentVersion.current;
+        if (known?.key === key) detailContentVersion.current = { key, stamp: known.stamp };
         return;
       }
       if (keep) {
         setReadRequest(null);
-        showToast(`无法重新读取会话正文，已保留上次内容：${error.split("\n")[0]}`, true);
+        showToast("刷新会话失败，已保留上次内容。", true);
         return;
       }
       catalogCache.setReadError(agentId, s, error);
@@ -287,23 +284,21 @@ export default function App() {
     }
   };
 
-  // 当前详情的内容更新复用目录的文件监听与节流：只有目录确认这条会话的大小或时间变了才重读一次正文。
-  // 预览阶段统计未落定时先不读，等后台统计完成，避免和目录精算同时读取大历史。
+  // 确认会话文件有变化后再刷新，避免与目录统计同时读取大日志。
   useEffect(() => {
     if (tab !== "sessions" || !detail || !selectedAgent || readRequest || sessionActionsBusy) return;
-    const row = catalogRow(detail.meta);
+    const row = findCatalogSession(detail.meta);
     if (!row || row.statsPending) return;
     const key = sessionKey(row);
     const stamp = sessionContentStamp(row);
-    const known = contentStamp.current;
+    const known = detailContentVersion.current;
     if (known?.key !== key || known.stamp === null) {
-      contentStamp.current = { key, stamp };
+      detailContentVersion.current = { key, stamp };
       return;
     }
-    if (known.stamp === stamp || known.reading === stamp) return;
-    contentStamp.current = { ...known, reading: stamp };
+    if (known.stamp === stamp || known.refreshingStamp === stamp) return;
+    detailContentVersion.current = { ...known, refreshingStamp: stamp };
     void loadSession(selectedAgent, row, stamp);
-    // loadSession、catalogRow 每次渲染重建；这里只在目录或当前详情变化时检查。
   }, [catalog, detail, readRequest, selectedAgent, sessionActionsBusy, tab]);
 
   const toggleBatch = () => {
@@ -350,7 +345,7 @@ export default function App() {
         if (archived && !includeArchived) closeSessionDetail();
         else void loadSession(currentAgent.id, { ...session, archived });
       }
-      showToast(archived ? "会话已归档" : "会话已取消归档");
+      showToast(archived ? "会话已归档" : "已取消归档");
     } catch (error) {
       showToast(String(error), true);
     } finally {
@@ -390,15 +385,19 @@ export default function App() {
         if (succeeded.some((session) => sessionKey(session) === selectedSessionKey)) closeSessionDetail();
         catalogCache.remove(agent.id, succeeded);
       }
-      const action = agent.deletePolicy === "trash" ? "移入废纸篓" : "永久删除";
+      const toTrash = agent.deletePolicy === "trash";
       if (batch) {
         setCheckedSessionKeys(new Set(failures.map(({ session }) => sessionKey(session))));
         setBatchFailures(failures);
-        showToast(`已${action} ${succeeded.length} 个会话${failures.length ? `，${failures.length} 个未删除` : ""}`, failures.length > 0);
+        const completed = succeeded.length
+          ? `${succeeded.length} 个会话${toTrash ? "已移入废纸篓" : "已删除"}`
+          : "";
+        const failed = failures.length ? `${failures.length} 个会话未能删除` : "";
+        showToast([completed, failed].filter(Boolean).join("，"), failures.length > 0);
       } else if (failures.length) {
         showToast(failures[0].error, true);
       } else {
-        showToast(`会话已${action}`);
+        showToast(toTrash ? "会话已移入废纸篓" : "会话已删除");
       }
       if (batch || succeeded.length) refreshCatalog();
     } finally {
@@ -488,9 +487,10 @@ export default function App() {
             displayRoots={groupHints}
           />}
         >
-          {selectedDetail && currentAgent ? (
+          {selectedDetail && currentAgent && loadedSession ? (
             <SessionDetailView
               detail={selectedDetail}
+              reading={loadedSession.reading}
               agent={currentAgent}
               onRequestDelete={requestSessionDelete}
               onToggleArchive={toggleSessionArchive}
@@ -510,7 +510,7 @@ export default function App() {
               /> : <p role="status">正在读取会话…</p>}
             </div>
           ) : (
-            <div className="placeholder">选择会话查看详情</div>
+            <div className="placeholder">选择会话以查看内容</div>
           )}
         </ResizableLayout>
       ) : tab === "config" ? (
@@ -526,12 +526,12 @@ export default function App() {
               onActivityChange={onConfigActivity}
             />
           ) : (
-            <div className="placeholder">选择 Agent 查看配置</div>
+            <div className="placeholder">选择 Agent 以查看配置</div>
           )}
         </main>
       ) : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} />}
 
-      {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}会丢失未保存的修改。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
+      {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}后，未保存的配置将丢失。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;
         setConfigNavigation(null); action();
       }} />}

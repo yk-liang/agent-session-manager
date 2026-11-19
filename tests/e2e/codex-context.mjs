@@ -77,7 +77,7 @@ try {
   assert.equal(await page.locator('.toc-item').count(), 2);
   await page.waitForFunction(() => {
     const rows = [...document.querySelectorAll('.event-group')];
-    return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 10) < 1);
+    return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 8) < 1);
   });
   await page.screenshot({ path: path.join(artifactDir, `codex-context-expanded-${engine}.png`) });
   console.log(`PASS: optional context rows have readable Page summaries and preserve expandable original records (${engine})`);
@@ -99,7 +99,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.session-card').length === 2);
   const index = fixture.all.sessions.findIndex(s => s.sessionId === 'context-only');
   await page.locator('.session-card').nth(index).click();
-  await page.getByText('启用「上下文」可查看运行记录。', { exact: true }).waitFor();
+  await page.getByText('勾选「上下文」查看运行记录。', { exact: true }).waitFor();
   assert.equal(await page.locator('.toc-item').count(), 0);
   await context.check();
   await page.waitForFunction(() => document.querySelectorAll('.collapsible.context').length === 2);
@@ -140,8 +140,8 @@ try {
   await page.locator('.session-card-open').filter({ hasText: 'First actual request' }).click();
   await page.locator('.detail-actions').getByRole('button', { name: '删除', exact: true }).click();
   const confirm = page.getByRole('dialog');
-  await confirm.getByText('会话将永久删除，无法恢复。').waitFor();
-  await confirm.getByText('关联的子会话也会被删除。').waitFor();
+  await confirm.getByText('删除后无法恢复。').waitFor();
+  await confirm.getByText('子会话也会一并删除。').waitFor();
   await confirm.getByRole('button', { name: '永久删除', exact: true }).waitFor();
   await confirm.getByRole('button', { name: '取消', exact: true }).click();
   assert.deepEqual(errors, []);
