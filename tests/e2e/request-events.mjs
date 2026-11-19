@@ -28,7 +28,7 @@ try {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
     Object.defineProperty(document, 'hasFocus', { value: () => false });
-    const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder CLI', pi: 'Pi' };
+    const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder', pi: 'Pi' };
     const state = window.__EVENTS__ = { fixture, calls: [], fail: false, failCopy: false, delay: false, release: null, revision: '1' };
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });

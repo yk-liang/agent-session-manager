@@ -135,7 +135,7 @@ const CODEX_DETAIL = {
 };
 const mock = {
   list_agents: [
-    { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
+    { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
     { id: "claude", displayName: "Claude Code", installed: true, supportsFork: false, dataDir: "/Users/demo/.claude", deletePolicy: "trash" },
     { id: "codex", displayName: "Codex", installed: true, supportsFork: false, dataDir: "/Users/demo/.codex", deletePolicy: "trash" },
     { id: "opencode", displayName: "OpenCode", installed: true, supportsFork: false, dataDir: "/Users/demo/.config/opencode", deletePolicy: "permanent" },
@@ -296,7 +296,7 @@ console.log("STEP1 list view OK");
 
 // Selecting the current Agent is idempotent; automatic updates own rescanning.
 const callsBefore = await page.evaluate(() => window.__CATALOG_CALLS__);
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.waitForSelector(".session-card", { timeout: 5000 });
 const callsAfter = await page.evaluate(() => window.__CATALOG_CALLS__);
 const cardsAfter = await page.locator(".session-card").count();
@@ -357,7 +357,7 @@ console.log("STEP1e codex detail:", codexText.includes("codex 助手正文") ? "
 if (!codexText.includes("codex 助手正文")) process.exit(1);
 
 // 切回 Qoder，继续后续流程
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.waitForSelector('.session-card:has-text("测试会话")', { timeout: 5000 });
 
 await page.click(".session-card");
@@ -459,7 +459,7 @@ await page.locator(".tabs button", { hasText: "会话" }).click();
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 }]) {
   await page.setViewportSize(viewport);
-  await chooseAgent(page, { label: "Qoder CLI" });
+  await chooseAgent(page, { label: "Qoder" });
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
   const agentControl = page.getByRole("combobox", { name: "当前 Agent" });
   const allSessions = page.locator(".sidebar .project-item", { hasText: "全部会话" });
@@ -536,7 +536,7 @@ await page.evaluate((sessions) => {
   window.__CATALOG_BY_AGENT__.qoder = { projects, sessions, warnings: [] };
 }, batchSessions);
 await page.locator(".tabs button", { hasText: "会话" }).click();
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input[type=checkbox]").count(), 4);
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
@@ -569,7 +569,7 @@ await page.getByRole("button", { name: "全选当前结果", exact: true }).clic
 assert.equal(await page.locator(".session-card input:checked").count(), 2);
 await chooseAgent(page, { label: "Claude Code" });
 assert.equal(await page.locator(".batch-toolbar").count(), 0);
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 console.log("STEP13 selection, filtered select-all, confirmation cancellation and context isolation: OK");
@@ -579,7 +579,7 @@ await page.locator(".session-card", { hasText: "保留的会话" }).locator("inp
 assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 3);
-assert.ok((await page.locator(".modal-body").textContent()).includes("Qoder CLI 的 3 个会话"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("Qoder 的 3 个会话"));
 assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "永久删除，无法恢复" : "移入系统回收站"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);

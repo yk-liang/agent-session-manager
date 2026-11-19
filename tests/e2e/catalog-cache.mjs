@@ -30,7 +30,7 @@ try {
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (command, args = {}) => {
       state.calls.push({ command, args: structuredClone(args) });
       if (command === "list_agents") return [
-        { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, supportsModelNames: true, deletePolicy: "trash" },
+        { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, supportsModelNames: true, deletePolicy: "trash" },
         { id: "codex", displayName: "Codex", installed: true, supportsFork: false, deletePolicy: "trash" }];
       if (command === "catalog") {
         if (state.hold[args.agent]) return new Promise((resolve, reject) => state.pending.push({ agent: args.agent, empty: args.includeEmpty, resolve, reject }));

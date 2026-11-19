@@ -1,7 +1,7 @@
 // Public screenshot data only. Never import local Agent logs, settings or credentials here.
 export const screenshotTime = '2026-11-02T10:30:00-08:00';
 const now = Date.parse(screenshotTime);
-const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
 const projects = ['atlas-notes', 'design-system', 'weather-kit', 'docs-site'];
 const titles = ['给笔记应用添加全文搜索', '优化长列表的滚动性能', '统一按钮与输入框样式', '补充搜索模块的单元测试', '整理项目的快速开始文档', '为天气卡片添加加载状态', '支持 Markdown 表格预览', '完善深色主题的对比度'];
 const models = { codex: 'gpt-5-codex', claude: 'claude-sonnet-4-5', opencode: 'qwen3-coder', qoder: 'qwen3-coder', pi: 'claude-sonnet-4-5' };

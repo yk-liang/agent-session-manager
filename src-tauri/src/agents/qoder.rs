@@ -76,7 +76,7 @@ impl AgentSource for QoderSource {
         "qoder"
     }
     fn display_name(&self) -> &'static str {
-        "Qoder CLI"
+        "Qoder"
     }
     fn is_installed(&self) -> bool {
         projects_dir().exists()

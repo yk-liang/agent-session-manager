@@ -33,7 +33,7 @@ try {
         if (command === "plugin:event|unlisten") { delete state.listeners[args.eventId]; return null; }
         if (command === "set_config_guard") return null;
         if (command === "list_agents") return [
-          { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: false, deletePolicy: "trash" },
+          { id: "qoder", displayName: "Qoder", installed: true, supportsFork: false, deletePolicy: "trash" },
           { id: "codex", displayName: "Codex", installed: true, supportsFork: false, deletePolicy: "trash" }];
         if (command === "watch_sessions") {
           if (args.generation >= state.watch.generation) state.watch = structuredClone(args);

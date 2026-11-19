@@ -10,7 +10,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => {
-    const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+    const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
     const calls = window.__NAVIGATION__ = [];
     window.__TAURI_INTERNALS__ = { transformCallback: callback => callback, invoke: async (command, args = {}) => {
       calls.push({ command, args });

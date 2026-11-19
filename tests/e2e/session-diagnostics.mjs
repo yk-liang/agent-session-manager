@@ -17,7 +17,7 @@ try {
     const syntaxError = '会话内容无法解析：/synthetic/project/bbbb.jsonl（第 2 行）\noperation: session_detail\nstage: parse_json\nerror_kind: JsonSyntax\nos_code: none\ncause: trailing comma at line 1 column 8\nline: 2\ncolumn: 8';
     state.failure = failure;
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (command, args = {}) => {
-      if (command === 'list_agents') return ['qoder', 'claude'].map(id => ({ id, displayName: id === 'qoder' ? 'Qoder CLI' : 'Claude Code', installed: true, supportsFork: false, deletePolicy: 'trash' }));
+      if (command === 'list_agents') return ['qoder', 'claude'].map(id => ({ id, displayName: id === 'qoder' ? 'Qoder' : 'Claude Code', installed: true, supportsFork: false, deletePolicy: 'trash' }));
       if (command === 'catalog') {
         if (state.catalogMode === 'failed') return { sessions: [], projects: [], warnings: Array.from({ length: 283 }, (_, i) => failure('catalog_metadata', `session-${i}`, 1)) };
         if (state.catalogMode === 'empty') return { sessions: [], projects: [], warnings: [] };

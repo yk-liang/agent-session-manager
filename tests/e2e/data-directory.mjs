@@ -10,7 +10,7 @@ try {
   await page.addInitScript(() => {
     const state = window.__DIRECTORY__ = { opened: [], failure: '' };
     const agents = [
-      ['qoder', 'Qoder CLI', '/Users/demo/.qoder'],
+      ['qoder', 'Qoder', '/Users/demo/.qoder'],
       ['claude', 'Claude Code', '/Volumes/Workspace/Claude 数据'],
       ['codex', 'Codex', '/Users/demo/.codex'],
       ['opencode', 'OpenCode', '/Users/demo/.local/share/opencode'],
@@ -30,7 +30,7 @@ try {
     } };
   });
   await page.goto(baseURL);
-  for (const [id, name] of [['qoder', 'Qoder CLI'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['pi', 'Pi']]) {
+  for (const [id, name] of [['qoder', 'Qoder'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['pi', 'Pi']]) {
     await chooseAgent(page, id);
     const open = page.getByRole('button', { name: '打开数据目录', exact: true });
     assert.equal(await open.getAttribute('title'), `在访达中打开 ${name} 数据目录`);

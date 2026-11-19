@@ -10,7 +10,7 @@ try {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => {
     Object.defineProperty(document, 'hasFocus', { value: () => false });
-    const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+    const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
     const state = window.__COVERAGE__ = { synced: [], calls: [], holdAgent: 'codex', failAgent: null, release: null, holdSummary: false, releaseSummary: null };
     const row = (agent, input) => ({
       agent, model: `${agent}-fixture`, modelName: `${agent}-fixture`, date: '', bucketStart: Date.now() - 1000,

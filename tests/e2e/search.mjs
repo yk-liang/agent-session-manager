@@ -26,7 +26,7 @@ try {
       cccc:[{type:'user',uuid:'no-hit',message:{content:'只有标题匹配，正文不匹配。'}}],
       dddd:[{type:'user',uuid:'another-hit',message:{content:'目标针是另一个问题。'}},{type:'assistant',message:{content:'这是另一 Agent 的目标针正文。'}}],
     };
-    const agents=[{id:'qoder',displayName:'Qoder CLI',installed:true,supportsFork:true,dataDir:'/tmp/qoder',deletePolicy:'trash'},{id:'codex',displayName:'Codex',installed:true,supportsFork:false,dataDir:'/tmp/codex',deletePolicy:'trash'}];
+    const agents=[{id:'qoder',displayName:'Qoder',installed:true,supportsFork:true,dataDir:'/tmp/qoder',deletePolicy:'trash'},{id:'codex',displayName:'Codex',installed:true,supportsFork:false,dataDir:'/tmp/codex',deletePolicy:'trash'}];
     const records={qoder:[a,b,c],codex:[d]};
     const state={calls:[],hold:false,pending:[],fail:false,moveMessage:false};window.__SEARCH_TEST__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{

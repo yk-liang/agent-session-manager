@@ -6,7 +6,7 @@
 
 Find past AI coding sessions, switch configurations, and track token usage in one macOS app.
 
-Supports **Qoder CLI, Claude Code, Codex, OpenCode, and Pi**.
+Supports **Qoder, Claude Code, Codex, OpenCode, and Pi**.
 
 [Download the latest release](https://github.com/yk-liang/agent-session-manager/releases/latest) · [Report an issue](https://github.com/yk-liang/agent-session-manager/issues)
 
@@ -78,7 +78,7 @@ The app reads existing local Agent data. If no sessions appear, check that the A
 
 | Agent | Common data locations |
 | --- | --- |
-| Qoder CLI | `~/.qoder/projects/` |
+| Qoder | `~/.qoder/projects/` |
 | Claude Code | `~/.claude/projects/` |
 | Codex | `~/.codex/sessions/`, `~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |

@@ -6,7 +6,7 @@
 
 在一个 macOS 应用里，找回 AI 编程会话、切换配置、查看 Token 用量。
 
-支持 **Qoder CLI、Claude Code、Codex、OpenCode 和 Pi**。
+支持 **Qoder、Claude Code、Codex、OpenCode 和 Pi**。
 
 [下载最新版本](https://github.com/yk-liang/agent-session-manager/releases/latest) · [反馈问题](https://github.com/yk-liang/agent-session-manager/issues)
 
@@ -78,7 +78,7 @@ Codex 会话页支持普通 `.jsonl` 和 Zstandard 压缩的 `.jsonl.zst` 日志
 
 | Agent | 常见数据位置 |
 | --- | --- |
-| Qoder CLI | `~/.qoder/projects/` |
+| Qoder | `~/.qoder/projects/` |
 | Claude Code | `~/.claude/projects/` |
 | Codex | `~/.codex/sessions/`、`~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |

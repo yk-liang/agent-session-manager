@@ -17,7 +17,7 @@ try{
     window.__QODER_GROUP__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
-      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder CLI":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
+      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
       if(command==="catalog"){
         const sessions=args.agent==="qoder"?state.rows:[meta("shared","codex-src","Codex 会话","/tmp/codex")];
         return {sessions,projects:sessions.map(s=>({dirName:s.projectDir,displayPath:s.cwd,sessionCount:1,lastActivity:null})),warnings:[],...(args.agent==="qoder"?{sessionGroupHints:state.rows.filter(s=>s.projectDir!=="manual").map(s=>({projectDir:s.projectDir,sessionId:s.sessionId,root:s.projectDir==="auto"?null:"/Users/demo/work/real-project"}))}:{projectlessSessionIds:["shared"]})};

@@ -25,7 +25,7 @@ try {
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
       if(command==="list_agents")return [{id:"codex",displayName:"Codex",installed:true,deletePolicy:"trash",supportsFork:false},
-        {id:"qoder",displayName:"Qoder CLI",installed:true,deletePolicy:"trash",supportsFork:false}];
+        {id:"qoder",displayName:"Qoder",installed:true,deletePolicy:"trash",supportsFork:false}];
       if(command==="catalog"){
         const sessions=args.agent==="codex"?state.rows:[meta("a","qoder-dir","另一 Agent 会话","/tmp/qoder")];
         const projects=[...new Set(sessions.map(s=>s.projectDir))].map(dir=>({dirName:dir,displayPath:sessions.find(s=>s.projectDir===dir).cwd,
@@ -100,7 +100,7 @@ try {
   assert.equal(await page.locator(".session-card",{hasText:"同目录有项目会话"}).count(),1);
   pass("batch actions use real source projects and leave assigned sessions untouched");
 
-  await chooseAgent(page, { label: "Qoder CLI" });
+  await chooseAgent(page, { label: "Qoder" });
   await page.locator(".session-card",{hasText:"另一 Agent 会话"}).waitFor();
   assert.equal(await group.count(),0);
   assert.equal(await page.locator(".session-project-path").count(),1);

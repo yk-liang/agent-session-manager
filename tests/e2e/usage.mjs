@@ -24,7 +24,7 @@ try {
    constructor(...args) { super(...(args.length ? args : [fixture.now])); }
    static now() { return fixture.now; }
   };
-  const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+  const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
   const state = window.__USAGE__ = { fixture, calls: [], syncRounds: 0, holdSync: true, syncResolvers: [], releaseSync: null, holdSummary: null, releaseSummary: null, failSync: null, failSummary: false, collector: { desired: false, running: false, authorization: 'disabled' } };
   window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
    state.calls.push({ cmd, args });

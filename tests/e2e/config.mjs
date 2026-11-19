@@ -201,7 +201,7 @@ try {
   assert.equal(await page.locator(".config-page-heading h1").textContent().then((s) => s.includes("Codex")), true);
   pass("slow configuration reads remain navigable and late responses stay agent-bound");
 
-  await agent("Qoder CLI");
+  await agent("Qoder");
   const personal = page.locator(".profile-card", { hasText: "个人" });
   await personal.getByRole("button", { name: "应用", exact: true }).click();
   const dialog = page.getByRole("dialog");

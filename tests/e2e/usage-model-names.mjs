@@ -40,7 +40,7 @@ try {
       state.calls.push({ cmd, args: structuredClone(args) });
       if (cmd === 'list_agents') return [
         { id: 'codex', displayName: 'Codex', installed: true, supportsModelNames: false, deletePolicy: 'trash' },
-        { id: 'qoder', displayName: 'Qoder CLI', installed: true, supportsModelNames: true, deletePolicy: 'trash' },
+        { id: 'qoder', displayName: 'Qoder', installed: true, supportsModelNames: true, deletePolicy: 'trash' },
       ];
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };

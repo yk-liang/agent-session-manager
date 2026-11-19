@@ -10,7 +10,7 @@ try {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.clock.install();
   await page.addInitScript(() => {
-    const names = { qoder: 'Qoder CLI', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+    const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
     const state = window.__COLD__ = { calls: [], listeners: {}, registrations: {}, nextListener: 0, active: '', generation: 0, release: null, ready: false, failSummary: false, failEvents: false, failSource: false, synced: [] };
     const tokens = { inputTokens: 4467458800, outputTokens: 21, totalTokens: 4467458821, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false };
     const model = `claude-${'long-model-name-'.repeat(30)}`;
