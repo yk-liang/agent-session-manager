@@ -7,13 +7,14 @@ import Sidebar from "./components/Sidebar";
 import AgentSwitcher from "./components/AgentSwitcher";
 import SessionList from "./components/SessionList";
 import SessionDetailView from "./components/SessionDetail";
+import SessionDeleteDialog, { type SessionDeletion, type SessionDeleteTarget } from "./components/SessionDeleteDialog";
 import ConfigPanel from "./components/ConfigPanel";
 import UsagePanel from "./components/UsagePanel";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
 import ReadDiagnostics from "./components/ReadDiagnostics";
 import * as api from "./api";
-import { sessionKey, shortPath } from "./utils";
+import { sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { groupSessions, sessionGroup, PROJECTLESS_GROUP } from "./sessionGroups";
 import { AgentCatalogCache, EMPTY_CATALOG } from "./catalogCache";
@@ -22,6 +23,10 @@ import { observeSessionChanges } from "./sessionWatch";
 import type { AgentInfo, Catalog, ConfigActivity, ConversationSearchTarget, Project, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 type Tab = "sessions" | "config" | "usage";
+
+type DeletionState =
+  | { phase: "confirm"; request: SessionDeletion }
+  | { phase: "running"; progress: { completed: number; total: number } | null };
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("sessions");
@@ -48,14 +53,12 @@ export default function App() {
   const [catalogWarnings, setCatalogWarnings] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
-  const [pendingBatch, setPendingBatch] = useState<{ agent: AgentInfo; sessions: SessionMeta[] } | null>(null);
-  const [batchProgress, setBatchProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [deletion, setDeletion] = useState<DeletionState | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
-  const [singleDeleting, setSingleDeleting] = useState(false);
-  const batchRunning = useRef(false);
-  const deleting = batchProgress !== null || singleDeleting;
+  const deletionRunning = useRef(false);
+  const deletionActive = deletion !== null;
   const autoRefresh = useRef<AutoRefreshScheduler | null>(null);
-  const pauseAutoRefresh = deleting || batchMode || pendingBatch !== null;
+  const pauseAutoRefresh = deletionActive || batchMode;
   const pauseAutoRefreshRef = useRef(pauseAutoRefresh);
   pauseAutoRefreshRef.current = pauseAutoRefresh;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
@@ -63,6 +66,12 @@ export default function App() {
   // 详情请求代次：切换 agent/项目时递增，过期响应直接丢弃，
   // 防止旧 agent 的慢请求返回后把详情渲染到新 agent 上
   const detailGen = useRef(0);
+  const clearDetail = useCallback(() => {
+    detailGen.current++;
+    setDetail(null);
+    setReadRequest(null);
+    setSearchTarget(null);
+  }, []);
   const [configActivity, setConfigActivity] = useState<ConfigActivity>({ dirty: false, busy: false });
   const configActivityRef = useRef(configActivity);
   const [configNavigation, setConfigNavigation] = useState<{ label: string; action: () => void } | null>(null);
@@ -124,23 +133,22 @@ export default function App() {
 
   const clearBatchSelection = () => {
     setCheckedKeys(new Set());
-    setPendingBatch(null);
     setBatchFailures([]);
   };
 
   const changeTab = (next: Tab) => {
-    if (next === tab || deleting || batchRunning.current) return;
+    if (next === tab || deletionActive || deletionRunning.current) return;
     protectConfig(() => { clearBatchSelection(); setBatchMode(false); setTab(next); }, "切换标签页");
   };
 
   const changeSearch = (next: string) => {
-    if (deleting || batchRunning.current) return;
+    if (deletionActive || deletionRunning.current) return;
     clearBatchSelection();
     setSearch(next);
   };
 
   const changeShowEmpty = (next: boolean) => {
-    if (deleting || batchRunning.current) return;
+    if (deletionActive || deletionRunning.current) return;
     clearBatchSelection();
     const cached = selectedAgent ? catalogCache.peek(selectedAgent, next) : undefined;
     if (cached) applyCatalog(cached);
@@ -179,7 +187,6 @@ export default function App() {
       scheduler.setBusy(true);
       setLoading(true);
       setCatalogError(null);
-      setPendingBatch(null);
       let refinement: Promise<unknown> | undefined;
       try {
         const cat = await catalogCache.load(selectedAgent, showEmpty);
@@ -228,19 +235,18 @@ export default function App() {
   useEffect(() => { autoRefresh.current?.setBlocked(pauseAutoRefresh); }, [pauseAutoRefresh]);
 
   const selectAgentNow = (id: string) => {
-    if (deleting || batchRunning.current || id === selectedAgent) return;
+    if (deletionActive || deletionRunning.current || id === selectedAgent) return;
     clearBatchSelection();
     setBatchMode(false);
-    detailGen.current += 1;
+    clearDetail();
     setSelectedAgent(id);
     setSelectedProject(null);
-    setDetail(null); setReadRequest(null);
     // 与 Agent 选择一起切换数据，任何一帧都不能把旧 Agent 的卡片当成新 Agent 操作。
     applyCatalog(catalogCache.peek(id, showEmpty) ?? EMPTY_CATALOG);
   };
 
   const selectAgent = (id: string) => {
-    if (deleting || batchRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
+    if (deletionActive || deletionRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
     const available = availableAgents.some(agent => agent.id === id);
     if (!available && !(tab === "usage" && id === "all")) return;
     protectConfig(() => {
@@ -250,27 +256,24 @@ export default function App() {
   };
 
   const selectProject = (dirName: string | null) => {
-    if (deleting || batchRunning.current) return;
+    if (deletionActive || deletionRunning.current) return;
     clearBatchSelection();
     setBatchMode(false);
-    detailGen.current += 1;
+    clearDetail();
     setSelectedProject(dirName);
-    setDetail(null); setReadRequest(null);
   };
 
   const sidebarGroups = useMemo(() => groupSessions(projects, sessions, projectlessIds, groupHints), [projects, sessions, projectlessIds, groupHints]);
   const scopedSessions = useMemo(() => sessions.filter((session) => selectedProject === null || sessionGroup(session, projectlessIds, groupHints) === selectedProject), [sessions, selectedProject, projectlessIds, groupHints]);
   const hiddenPathKeys = useMemo(() => new Set(sessions.filter((session) => sessionGroup(session, projectlessIds, groupHints) === PROJECTLESS_GROUP).map(sessionKey)), [sessions, projectlessIds, groupHints]);
   useEffect(() => {
-    if (tab !== "sessions" || loading || deleting || selectedProject === null || sidebarGroups.some((group) => group.dirName === selectedProject)) return;
+    if (tab !== "sessions" || loading || deletionActive || selectedProject === null || sidebarGroups.some((group) => group.dirName === selectedProject)) return;
     // 归属刷新后分组可能消失，回到全部会话，避免停在没有侧栏入口的空筛选中。
-    detailGen.current++;
+    clearDetail();
     setSelectedProject(null);
-    setDetail(null); setReadRequest(null);
-    setSearchTarget(null);
     setBatchMode(false);
     setCheckedKeys(new Set());
-  }, [sidebarGroups, selectedProject, loading, deleting, tab]);
+  }, [sidebarGroups, selectedProject, loading, deletionActive, tab, clearDetail]);
   const contentSearch = useConversationSearch(selectedAgent, search.trim(), scopedSessions, tab === "sessions" && !loading);
 
   const filtered = useMemo(() => {
@@ -283,8 +286,10 @@ export default function App() {
     });
   }, [scopedSessions, search, contentSearch.hits]);
 
+  const selectedKey = detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null;
+
   const openSession = async (s: SessionMeta) => {
-    if (!selectedAgent || deleting || batchMode || batchRunning.current) return;
+    if (!selectedAgent || deletionActive || batchMode || deletionRunning.current) return;
     const gen = ++detailGen.current;
     const agentId = selectedAgent;
     const hit = contentSearch.hits.get(sessionKey(s));
@@ -314,27 +319,15 @@ export default function App() {
     }
   };
 
-  const onDeleted = () => {
-    if (selectedAgent && detail) {
-      catalogCache.remove(selectedAgent, [detail.meta]);
-      applyCatalog(catalogCache.peek(selectedAgent, showEmpty) ?? EMPTY_CATALOG);
-    }
-    setDetail(null); setReadRequest(null);
-    setRefreshKey((k) => k + 1);
-  };
-
   const toggleBatch = () => {
-    if (deleting || loading || batchRunning.current) return;
-    detailGen.current += 1;
-    setDetail(null); setReadRequest(null);
+    if (deletionActive || loading || deletionRunning.current) return;
+    clearDetail();
     setBatchMode(!batchMode);
-    setCheckedKeys(new Set());
-    setBatchFailures([]);
-    setPendingBatch(null);
+    clearBatchSelection();
   };
 
   const toggleSession = (session: SessionMeta) => {
-    if (deleting || loading) return;
+    if (deletionActive || loading) return;
     const key = sessionKey(session);
     setCheckedKeys((current) => {
       const next = new Set(current);
@@ -345,64 +338,85 @@ export default function App() {
   };
 
   const toggleAll = () => {
-    if (deleting || loading) return;
+    if (deletionActive || loading) return;
     const allSelected = filtered.every((s) => checkedKeys.has(sessionKey(s)));
     setCheckedKeys(allSelected ? new Set() : new Set(filtered.map(sessionKey)));
   };
 
-  const requestBatchDelete = () => {
-    if (!currentAgent || deleting || loading) return;
-    const targets = new Map(filtered.filter((s) => checkedKeys.has(sessionKey(s))).map((s) => [sessionKey(s), s]));
-    if (targets.size > 0) setPendingBatch({ agent: currentAgent, sessions: [...targets.values()] });
+  const requestDeletion = (target: SessionDeleteTarget) => {
+    if (!currentAgent || currentAgent.deletePolicy === "readOnly" || deletionActive
+      || deletionRunning.current || !target.sessions.length) return;
+    setDeletion({ phase: "confirm", request: { ...target, agent: currentAgent } });
   };
 
-  const confirmBatchDelete = async () => {
-    if (!pendingBatch || deleting || loading || batchRunning.current) return;
-    batchRunning.current = true;
-    const { agent, sessions: targets } = pendingBatch;
-    setPendingBatch(null);
-    setBatchFailures([]);
-    setBatchProgress({ completed: 0, total: targets.length });
-    detailGen.current += 1;
-    setDetail(null); setReadRequest(null);
+  const requestSessionDelete = (session: SessionMeta) => requestDeletion({ mode: "single", sessions: [session] });
+
+  const requestBatchDelete = () => {
+    if (loading) return;
+    const targets = new Map(filtered.filter((s) => checkedKeys.has(sessionKey(s))).map((s) => [sessionKey(s), s]));
+    requestDeletion({ mode: "batch", sessions: [...targets.values()] });
+  };
+
+  const confirmDeletion = async () => {
+    if (deletion?.phase !== "confirm" || deletionRunning.current) return;
+    const { agent, sessions: targets, mode } = deletion.request;
+    const batch = mode === "batch";
+    const total = targets.length;
+    deletionRunning.current = true;
+    setDeletion({ phase: "running", progress: batch ? { completed: 0, total } : null });
+    if (batch) setBatchFailures([]);
     const succeeded: SessionMeta[] = [];
     const failures: SessionDeleteFailure[] = [];
-    for (const session of targets) {
-      try {
-        await api.deleteSession(agent.id, session.projectDir, session.sessionId);
-        succeeded.push(session);
-      } catch (error) {
-        failures.push({ session, error: String(error) });
+    try {
+      for (const session of targets) {
+        try {
+          await api.deleteSession(agent.id, session.projectDir, session.sessionId);
+          succeeded.push(session);
+        } catch (error) {
+          failures.push({ session, error: String(error) });
+        }
+        if (batch) setDeletion({ phase: "running", progress: { completed: succeeded.length + failures.length, total } });
       }
-      setBatchProgress({ completed: succeeded.length + failures.length, total: targets.length });
+      if (succeeded.length) {
+        if (succeeded.some((session) => sessionKey(session) === selectedKey)) clearDetail();
+        catalogCache.remove(agent.id, succeeded);
+        applyCatalog(catalogCache.peek(agent.id, showEmpty) ?? EMPTY_CATALOG);
+      }
+      const action = agent.deletePolicy === "trash" ? "移入回收站" : "永久删除";
+      if (batch) {
+        setCheckedKeys(new Set(failures.map(({ session }) => sessionKey(session))));
+        setBatchFailures(failures);
+        showToast(`已${action} ${succeeded.length} 个会话${failures.length ? `，${failures.length} 个失败，可重试` : ""}`, failures.length > 0);
+      } else if (failures.length) {
+        showToast(failures[0].error, true);
+      } else {
+        showToast(`会话已${action}`);
+      }
+      if (batch || succeeded.length) {
+        setLoading(true);
+        setRefreshKey((k) => k + 1);
+      }
+    } finally {
+      setDeletion(null);
+      deletionRunning.current = false;
     }
-    catalogCache.remove(agent.id, succeeded);
-    applyCatalog(catalogCache.peek(agent.id, showEmpty) ?? EMPTY_CATALOG);
-    setCheckedKeys(new Set(failures.map(({ session }) => sessionKey(session))));
-    setBatchFailures(failures);
-    const action = agent.deletePolicy === "trash" ? "移入回收站" : "永久删除";
-    showToast(`已${action} ${succeeded.length} 个会话${failures.length ? `，${failures.length} 个失败，可重试` : ""}`, failures.length > 0);
-    setLoading(true);
-    setRefreshKey((k) => k + 1);
-    setBatchProgress(null);
-    batchRunning.current = false;
   };
 
   return (
     <div className="app">
       <header className="topbar">
         <AgentSwitcher agents={availableAgents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
-          disabled={deleting || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
+          disabled={deletionActive || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
-          <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={deleting}>
+          <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={deletionActive}>
             会话
           </button>
           {availableAgents.length > 0 && (
-            <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={deleting}>
+            <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={deletionActive}>
               配置
             </button>
           )}
-          <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={deleting}>用量</button>
+          <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={deletionActive}>用量</button>
         </nav>
         <div className="topbar-actions">
           {tab !== "usage" && currentAgent?.dataDir && (
@@ -426,30 +440,32 @@ export default function App() {
             projects={sidebarGroups}
             selected={selectedProject}
             onSelect={selectProject}
-            disabled={deleting}
+            disabled={deletionActive}
             catalogIncomplete={!!catalogError || catalogWarnings.length > 0}
           />}
           sessionList={<SessionList
             sessions={filtered}
-            selectedKey={detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null}
+            selectedKey={selectedKey}
             search={search}
             onSearch={changeSearch}
             onSelect={openSession}
             showEmpty={showEmpty}
             onShowEmpty={changeShowEmpty}
             batchMode={batchMode}
-            supportsDelete={currentAgent?.deletePolicy !== "readOnly"}
+            agent={currentAgent}
+            onRequestDelete={requestSessionDelete}
+            toast={showToast}
             checkedKeys={checkedKeys}
             onToggleBatch={toggleBatch}
             onToggleSession={toggleSession}
             onToggleAll={toggleAll}
             onDeleteSelected={requestBatchDelete}
-            deleting={deleting}
+            disabled={deletionActive}
             loading={loading}
             loadError={catalogError}
             warnings={catalogWarnings}
             onRetryLoad={() => setRefreshKey(key => key + 1)}
-            progress={batchProgress}
+            progress={deletion?.phase === "running" ? deletion.progress : null}
             failures={batchFailures}
             searchHits={contentSearch.hits}
             searchPending={contentSearch.pending}
@@ -465,8 +481,8 @@ export default function App() {
             <SessionDetailView
               detail={detail}
               agent={currentAgent}
-              onDeleted={onDeleted}
-              onDeletingChange={setSingleDeleting}
+              onRequestDelete={requestSessionDelete}
+              actionsDisabled={deletionActive}
               toast={showToast}
               searchTarget={searchTarget?.query === search.trim() ? searchTarget : null}
               onRetryRead={() => void openSession(detail.meta)}
@@ -509,32 +525,11 @@ export default function App() {
         setConfigNavigation(null); action();
       }} />}
 
-      {pendingBatch && (
-        <ConfirmDialog
-          title="批量删除会话"
-          message={
-            <>
-              <p>确定删除 {pendingBatch.agent.displayName} 的 {pendingBatch.sessions.length} 个会话吗？</p>
-              <p>{pendingBatch.agent.deletePolicy === "trash"
-                ? "会话文件将移入系统回收站，可以手动还原。"
-                : "会话将永久删除，无法恢复。"}</p>
-              {pendingBatch.agent.id === "opencode" && <p>OpenCode CLI 也会删除关联的子会话。</p>}
-              <ul className="batch-targets">
-                {pendingBatch.sessions.map((session) => (
-                  <li key={sessionKey(session)}>
-                    {session.title || session.sessionId}
-                    <small>{shortPath(session.cwd) || session.projectDir} · {session.sessionId}</small>
-                  </li>
-                ))}
-              </ul>
-              <p>逐条执行；失败项会列出，已完成的删除不会自动回滚。</p>
-            </>
-          }
-          confirmLabel={`${pendingBatch.agent.deletePolicy === "trash" ? "移入回收站" : "永久删除"}（${pendingBatch.sessions.length}）`}
-          onConfirm={confirmBatchDelete}
-          onCancel={() => setPendingBatch(null)}
-        />
-      )}
+      {deletion?.phase === "confirm" && <SessionDeleteDialog
+        deletion={deletion.request}
+        onConfirm={confirmDeletion}
+        onCancel={() => setDeletion((current) => current?.phase === "confirm" ? null : current)}
+      />}
       {toast && <div className={`toast ${toast.error ? "error" : ""}`}>{toast.msg}</div>}
     </div>
   );

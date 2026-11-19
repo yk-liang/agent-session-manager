@@ -43,6 +43,8 @@ try {
       }
       if (command === "read_session") return { meta: state.rows[args.agent].find(s => s.sessionId === args.sessionId),
         events: [{ type: "user", message: { content: "Read-only fixture question" } }] };
+      if (command === "resume_command") return `qoder --resume ${args.sessionId}`;
+      if (command === "plugin:clipboard-manager|write_text") { state.copied = args.text; return null; }
       if (command === "delete_session") {
         state.deleted.push(args.sessionId); state.rows[args.agent] = state.rows[args.agent].filter(s => s.sessionId !== args.sessionId); return null;
       }
@@ -138,19 +140,33 @@ try {
   await assertProjectDetail("cached filter switch loaded");
   pass("empty-session filters use separate snapshots and switch back without losing project or detail");
 
-  await cards.filter({ hasText: /^Qoder question/ }).click();
+  await cards.filter({ hasText: "New Qoder question" }).click();
   await page.locator(".detail-title").waitFor();
-  await page.getByRole("button", { name: "删除", exact: true }).click();
+  const readsBeforeShortcuts = await page.evaluate(() => window.__CACHE_TEST__.calls.filter(call => call.command === "read_session").length);
+  const targetCard = cards.filter({ hasText: /^Qoder question/ });
+  const shortcuts = targetCard.getByRole("group", { name: "会话快捷操作" });
+  await targetCard.hover();
+  const copy = shortcuts.getByRole("button", { name: "复制恢复命令（Qoder question）" });
+  await copy.hover();
+  assert.ok(await copy.locator(".session-action-tooltip", { hasText: "复制恢复命令" }).isVisible());
+  await copy.click();
+  await page.waitForFunction(() => window.__CACHE_TEST__.copied === "qoder --resume q1");
+  await shortcuts.getByRole("button", { name: "在终端恢复（Qoder question）" }).click();
+  await page.waitForFunction(() => window.__CACHE_TEST__.calls.some(({ command, args }) =>
+    command === "resume_in_terminal" && args.agent === "qoder" && args.sessionId === "q1" && args.cwd === "/tmp/source" && !args.fork));
+  await shortcuts.getByRole("button", { name: "删除（Qoder question）" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "移入回收站", exact: true }).click();
   await page.waitForFunction(() => window.__CACHE_TEST__.deleted.length === 1);
   assert.equal(await cards.count(), 1);
+  assert.equal(await page.locator(".detail-title").textContent(), "New Qoder question");
+  assert.equal(await page.evaluate(() => window.__CACHE_TEST__.calls.filter(call => call.command === "read_session").length), readsBeforeShortcuts);
   await codex(); await qoder();
   await cards.filter({ hasText: "New Qoder question" }).waitFor();
   assert.equal(await cards.count(), 1);
   await page.evaluate(() => { window.__CACHE_TEST__.release("qoder"); window.__CACHE_TEST__.release("codex"); });
   await waitLoaded();
   assert.equal(await cards.count(), 1);
-  pass("deletion evicts both cached filters immediately and switching cannot revive the deleted card");
+  pass("card shortcuts act without opening the target, and deletion evicts both cached filters while preserving the open detail");
 
   await project.click();
   await cards.filter({ hasText: "New Qoder question" }).click();

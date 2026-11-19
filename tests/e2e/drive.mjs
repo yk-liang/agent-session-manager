@@ -416,7 +416,7 @@ console.log("STEP6 delete modal shown:", JSON.stringify(await page.locator(".mod
 const modalBody = (await page.locator(".modal-body").textContent()) ?? "";
 const confirmLabel = (await page.locator(".modal-actions button.danger").textContent()) ?? "";
 const expectTrash = !permanentDelete;
-const bodyOk = expectTrash ? modalBody.includes("回收站") : modalBody.includes("不可恢复");
+const bodyOk = expectTrash ? modalBody.includes("回收站") : modalBody.includes("无法恢复");
 const labelOk = expectTrash ? confirmLabel.includes("移入回收站") : confirmLabel.includes("永久删除");
 console.log(`STEP6b wording: body=${JSON.stringify(modalBody)} label=${JSON.stringify(confirmLabel)} -> ${bodyOk && labelOk ? "OK" : "FAILED"}`);
 if (!bodyOk || !labelOk) process.exit(1);

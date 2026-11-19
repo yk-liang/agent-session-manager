@@ -4,13 +4,12 @@ import CopyButton from "./CopyButton";
 import UiIcon from "./UiIcon";
 import ViewToggle from "./ViewToggle";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import ConfirmDialog from "./ConfirmDialog";
+import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
 import MessageText from "./MessageText";
 import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
-import type { AgentInfo, ContentBlock, ConversationSearchTarget, SessionDetail as Detail, SessionEvent } from "../types";
+import type { AgentInfo, ContentBlock, ConversationSearchTarget, SessionDetail as Detail, SessionEvent, SessionMeta } from "../types";
 import { fullTime, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../sessionModels";
 import * as api from "../api";
@@ -19,8 +18,8 @@ import ReadDiagnostics from "./ReadDiagnostics";
 interface Props {
   detail: Detail;
   agent: AgentInfo;
-  onDeleted: () => void;
-  onDeletingChange: (deleting: boolean) => void;
+  onRequestDelete: (session: SessionMeta) => void;
+  actionsDisabled: boolean;
   toast: (msg: string, isError?: boolean) => void;
   searchTarget?: ConversationSearchTarget | null;
   onRetryRead?: () => void;
@@ -291,11 +290,8 @@ function eventVisible(ev: SessionEvent, tools: boolean, thinking: boolean, conte
   );
 }
 
-export default function SessionDetailView({ detail, agent, onDeleted, onDeletingChange, toast, searchTarget = null, onRetryRead }: Props) {
+export default function SessionDetailView({ detail, agent, onRequestDelete, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
-  const toTrash = agent.deletePolicy === "trash";
-  const removing = useRef(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [showTools, setShowTools] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
   const [showContext, setShowContext] = useState(false);
@@ -418,46 +414,6 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
     jumpTo(hitIndex);
   }, [hitIndex, searchTarget, jumpTo, toast, renderMarkdown]);
 
-  const copyResume = async () => {
-    try {
-      const cmd = await api.resumeCommand(agent.id, meta.sessionId, false);
-      if (!cmd) {
-        toast("该 agent 不支持恢复会话", true);
-        return;
-      }
-      await writeText(cmd);
-      toast("已复制恢复命令");
-    } catch (e) {
-      toast(String(e), true);
-    }
-  };
-
-  const resume = async (fork: boolean) => {
-    try {
-      await api.resumeInTerminal(agent.id, meta.sessionId, meta.cwd ?? undefined, fork);
-      toast(fork ? "已在新终端窗口分叉会话" : "已在新终端窗口恢复会话");
-    } catch (e) {
-      toast(String(e), true);
-    }
-  };
-
-  const remove = async () => {
-    if (removing.current) return;
-    removing.current = true;
-    onDeletingChange(true);
-    try {
-      await api.deleteSession(agent.id, meta.projectDir, meta.sessionId);
-      toast(toTrash ? "会话已移入回收站" : "会话已永久删除");
-      onDeleted();
-    } catch (e) {
-      toast(String(e), true);
-    } finally {
-      setConfirmOpen(false);
-      removing.current = false;
-      onDeletingChange(false);
-    }
-  };
-
   return (
     <DetailState.Provider value={state}><div className="detail">
       <div className="detail-header">
@@ -473,18 +429,7 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
           <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
         </div>
         <div className="detail-actions">
-          {meta.hasTranscript && (!agent.resumeEntrypoint || meta.entrypoint === agent.resumeEntrypoint) && (
-            <>
-              <button onClick={copyResume}>复制恢复命令</button>
-              <button onClick={() => resume(false)}>在终端恢复</button>
-              {agent.supportsFork && (
-                <button onClick={() => resume(true)}>分叉会话</button>
-              )}
-            </>
-          )}
-          {agent.deletePolicy !== "readOnly" && (
-            <button className="danger" onClick={() => setConfirmOpen(true)}>删除</button>
-          )}
+          <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete} toast={toast} disabled={actionsDisabled} />
           {meta.hasTranscript && (
             <span className="view-toggles">
               <ViewToggle label="工具调用" checked={showTools} onChange={setShowTools} />
@@ -535,23 +480,6 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
           </nav>
         )}
       </div>
-      {confirmOpen && (
-        <ConfirmDialog
-          title="删除会话"
-          message={
-            <>
-              确定删除会话「{meta.title || meta.sessionId.slice(0, 8) + "…"}」吗？
-              <br />
-              {toTrash
-                ? "会话文件将移入系统回收站，可以随时还原。"
-                : "该 agent 的删除由官方 CLI 执行，不可恢复。"}
-            </>
-          }
-          confirmLabel={toTrash ? "移入回收站" : "永久删除"}
-          onConfirm={remove}
-          onCancel={() => setConfirmOpen(false)}
-        />
-      )}
     </div></DetailState.Provider>
   );
 }
