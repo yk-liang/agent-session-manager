@@ -1,4 +1,5 @@
 mod agents;
+mod session_catalog;
 mod session_watch;
 mod usage;
 
@@ -21,7 +22,8 @@ fn open_collector_settings(service: tauri::State<usage::service::Service>) -> Re
 
 use agents::profiles::workspace::{ChangeKind, ChangePreview, Validation, Workspace};
 use agents::profiles::{CurrentConfig, ProfileSummary};
-use agents::{AgentInfo, Catalog, SessionDetail};
+use agents::{AgentInfo, SessionDetail};
+use session_catalog::{SessionCatalogs, Snapshot};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
@@ -187,34 +189,57 @@ fn cancel_usage(generation: u64) {
 }
 
 #[tauri::command]
-async fn catalog(agent: String, include_empty: Option<bool>) -> Result<Catalog, String> {
+async fn catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    agent: String,
+    include_empty: bool,
+    generation: u64,
+    revision: Option<u64>,
+) -> Result<Option<Snapshot>, String> {
+    let state = state.inner().clone();
     run_backend(move || {
-        let source = agents::find_source(&agent)?;
-        let catalog = source.quick_catalog(include_empty.unwrap_or(false))?;
-        agents::search::register(source.as_ref(), &catalog);
-        Ok(catalog)
+        state.load(
+            agents::find_source(&agent)?.as_ref(),
+            include_empty,
+            generation,
+            revision,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    generation: u64,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    run_backend(move || {
+        state.cancel(generation);
+        Ok(())
     }).await
 }
 
-// 同一时间只运行一次精确统计。切换上下文时取消后续文件读取，首屏不等待此锁。
-static REFINEMENT: AtomicU64 = AtomicU64::new(0);
 #[tauri::command]
-fn cancel_catalog_refinement(generation: u64) { REFINEMENT.fetch_max(generation, Ordering::SeqCst); }
-#[tauri::command]
-async fn refine_catalog(agent: String, include_empty: bool, generation: u64) -> Result<Catalog, String> {
-    REFINEMENT.fetch_max(generation, Ordering::SeqCst);
+async fn refine_catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    agent: String,
+    include_empty: bool,
+    generation: u64,
+    revision: Option<u64>,
+) -> Result<Option<Snapshot>, String> {
+    let state = state.inner().clone();
     run_backend(move || {
-        static RUNNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        let cancelled = || REFINEMENT.load(Ordering::SeqCst) != generation;
-        if cancelled() { return Err("目录更新已取消".into()); }
-        let source = agents::find_source(&agent)?;
-        let catalog = source.refine_catalog(include_empty, &cancelled)?;
-        if cancelled() { return Err("目录更新已取消".into()); }
-        agents::search::register(source.as_ref(), &catalog);
-        Ok(catalog)
-    }).await
+        state.refine(
+            agents::find_source(&agent)?.as_ref(),
+            include_empty,
+            generation,
+            revision,
+        )
+    })
+    .await
 }
+
 #[tauri::command]
 async fn read_tool_payload(token: String) -> Result<serde_json::Value, String> {
     run_backend(move || agents::read_tool_payload(&token)).await
@@ -429,6 +454,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ConfigGuard::default())
         .manage(session_watch::SessionWatcher::default())
+        .manage(std::sync::Arc::new(SessionCatalogs::default()))
         .manage(usage::service::Service::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -494,7 +520,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
-            refine_catalog, cancel_catalog_refinement, read_tool_payload,
+            refine_catalog, cancel_catalog, read_tool_payload,
             list_agents,
             open_data_dir,
             catalog,

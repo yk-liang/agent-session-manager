@@ -29,7 +29,7 @@ try {
   const state = window.__USAGE__ = { fixture, calls: [], syncRounds: 0, holdSync: true, syncResolvers: [], releaseSync: null, holdSummary: null, releaseSummary: null, failSync: null, failSummary: false, collector: { desired: false, running: false, authorization: 'disabled' } };
   window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
    state.calls.push({ cmd, args });
-   if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, supportsFastCatalog: false, dataDir: null, deletePolicy: 'trash' }));
+   if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, dataDir: null, deletePolicy: 'trash' }));
    if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
    if (cmd === 'collector_status') return structuredClone(state.collector);
    if (cmd === 'set_collector_enabled') { state.collector = { desired: args.enabled, running: args.enabled, authorization: args.enabled ? 'enabled' : 'disabled' }; return structuredClone(state.collector); }

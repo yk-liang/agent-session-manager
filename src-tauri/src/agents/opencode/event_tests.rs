@@ -475,7 +475,7 @@ fn search_positions_stay_aligned_after_reasoning_and_tool_parts_are_inserted() {
         fn data_dir(&self) -> Option<PathBuf> {
             Some(self.0.parent().unwrap().into())
         }
-        fn catalog(&self, empty: bool) -> Result<super::super::Catalog, String> {
+        fn scan_catalog(&self, empty: bool, _: &dyn Fn() -> bool) -> Result<super::super::Catalog, String> {
             catalog_at(&self.0, empty)
         }
         fn read_session(&self, _: &str, id: &str) -> Result<SessionDetail, String> {

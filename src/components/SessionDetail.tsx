@@ -5,10 +5,10 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
 import { DetailState, EventView, RowKey } from "./SessionEvent";
-import { rowVisible, sessionRows } from "../sessionContent";
+import { DEFAULT_VISIBILITY, sessionContent, visibleSessionRows } from "../sessionContent";
 import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
-import type { AgentInfo, ContentBlock, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
+import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
 import { fullTime, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../sessionModels";
 import ReadDiagnostics from "./ReadDiagnostics";
@@ -30,20 +30,12 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
   const [showContext, setShowContext] = useState(false);
   const [renderMarkdown, setRenderMarkdown] = useState(readMarkdownPreference);
 
-  const rows = useMemo(() => sessionRows(detail.events), [detail.events]);
-  const visibility = useMemo(() => ({ tool: showTools, thinking: showThinking, context: showContext }), [showTools, showThinking, showContext]);
+  const content = sessionContent(detail.events);
+  const { rows, toc, hasContext } = content;
+  const visibility = useMemo(() => showTools && showThinking && !showContext ? DEFAULT_VISIBILITY
+    : { tool: showTools, thinking: showThinking, context: showContext }, [showTools, showThinking, showContext]);
 
-  const toc = useMemo(() => {
-    const items: { idx: number; text: string }[] = [];
-    detail.events.forEach((ev, i) => {
-      if (ev.type !== "user" || ev.isMeta) return;
-      const text = eventTextParts(ev).join("\n");
-      if (text) items.push({ idx: i, text });
-    });
-    return items;
-  }, [detail]);
-
-  const models = useMemo(() => agent.id === "opencode" ? historicalModels(detail.events) : [], [agent.id, detail]);
+  const models = useMemo(() => agent.id === "opencode" ? historicalModels(detail.events) : [], [agent.id, detail.events]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const hitIndex = useMemo(() => {
     if (!searchTarget) return -1;
@@ -56,12 +48,11 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
     const bySnippet = detail.events.findIndex((_, index) => anchored(index));
     if (bySnippet >= 0) return bySnippet;
     return detail.events.findIndex((event) => eventMatches(event, searchTarget.query));
-  }, [detail, searchTarget]);
+  }, [detail.events, searchTarget]);
 
-  const readingState = useMemo(() => ({ expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>() }), [meta.sessionId, meta.projectDir]);
-  const state = useMemo(() => ({ ...readingState, markdown: renderMarkdown }), [readingState, renderMarkdown]);
-  const hasContext = useMemo(() => detail.events.some((ev) => ev.type === "context"), [detail]);
-  const visible = useMemo(() => rows.flatMap((row, index) => rowVisible(row, visibility) ? [index] : []), [rows, visibility]);
+  const state = useMemo(() => ({ ...content.reading, markdown: renderMarkdown }), [content, renderMarkdown]);
+  const visible = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
+    : visibleSessionRows(content.rows, visibility), [content, visibility]);
   const itemKey = useCallback((index: number) => visible[index], [visible]);
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
     estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 10 });

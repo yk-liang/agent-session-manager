@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentCatalogCache } from "../../src/catalogCache.ts";
 
+const generation = 1;
+
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -16,11 +18,11 @@ test("desktop rename and model selection update an open detail without replacing
   let row = {...meta("same", "mode-old"), title:"Continue"};
   const oldNames = deferred();
   const cache = new AgentCatalogCache(async () => catalog(row), async () => oldNames.promise);
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   const detail = {...row, userCount:9, sizeBytes:123};
-  const pending = cache.enrich("qoder", false, true);
+  const pending = cache.enrich("qoder", false);
   row = {...meta("same", "mode-new"), title:"Named desktop session", userCount:99};
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   oldNames.resolve({"mode-old":"Historical name"});
   await pending;
   const current = cache.withCurrentMetadata("qoder", false, detail);
@@ -38,9 +40,9 @@ test("cached metadata never clears a body read failure; only a successful body r
   const row = {...meta("same", "mode-id"), realUserCount:1};
   const refresh = deferred(); let pending = false;
   const cache = new AgentCatalogCache(async () => pending ? refresh.promise : catalog(row), async () => ({"mode-id":"Readable"}));
-  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty);
+  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty, generation);
   pending = true;
-  const load = cache.load("qoder", false);
+  const load = cache.load("qoder", false, generation);
   cache.setReadError("qoder", row, "stage: open\nos_code: 24");
   refresh.resolve(catalog(row)); await load;
   await cache.enrich("qoder", true);
@@ -57,23 +59,28 @@ test("cached metadata never clears a body read failure; only a successful body r
   assert.equal(cache.peek("qoder", false).sessions.length, 0, "deleted failure must not revive the cached card");
 });
 
-test("switching back exposes the matching snapshot while a coalesced refresh is pending", async () => {
+test("a coalesced refresh retains the matching snapshot when its revision is unchanged", async () => {
   let calls = 0;
   const held = deferred();
-  const cache = new AgentCatalogCache(async (agent, empty) => {
-    calls++;
-    return calls === 1 ? catalog(meta(agent)) : held.promise;
+  const cache = new AgentCatalogCache(async (agent, empty, requestGeneration, revision) => {
+    if (++calls === 1) return { ...catalog(meta(agent)), revision: 7 };
+    assert.equal(revision, 7);
+    return held.promise;
   }, async () => ({}));
-  await cache.load("codex", false);
-  const refresh = cache.load("codex", false);
-  assert.equal(cache.load("codex", false), refresh);
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "codex");
+  const snapshot = await cache.load("codex", false, generation);
+  let changes = 0;
+  const unsubscribe = cache.subscribe(() => { changes++; });
+  const refresh = cache.load("codex", false, generation);
+  assert.equal(cache.load("codex", false, generation), refresh);
+  assert.equal(cache.peek("codex", false), snapshot);
   assert.equal(cache.peek("claude", false), undefined);
   assert.equal(cache.peek("codex", true), undefined);
+  held.resolve(null);
+  assert.equal(await refresh, snapshot);
+  assert.equal(cache.peek("codex", false), snapshot);
+  assert.equal(changes, 0);
   assert.equal(calls, 2);
-  held.resolve(catalog(meta("new")));
-  await refresh;
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "new");
+  unsubscribe();
 });
 
 test("refresh failures preserve the previous list and allow a subsequent retry", async () => {
@@ -82,10 +89,10 @@ test("refresh failures preserve the previous list and allow a subsequent retry",
     if (++calls === 2) throw Error("scan unavailable");
     return catalog(meta(String(calls)));
   }, async () => ({}));
-  await cache.load("codex", false);
-  await assert.rejects(cache.load("codex", false), /scan unavailable/);
+  await cache.load("codex", false, generation);
+  await assert.rejects(cache.load("codex", false, generation), /scan unavailable/);
   assert.equal(cache.peek("codex", false).sessions[0].sessionId, "1");
-  await cache.load("codex", false);
+  await cache.load("codex", false, generation);
   assert.equal(cache.peek("codex", false).sessions[0].sessionId, "3");
 });
 
@@ -93,9 +100,9 @@ test("names resolve independently, merge into both filters and survive a raw met
   const names = deferred(); let nameCalls = 0;
   const cache = new AgentCatalogCache(async () => catalog(meta("same", "mode-id")),
     async () => { nameCalls++; return names.promise; });
-  await cache.load("qoder", false);
-  await cache.load("qoder", true);
-  await cache.load("codex", false);
+  await cache.load("qoder", false, generation);
+  await cache.load("qoder", true, generation);
+  await cache.load("codex", false, generation);
   const first = cache.enrich("qoder", false);
   const second = cache.enrich("qoder", true);
   assert.equal(cache.peek("qoder", false).sessions.length, 1);
@@ -104,7 +111,7 @@ test("names resolve independently, merge into both filters and survive a raw met
   await Promise.all([first, second]);
   assert.equal(cache.peek("qoder", true).sessions[0].modelName, "Qwen example");
   assert.equal(cache.peek("codex", false).sessions[0].modelName, null);
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Qwen example");
   assert.equal(cache.peek("qoder", false).sessions[0].model, "mode-id");
 });
@@ -113,10 +120,10 @@ test("late scans and model lookups cannot revive deleted sessions or touch anoth
   const scan = deferred(), names = deferred(); let hold = false;
   const row = meta("same", "mode-id");
   const cache = new AgentCatalogCache(async () => hold ? scan.promise : catalog(row), async () => names.promise);
-  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty);
+  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty, generation);
   const naming = cache.enrich("qoder", false);
   hold = true;
-  const stale = cache.load("qoder", false);
+  const stale = cache.load("qoder", false, generation);
   cache.remove("qoder", [row]);
   scan.resolve(catalog(row));
   names.resolve({ "mode-id": "Friendly name" });
@@ -129,10 +136,10 @@ test("late scans and model lookups cannot revive deleted sessions or touch anoth
 test("late name completion enriches the newest list instead of replacing it", async () => {
   const names = deferred(); let rows = [meta("first", "mode-id")];
   const cache = new AgentCatalogCache(async () => catalog(...rows), async () => names.promise);
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   const naming = cache.enrich("qoder", false);
   rows = [meta("second", "mode-id")];
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   names.resolve({ "mode-id": "Readable name" });
   await naming;
   assert.deepEqual(cache.peek("qoder", false).sessions.map(s => s.sessionId), ["second"]);
@@ -142,21 +149,21 @@ test("late name completion enriches the newest list instead of replacing it", as
 test("capable sources refresh known names without treating model IDs as object properties", async () => {
   let name = "Old name";
   const cache = new AgentCatalogCache(async () => catalog(meta("a", "constructor")), async () => ({ constructor: name }));
-  await cache.load("qoder", false);
+  await cache.load("qoder", false, generation);
   assert.equal(cache.peek("qoder", false).sessions[0].modelName, null);
-  await cache.enrich("qoder", false, true);
+  await cache.enrich("qoder", false);
   assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Old name");
   name = "Updated name";
-  await cache.enrich("qoder", false, true);
+  await cache.enrich("qoder", false);
   assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Updated name");
 });
 
 test("background statistics cannot replace a newer refresh or revive deleted sessions", async () => {
   let rows = [meta("first")];
   const cache = new AgentCatalogCache(async () => catalog(...rows), async () => ({}));
-  await cache.load("codex", false);
+  await cache.load("codex", false, generation);
   const old = deferred(); const refine = cache.refine("codex", false, () => old.promise);
-  rows = [meta("new")]; await cache.load("codex", false);
+  rows = [meta("new")]; await cache.load("codex", false, generation);
   old.resolve(catalog(meta("first")));
   assert.equal(await refine, undefined);
   const deleted = deferred(); const pending = cache.refine("codex", false, () => deleted.promise);

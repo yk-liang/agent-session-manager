@@ -4,6 +4,7 @@
 //! 转换为统一对话事件，运行指令与状态通知独立标记为 context。
 //! 项目按 session_meta 里的 cwd 分组。
 
+mod catalog;
 #[cfg(test)]
 mod compressed_tests;
 mod context;
@@ -65,6 +66,7 @@ fn classify_source(payload: &Value) -> SourceKind {
     }
 }
 
+#[derive(Clone)]
 struct ParsedRollout {
     session_id: String,
     cwd: Option<String>,
@@ -542,12 +544,19 @@ fn read_rollout(
 /// 枚举给定会话根目录下的全部 rollout（年/月/日分层）。
 /// root 可注入：生产取 sessions_root()，测试直接用临时目录，
 /// 不再依赖全局 CODEX_HOME 环境变量重定向
-fn all_rollouts_in(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+fn all_rollouts_in(
+    root: &Path,
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     for year in super::read_dir_warned(root, warnings) {
+        super::check_catalog_cancelled(cancelled)?;
         for month in super::read_dir_warned(&year.path(), warnings) {
             for day in super::read_dir_warned(&month.path(), warnings) {
+                super::check_catalog_cancelled(cancelled)?;
                 for f in super::read_dir_warned(&day.path(), warnings) {
+                    super::check_catalog_cancelled(cancelled)?;
                     let name = f.file_name().to_string_lossy().to_string();
                     if name.starts_with("rollout-")
                         && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
@@ -564,7 +573,7 @@ fn all_rollouts_in(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
             }
         }
     }
-    files
+    Ok(files)
 }
 
 /// 从 <home>/session_index.jsonl 读取会话标题（thread_name）；
@@ -658,86 +667,9 @@ fn is_relevant_session(p: &ParsedRollout) -> bool {
     source_ok && thread_ok
 }
 
+#[cfg(test)]
 fn catalog_in(root: &Path, include_empty: bool) -> Result<super::Catalog, String> {
-    catalog_with(root, include_empty, false, &|| false)
-}
-// 上下文通知不再算作用户消息；仅重建可再生的会话摘要，不触碰用量账本。
-const SUMMARY_CACHE_KIND: &str = "codex-history-v4";
-fn catalog_with(
-    root: &Path,
-    include_empty: bool,
-    quick: bool,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<super::Catalog, String> {
-    if cancelled() {
-        return Err("目录更新已取消".into());
-    }
-    let mut warnings = Vec::new();
-    let thread_names = root
-        .parent()
-        .map(|home| load_thread_names_in(home, &mut warnings))
-        .unwrap_or_default();
-    let mut items = Vec::new();
-    let groups = history::scan(root, &mut warnings);
-    for pages in groups.values() {
-        let paths: Vec<_> = pages.iter().map(|page| page.path.clone()).collect();
-        if cancelled() {
-            return Err("目录更新已取消".into());
-        }
-        let read = || history::read(pages, ReadMode::Summary).map(|(detail, ws)| (detail.meta, ws));
-        let result = if quick {
-            Ok((
-                super::catalog_cache::peek_summary(SUMMARY_CACHE_KIND, &paths).unwrap_or_else(
-                    || {
-                        let mut meta = to_meta(&pages.last().unwrap().header, None);
-                        meta.source_files = paths.clone();
-                        meta.size_bytes = pages.iter().map(|p| p.header.size_bytes).sum();
-                        meta.last_ts = paths
-                            .iter()
-                            .filter_map(|p| {
-                                std::fs::metadata(p)
-                                    .ok()?
-                                    .modified()
-                                    .ok()?
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .ok()
-                            })
-                            .max()
-                            .and_then(|t| super::ms_to_iso(t.as_millis() as i64))
-                            .or(meta.last_ts);
-                        meta.stats_pending = true;
-                        meta
-                    },
-                ),
-                vec![],
-            ))
-        } else {
-            super::catalog_cache::summary(SUMMARY_CACHE_KIND, &paths, read)
-        };
-        match result {
-            Ok((mut meta, ws)) => {
-                warnings.extend(ws);
-                if !include_empty && !meta.stats_pending && meta.real_user_count == 0 {
-                    continue;
-                }
-                if let Some(name) = thread_names.get(&meta.session_id) {
-                    meta.title = Some(name.clone());
-                }
-                let display = meta.cwd.clone().unwrap_or_else(|| "(未知目录)".into());
-                items.push((meta, display));
-            }
-            Err(error) => warnings.push(error),
-        }
-    }
-    let mut catalog = super::assemble_catalog(items);
-    if let Some(home) = root.parent() {
-        projects::apply(&mut catalog, home, &mut warnings);
-    }
-    catalog.warnings = warnings;
-    if cancelled() {
-        return Err("目录更新已取消".into());
-    }
-    Ok(catalog)
+    catalog::Scan::new(root, &|| false)?.read(include_empty, false, &|| false)
 }
 
 fn read_session_in(root: &Path, session_id: &str) -> Result<SessionDetail, String> {
@@ -752,7 +684,9 @@ fn read_session_mode(
         return Err("非法会话 ID".into());
     }
     let mut warnings = Vec::new();
-    let groups = history::scan(root, &mut warnings);
+    let paths = all_rollouts_in(root, &mut warnings, &|| false)?;
+    let pages = history::read_headers(&paths, &mut warnings, &|| false)?;
+    let groups = history::group_pages(pages);
     let pages = groups.get(session_id).ok_or("未找到该 Codex 会话")?;
     let (mut detail, ws) = history::read(pages, mode)?;
     detail.warnings = ws;
@@ -774,7 +708,7 @@ fn trash_remove(targets: Vec<PathBuf>) -> Result<(), String> {
 /// 删除前的两轮扫描都必须证明身份集合完整；不可读文件不能按“无关”跳过。
 fn deletion_pages(root: &Path, session_id: &str) -> Result<Vec<history::Page>, String> {
     let mut warnings = Vec::new();
-    let paths = all_rollouts_in(root, &mut warnings);
+    let paths = all_rollouts_in(root, &mut warnings, &|| false)?;
     if !warnings.is_empty() {
         return Err(format!(
             "会话目录扫描不完整（{}），已中止删除",
@@ -902,21 +836,28 @@ impl AgentSource for CodexSource {
         paths.root_files = vec!["session_index.jsonl", ".codex-global-state.json"];
         paths
     }
-    fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
-        catalog_in(&sessions_root(), include_empty)
-    }
-    fn quick_catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
-        catalog_with(&sessions_root(), include_empty, true, &|| false)
-    }
-    fn supports_fast_catalog(&self) -> bool {
-        true
-    }
-    fn refine_catalog(
+    fn scan_catalog(
         &self,
         include_empty: bool,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
-        refine(include_empty, cancelled)
+        catalog::Scan::new(&sessions_root(), cancelled)?.read(include_empty, false, cancelled)
+    }
+    fn prepare_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(super::Catalog, Option<super::CatalogRefinement>), String> {
+        let scan = catalog::Scan::new(&sessions_root(), cancelled)?;
+        let catalog = scan.read(include_empty, true, cancelled)?;
+        let refinement = if catalog.sessions.iter().any(|session| session.stats_pending) {
+            let refine: super::CatalogRefinement =
+                Box::new(move |cancelled| scan.read(include_empty, false, cancelled));
+            Some(refine)
+        } else {
+            None
+        };
+        Ok((catalog, refinement))
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
         // 旧 Codex 令牌无前缀；只识别既有 SHA-256 形式，实际读取仍须命中引用表。
@@ -935,7 +876,7 @@ impl AgentSource for CodexSource {
     }
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         let mut warnings = Vec::new();
-        let pages = history::headers(meta.source_files.clone(), &mut warnings);
+        let pages = history::read_headers(&meta.source_files, &mut warnings, &|| false)?;
         if !warnings.is_empty()
             || pages.len() != meta.source_files.len()
             || pages.iter().any(|p| p.header.session_id != meta.session_id)
@@ -1550,7 +1491,7 @@ mod tests {
     fn real_data_smoke_if_present() {
         let mut warnings = Vec::new();
         let root = sessions_root();
-        let files = all_rollouts_in(&root, &mut warnings);
+        let files = all_rollouts_in(&root, &mut warnings, &|| false).unwrap();
         if files.is_empty() {
             return;
         }
@@ -1575,11 +1516,4 @@ mod tests {
             assert!(meta.title.is_none() || !meta.title.as_deref().unwrap().is_empty());
         }
     }
-}
-
-pub(crate) fn refine(
-    include_empty: bool,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<super::Catalog, String> {
-    catalog_with(&sessions_root(), include_empty, false, cancelled)
 }

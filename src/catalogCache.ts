@@ -1,19 +1,22 @@
-import type { Catalog, SessionMeta } from "./types";
+import type { Catalog, Project, SessionMeta } from "./types";
 import { sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
-type CatalogLoader = (agent: string, includeEmpty: boolean) => Promise<Catalog>;
+type CatalogLoader = (agent: string, includeEmpty: boolean, generation: number, revision?: number) => Promise<Catalog | null>;
 type NameLoader = (agent: string, models: string[]) => Promise<Record<string, string>>;
 
-/** 每个 Agent 的两种空会话筛选分别保存快照；并发刷新复用同一请求。 */
+interface CatalogScope {
+  sequence: number;
+  snapshot?: Catalog;
+  pending?: { generation: number; request: Promise<Catalog> };
+}
+
 export class AgentCatalogCache {
-  private snapshots = new Map<string, Catalog>();
-  private pending = new Map<string, Promise<Catalog>>();
-  private generations = new Map<string, number>();
-  private revisions = new Map<string, number>();
+  private scopes = new Map<string, CatalogScope>();
   private names = new Map<string, Map<string, string>>();
   private pendingNames = new Map<string, Promise<void>>();
   private readFailures = new Map<string, Map<string, SessionMeta>>();
+  private listeners = new Set<() => void>();
   private loader: CatalogLoader;
   private nameLoader: NameLoader;
 
@@ -22,35 +25,71 @@ export class AgentCatalogCache {
     this.nameLoader = nameLoader;
   }
 
-  private key(agent: string, includeEmpty: boolean) { return JSON.stringify([agent, includeEmpty]); }
-  peek(agent: string, includeEmpty: boolean) { return this.snapshots.get(this.key(agent, includeEmpty)); }
+  private scope(agent: string, includeEmpty: boolean) {
+    const key = JSON.stringify([agent, includeEmpty]);
+    let scope = this.scopes.get(key);
+    if (!scope) {
+      scope = { sequence: 0 };
+      this.scopes.set(key, scope);
+    }
+    return scope;
+  }
 
-  withNames(agent: string, meta: SessionMeta): SessionMeta {
+  peek(agent: string, includeEmpty: boolean) {
+    return this.scopes.get(JSON.stringify([agent, includeEmpty]))?.snapshot;
+  }
+
+  visible(agent: string, includeEmpty: boolean) {
+    return this.peek(agent, includeEmpty) ?? (includeEmpty ? this.peek(agent, false) : undefined);
+  }
+
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+
+  private publish(scope: CatalogScope, catalog: Catalog) {
+    if (scope.snapshot !== catalog) {
+      scope.snapshot = catalog;
+      for (const listener of this.listeners) listener();
+    }
+    return catalog;
+  }
+
+  private withNames(agent: string, meta: SessionMeta): SessionMeta {
     const name = meta.model ? this.names.get(agent)?.get(meta.model) : undefined;
     return name && name !== meta.modelName ? { ...meta, modelName: name } : meta;
   }
 
   /** 改名/切换模型只更新已打开详情的展示信息，保留这份正文对应的统计与来源身份。 */
   withCurrentMetadata(agent: string, includeEmpty: boolean, meta: SessionMeta): SessionMeta {
-    const latest = this.peek(agent, includeEmpty)?.sessions.find(s => sessionKey(s) === sessionKey(meta));
+    const snapshot = this.visible(agent, includeEmpty);
+    const key = sessionKey(meta);
+    const latest = snapshot?.sessions.find(session => sessionKey(session) === key);
     if (!latest) return this.withNames(agent, meta);
-    const named = this.withNames(agent, latest);
+    const named = latest.statsPending
+      ? this.withNames(agent, { ...meta, title: latest.title ?? meta.title })
+      : this.withNames(agent, latest);
     return meta.title === named.title && meta.model === named.model && meta.modelName === named.modelName
       ? meta : {...meta, title:named.title, model:named.model, modelName:named.modelName};
   }
 
-  private decorate(agent: string, catalog: Catalog, includeEmpty: boolean): Catalog {
-    const names = new Map(this.names.get(agent));
+  private accept(agent: string, includeEmpty: boolean, scope: CatalogScope, catalog: Catalog) {
+    let names = this.names.get(agent);
     for (const session of catalog.sessions) {
-      if (session.model && session.modelName) names.set(session.model, session.modelName);
+      if (!session.model || !session.modelName) continue;
+      if (!names) this.names.set(agent, names = new Map());
+      names.set(session.model, session.modelName);
     }
-    this.names.set(agent, names);
+    return this.publish(scope, this.decorate(agent, includeEmpty, catalog));
+  }
+
+  private decorate(agent: string, includeEmpty: boolean, catalog: Catalog): Catalog {
     const failures = this.readFailures.get(agent);
-    const sessions = [...catalog.sessions];
-    const sessionKeys = new Set(sessions.map(sessionKey));
+    const sessionKeys = catalog.warnings.length && failures?.size ? new Set(catalog.sessions.map(sessionKey)) : null;
     const restored: SessionMeta[] = [];
     // 扫描也失败时保留已知失败会话的摘要，不能让正文打不开的卡片随刷新消失。
-    if (catalog.warnings.length) {
+    if (sessionKeys) {
       for (const failed of failures?.values() ?? []) {
         if ((includeEmpty || failed.realUserCount > 0 || failed.statsPending) && !sessionKeys.has(sessionKey(failed))) {
           restored.push(failed);
@@ -58,111 +97,115 @@ export class AgentCatalogCache {
         }
       }
     }
-    const projects = new Map(catalog.projects.map(p => [p.dirName, p]));
-    const previous = new Map(this.peek(agent, includeEmpty)?.projects.map(p => [p.dirName, p]));
-    for (const session of restored) {
-      const project = projects.get(session.projectDir);
-      const metadata = project ?? previous.get(session.projectDir) ?? {
-        dirName: session.projectDir, displayPath: session.cwd ?? session.projectDir, lastActivity: session.lastTs,
-      };
-      projects.set(session.projectDir, {...metadata, sessionCount: (project?.sessionCount ?? 0) + 1});
+    let projects = catalog.projects;
+    if (restored.length) {
+      const counts = new Map(projects.map(project => [project.dirName, project]));
+      const previous = new Map(this.peek(agent, includeEmpty)?.projects.map(project => [project.dirName, project]));
+      for (const session of restored) {
+        const project = counts.get(session.projectDir);
+        const metadata = project ?? previous.get(session.projectDir) ?? {
+          dirName: session.projectDir, displayPath: session.cwd ?? session.projectDir, lastActivity: session.lastTs,
+        };
+        counts.set(session.projectDir, { ...metadata, sessionCount: (project?.sessionCount ?? 0) + 1 });
+      }
+      projects = [...counts.values()];
     }
-    return {
-      ...catalog,
-      projects: restored.length ? [...projects.values()] : catalog.projects,
-      sessions: [...sessions, ...restored].map(session => ({
-        ...this.withNames(agent, session), readError: failures?.get(sessionKey(session))?.readError,
-      })),
-    };
+    const rows = restored.length ? [...catalog.sessions, ...restored] : catalog.sessions;
+    const sessions = rows.map(session => {
+      const named = this.withNames(agent, session);
+      const readError = failures?.size ? failures.get(sessionKey(session))?.readError : undefined;
+      return readError === named.readError ? named : { ...named, readError };
+    });
+    return restored.length || sessions.some((session, index) => session !== catalog.sessions[index])
+      ? { ...catalog, projects, sessions } : catalog;
   }
 
   /** 只有同一会话的正文重试成功才清除失败；名称补全和摘要缓存命中都不代表正文可读。 */
   setReadError(agent: string, session: SessionMeta, error: string | null) {
     const failures = this.readFailures.get(agent) ?? new Map<string, SessionMeta>();
+    if (failures.get(sessionKey(session))?.readError === (error ?? undefined)) return;
     if (error !== null) failures.set(sessionKey(session), {...session, readError: error});
     else failures.delete(sessionKey(session));
     this.readFailures.set(agent, failures);
     for (const empty of [false, true]) {
-      const current = this.peek(agent, empty);
-      if (current) this.snapshots.set(this.key(agent, empty), this.decorate(agent, current, empty));
+      const scope = this.scope(agent, empty);
+      if (scope.snapshot) this.publish(scope, this.decorate(agent, empty, scope.snapshot));
     }
   }
 
-  load(agent: string, includeEmpty: boolean): Promise<Catalog> {
-    const key = this.key(agent, includeEmpty);
-    const running = this.pending.get(key);
-    if (running) return running;
-    const generation = this.generations.get(agent) ?? 0;
-    this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
-    const request = this.loader(agent, includeEmpty).then((catalog) => {
-      // 删除完成前启动的扫描不能把已删除卡片写回缓存。
-      if (generation !== (this.generations.get(agent) ?? 0)) return this.peek(agent, includeEmpty) ?? EMPTY_CATALOG;
-      const next = this.decorate(agent, catalog, includeEmpty);
-      this.snapshots.set(key, next);
-      return next;
-    }).finally(() => { if (this.pending.get(key) === request) this.pending.delete(key); });
-    this.pending.set(key, request);
+  load(agent: string, includeEmpty: boolean, generation: number): Promise<Catalog> {
+    const scope = this.scope(agent, includeEmpty);
+    if (scope.pending && scope.pending.generation === generation) return scope.pending.request;
+    const sequence = ++scope.sequence;
+    const request = this.loader(agent, includeEmpty, generation, scope.snapshot?.revision).then(catalog => {
+      if (catalog && sequence === scope.sequence) return this.accept(agent, includeEmpty, scope, catalog);
+      return scope.snapshot ?? EMPTY_CATALOG;
+    }).finally(() => {
+      if (scope.pending?.request === request) scope.pending = undefined;
+    });
+    scope.pending = { generation, request };
     return request;
   }
 
-  /** 精确统计完成前若又刷新或删除，旧响应不得覆盖新目录。 */
-  async refine(agent: string, includeEmpty: boolean, loader: CatalogLoader): Promise<Catalog | undefined> {
-    const key = this.key(agent, includeEmpty);
-    const revision = this.revisions.get(key);
-    const generation = this.generations.get(agent) ?? 0;
-    const result = await loader(agent, includeEmpty);
-    if (revision !== this.revisions.get(key) || generation !== (this.generations.get(agent) ?? 0)) return undefined;
-    const next = this.decorate(agent, result, includeEmpty);
-    this.snapshots.set(key, next);
-    return next;
+  async refine(agent: string, includeEmpty: boolean, load: (revision?: number) => Promise<Catalog | null>) {
+    const scope = this.scope(agent, includeEmpty);
+    const sequence = scope.sequence;
+    const catalog = await load(scope.snapshot?.revision);
+    if (catalog && sequence === scope.sequence) return this.accept(agent, includeEmpty, scope, catalog);
   }
 
-  async enrich(agent: string, includeEmpty: boolean, refreshKnown = false): Promise<Catalog | undefined> {
+  async enrich(agent: string, includeEmpty: boolean) {
     const catalog = this.peek(agent, includeEmpty);
-    // Qoder 的历史模型使用不透明 ID，需要外部名称目录；其他数据源本身携带可读标识。
-    if (!catalog || (!refreshKnown && agent !== "qoder")) return catalog;
-    const models = [...new Set(catalog.sessions.filter((s) => s.model && (refreshKnown || !s.modelName)).map((s) => s.model!))].sort();
-    if (!models.length) return catalog;
+    if (!catalog) return;
+    const models = [...new Set(catalog.sessions.flatMap(session => session.model ? [session.model] : []))].sort();
+    if (!models.length) return;
     const key = JSON.stringify([agent, models]);
     let request = this.pendingNames.get(key);
     if (!request) {
       request = (async () => {
+        const resolved = new Map<string, string>();
         for (let offset = 0; offset < models.length; offset += 256) {
-          const resolved = await this.nameLoader(agent, models.slice(offset, offset + 256));
-          const names = new Map(this.names.get(agent));
-          for (const [id, name] of Object.entries(resolved)) names.set(id, name);
-          this.names.set(agent, names);
+          const names = await this.nameLoader(agent, models.slice(offset, offset + 256));
+          for (const [id, name] of Object.entries(names)) resolved.set(id, name);
         }
-        // 补全结果只更新名称，不能用查询开始时的旧列表覆盖后来刷新、删除后的快照。
+        const names = this.names.get(agent) ?? new Map<string, string>();
+        if (![...resolved].some(([id, name]) => names.get(id) !== name)) return;
+        for (const [id, name] of resolved) names.set(id, name);
+        this.names.set(agent, names);
         for (const empty of [false, true]) {
-          const current = this.peek(agent, empty);
-          if (current) this.snapshots.set(this.key(agent, empty), {
-            ...current, sessions: current.sessions.map((session) => this.withNames(agent, session)),
-          });
+          const scope = this.scope(agent, empty);
+          if (scope.snapshot) this.publish(scope, this.decorate(agent, empty, scope.snapshot));
         }
       })().finally(() => { this.pendingNames.delete(key); });
       this.pendingNames.set(key, request);
     }
     await request;
-    return this.peek(agent, includeEmpty);
   }
 
   remove(agent: string, removed: SessionMeta[]) {
     const keys = new Set(removed.map(sessionKey));
     for (const key of keys) this.readFailures.get(agent)?.delete(key);
-    this.generations.set(agent, (this.generations.get(agent) ?? 0) + 1);
     for (const empty of [false, true]) {
-      const key = this.key(agent, empty);
-      this.pending.delete(key);
-      const current = this.snapshots.get(key);
+      const scope = this.scope(agent, empty);
+      scope.sequence++;
+      scope.pending = undefined;
+      const current = scope.snapshot;
       if (!current) continue;
       const sessions = current.sessions.filter((s) => !keys.has(sessionKey(s)));
-      const projects = current.projects.map((project) => {
-        const rows = sessions.filter((s) => s.projectDir === project.dirName);
-        return { ...project, sessionCount: rows.length,
-          lastActivity: rows.map((s) => s.lastTs).filter((ts): ts is string => !!ts).sort().pop() ?? null };
-      }).filter((project) => project.sessionCount > 0);
-      this.snapshots.set(key, { ...current, projects, sessions });
+      const groups = new Map<string, Project>();
+      const projectsByDir = new Map(current.projects.map(project => [project.dirName, project]));
+      for (const session of sessions) {
+        const group = groups.get(session.projectDir);
+        if (group) {
+          group.sessionCount++;
+          if (session.lastTs && (!group.lastActivity || session.lastTs > group.lastActivity)) group.lastActivity = session.lastTs;
+        } else {
+          const project = projectsByDir.get(session.projectDir);
+          if (project) groups.set(session.projectDir, { ...project, sessionCount: 1, lastActivity: session.lastTs });
+        }
+      }
+      const projects = current.projects.flatMap(project => groups.get(project.dirName) ?? []);
+      this.publish(scope, { ...current, revision: undefined, projects, sessions });
     }
   }
 }

@@ -592,8 +592,23 @@ details[open] > summary > .details-caret {
 }
 
 .session-cards {
+  min-height: 0;
+  flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  overscroll-behavior-y: contain;
+}
+
+.session-card-list {
+  position: relative;
+}
+
+.session-card-row {
+  position: absolute;
+  inset-inline: 8px;
+}
+
+.session-card-row:is(:hover, :focus-within) {
+  z-index: 1;
 }
 
 .session-card {
@@ -603,7 +618,6 @@ details[open] > summary > .details-caret {
   border: 1px solid transparent;
   background: var(--bg-panel);
   width: 100%;
-  margin-bottom: 6px;
 }
 
 .session-card:hover {

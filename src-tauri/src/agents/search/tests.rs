@@ -65,8 +65,8 @@ impl AgentSource for Fixture {
     fn data_dir(&self) -> Option<PathBuf> {
         Some(self.dir.path().to_path_buf())
     }
-    fn catalog(&self, include_empty: bool) -> Result<Catalog, String> {
-        claude_family::catalog(&self.dir.path().join("projects"), OPTIONS, include_empty)
+    fn scan_catalog(&self, include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<Catalog, String> {
+        claude_family::catalog(&self.dir.path().join("projects"), OPTIONS, include_empty, cancelled)
     }
     fn read_session(&self, project: &str, id: &str) -> Result<SessionDetail, String> {
         self.reads.fetch_add(1, Ordering::Relaxed);

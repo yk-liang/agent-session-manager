@@ -64,7 +64,7 @@ fn context_visibility_claude_and_qoder() {
             filter_non_cli_entrypoint: false,
             filter_qoderwork_cwd: false,
         };
-        let catalog = catalog(dir.path(), opts, false).unwrap();
+        let catalog = catalog(dir.path(), opts, false, &|| false).unwrap();
         assert_eq!(catalog.sessions.len(), 1);
         assert_eq!(catalog.sessions[0].real_user_count, 3);
         assert_eq!(catalog.sessions[0].assistant_text_count, 2);

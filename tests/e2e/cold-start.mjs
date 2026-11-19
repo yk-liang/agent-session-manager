@@ -26,7 +26,7 @@ try {
         if (state.listeners[args.event] === state.registrations[args.eventId]?.handler) delete state.listeners[args.event];
         delete state.registrations[args.eventId]; return;
       }
-      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsFastCatalog: false, supportsModelNames: false, deletePolicy: 'trash' }));
+      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }));
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: false, running: false, authorization: 'signingRequired' };
       if (cmd === 'sync_request_events') {

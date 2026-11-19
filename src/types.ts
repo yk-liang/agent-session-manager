@@ -5,7 +5,6 @@ export interface AgentInfo {
   supportsFork: boolean;
   resumeEntrypoint?: string;
   supportsModelNames?: boolean;
-  supportsFastCatalog?: boolean;
   dataDir: string | null;
   deletePolicy: "trash" | "permanent" | "readOnly";
 }
@@ -66,6 +65,7 @@ export interface Project {
 }
 
 export interface Catalog {
+  revision?: number;
   projects: Project[];
   sessions: SessionMeta[];
   warnings: string[];

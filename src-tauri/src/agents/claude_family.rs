@@ -296,10 +296,12 @@ pub fn catalog(
     base: &Path,
     opts: FamilyOptions,
     include_empty: bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<super::Catalog, String> {
     let mut warnings = Vec::new();
     let mut items = Vec::new();
     for entry in super::read_dir_warned(base, &mut warnings) {
+        super::check_catalog_cancelled(cancelled)?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -308,7 +310,7 @@ pub fn catalog(
         if dir_name.starts_with('.') {
             continue;
         }
-        let sessions = sessions_in_dir(base, &dir_name, opts, include_empty, &mut warnings);
+        let sessions = sessions_in_dir(base, &dir_name, opts, include_empty, &mut warnings, cancelled)?;
         // 编码目录无法还原隐藏目录和字面连字符。项目名应由有正文会话的
         // 权威 cwd 决定，不能因显示空会话或文件枚举顺序而被猜测路径覆盖。
         let display = project_display_path(&dir_name, &sessions);
@@ -342,13 +344,15 @@ fn sessions_in_dir(
     opts: FamilyOptions,
     include_empty: bool,
     warnings: &mut Vec<String>,
-) -> Vec<SessionMeta> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<SessionMeta>, String> {
     let dir = base.join(dir_name);
     let entries: Vec<_> = super::read_dir_warned(&dir, warnings);
     let mut sessions = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
     for entry in &entries {
+        super::check_catalog_cancelled(cancelled)?;
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if name.ends_with(".jsonl") {
@@ -403,7 +407,7 @@ fn sessions_in_dir(
             }
         }
     }
-    sessions
+    Ok(sessions)
 }
 
 pub fn read_session(
@@ -633,8 +637,8 @@ mod tests {
         .unwrap();
         fs::create_dir(project.join("dddd")).unwrap();
         for opts in [CLAUDE_OPTS, QODER_OPTS] {
-            let collapsed = catalog(temp.path(), opts, false).unwrap();
-            let expanded = catalog(temp.path(), opts, true).unwrap();
+            let collapsed = catalog(temp.path(), opts, false, &|| false).unwrap();
+            let expanded = catalog(temp.path(), opts, true, &|| false).unwrap();
             for (data, count) in [(&collapsed, 1), (&expanded, 4)] {
                 assert!(data.warnings.is_empty());
                 assert_eq!(data.projects.len(), 1);
@@ -659,7 +663,7 @@ mod tests {
             );
             for include_empty in [false, true, false] {
                 assert_eq!(
-                    catalog(temp.path(), opts, include_empty).unwrap().projects[0].display_path,
+                    catalog(temp.path(), opts, include_empty, &|| false).unwrap().projects[0].display_path,
                     "/Users/demo/.codex"
                 );
             }
@@ -683,7 +687,7 @@ mod tests {
                 }
             }
         }
-        let sessions = sessions_in_dir(temp.path(), dir_name, CLAUDE_OPTS, true, &mut Vec::new());
+        let sessions = sessions_in_dir(temp.path(), dir_name, CLAUDE_OPTS, true, &mut Vec::new(), &|| false).unwrap();
         let mut real = sessions
             .into_iter()
             .find(|s| s.session_id == "bbbb")
@@ -706,7 +710,7 @@ mod tests {
             "{\"type\":\"user\",\"entrypoint\":\"cli\",\"message\":{\"content\":\"question\"}}\n";
         fs::write(&file, user).unwrap();
         assert_eq!(
-            catalog(temp.path(), QODER_OPTS, false).unwrap().sessions[0].real_user_count,
+            catalog(temp.path(), QODER_OPTS, false, &|| false).unwrap().sessions[0].real_user_count,
             1
         );
         fs::OpenOptions::new()
@@ -716,16 +720,16 @@ mod tests {
             .write_all(user.as_bytes())
             .unwrap();
         assert_eq!(
-            catalog(temp.path(), QODER_OPTS, false).unwrap().sessions[0].real_user_count,
+            catalog(temp.path(), QODER_OPTS, false, &|| false).unwrap().sessions[0].real_user_count,
             2
         );
         fs::write(&file, "").unwrap();
-        assert!(catalog(temp.path(), QODER_OPTS, false)
+        assert!(catalog(temp.path(), QODER_OPTS, false, &|| false)
             .unwrap()
             .sessions
             .is_empty());
         assert_eq!(
-            catalog(temp.path(), QODER_OPTS, true)
+            catalog(temp.path(), QODER_OPTS, true, &|| false)
                 .unwrap()
                 .sessions
                 .len(),
@@ -733,11 +737,11 @@ mod tests {
         );
         fs::write(project.join("bbbb.jsonl"), user).unwrap();
         assert_eq!(
-            catalog(temp.path(), QODER_OPTS, false).unwrap().sessions[0].session_id,
+            catalog(temp.path(), QODER_OPTS, false, &|| false).unwrap().sessions[0].session_id,
             "bbbb"
         );
         fs::remove_file(project.join("bbbb.jsonl")).unwrap();
-        assert!(catalog(temp.path(), QODER_OPTS, false)
+        assert!(catalog(temp.path(), QODER_OPTS, false, &|| false)
             .unwrap()
             .sessions
             .is_empty());

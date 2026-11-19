@@ -548,11 +548,12 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
         None,
         vec![message(1, "user", "hello")],
     );
-    let quick = || catalog_with(&root, false, true, &|| false).unwrap();
+    let scan = catalog::Scan::new(&root, &|| false).unwrap();
+    let quick = || scan.read(false, true, &|| false).unwrap();
     let preview = quick();
     assert!(preview.sessions[0].stats_pending);
     assert!(preview.warnings.is_empty());
-    let accurate = catalog_in(&root, false).unwrap();
+    let accurate = scan.read(false, false, &|| false).unwrap();
     assert!(!accurate.sessions[0].stats_pending);
     assert_eq!(quick().sessions[0].real_user_count, 1);
     writeln!(
@@ -563,7 +564,7 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
     .unwrap();
     assert!(quick().sessions[0].stats_pending);
     assert_eq!(
-        catalog_in(&root, false).unwrap().sessions[0].real_user_count,
+        scan.read(false, false, &|| false).unwrap().sessions[0].real_user_count,
         2
     );
     // 损坏尾部只有后台精确扫描才会接触，不能挡住有有效身份的首屏。
@@ -573,8 +574,8 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
     )
     .unwrap();
     assert!(quick().warnings.is_empty());
-    assert!(!catalog_in(&root, false).unwrap().warnings.is_empty());
-    assert!(catalog_with(&root, false, false, &|| true).is_err());
+    assert!(!scan.read(false, false, &|| false).unwrap().warnings.is_empty());
+    assert!(catalog::Scan::new(&root, &|| true).is_err());
 }
 
 #[test]
@@ -619,7 +620,7 @@ fn historical_model_reaches_refined_list_detail_and_cached_first_screen() {
         Some("historical-model-b")
     );
     assert_eq!(
-        catalog_with(&root, false, true, &|| false)
+        catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false)
             .unwrap()
             .sessions[0]
             .model
@@ -643,12 +644,12 @@ fn old_empty_model_summaries_are_invalidated_without_scanning_the_first_screen_b
             message(1, "user", "hello"),
         ],
     );
-    let pages = history::headers(vec![path.clone()], &mut Vec::new());
+    let pages = history::read_headers(std::slice::from_ref(&path), &mut Vec::new(), &|| false).unwrap();
     let mut old = to_meta(&pages[0].header, None);
     old.real_user_count = 1;
     old.source_files = vec![path.clone()];
     super::super::catalog_cache::summary("codex-history", &[path], || Ok((old, vec![]))).unwrap();
-    let quick = catalog_with(&root, false, true, &|| false).unwrap();
+    let quick = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
     assert!(
         quick.sessions[0].stats_pending,
         "an old empty-model cache cannot count as a complete new summary"
@@ -659,7 +660,7 @@ fn old_empty_model_summaries_are_invalidated_without_scanning_the_first_screen_b
             .as_deref(),
         Some("logged-model")
     );
-    let warm = catalog_with(&root, false, true, &|| false).unwrap();
+    let warm = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
     assert!(!warm.sessions[0].stats_pending);
     assert_eq!(warm.sessions[0].model.as_deref(), Some("logged-model"));
 }
@@ -711,7 +712,7 @@ fn model_follows_effective_page_boundaries_and_new_calls_but_not_blank_metadata(
         .unwrap();
     }
     for mode in [ReadMode::Summary, ReadMode::Events, ReadMode::View] {
-        let pages = history::headers(vec![parent.clone(), child.clone()], &mut Vec::new());
+        let pages = history::read_headers(&[parent.clone(), child.clone()], &mut Vec::new(), &|| false).unwrap();
         let (detail, _) = history::read(&pages, mode).unwrap();
         assert_eq!(detail.meta.model.as_deref(), Some("used-model"));
     }

@@ -7,7 +7,7 @@ use std::time::Instant;
 fn main() {
     let source = agents::codex::CodexSource;
     let start = Instant::now();
-    let quick = source.quick_catalog(false).unwrap();
+    let (quick, refine) = source.prepare_catalog(false, &|| false).unwrap();
     println!(
         "{}",
         serde_json::json!({"phase":"first-screen","ms":start.elapsed().as_secs_f64()*1000.,"sessions":quick.sessions.len(),"models":quick.sessions.iter().filter(|s|s.model.is_some()).count(),"pending":quick.sessions.iter().filter(|s|s.stats_pending).count(),"warnings":quick.warnings.len()})
@@ -16,13 +16,13 @@ fn main() {
         return;
     }
     let start = Instant::now();
-    let full = source.catalog(false).unwrap();
+    let full = refine.map(|load| load(&|| false).unwrap()).unwrap_or(quick);
     println!(
         "{}",
         serde_json::json!({"phase":"refined","ms":start.elapsed().as_secs_f64()*1000.,"sessions":full.sessions.len(),"models":full.sessions.iter().filter(|s|s.model.is_some()).count(),"warnings":full.warnings.len()})
     );
     let start = Instant::now();
-    let cached = source.quick_catalog(false).unwrap();
+    let (cached, _) = source.prepare_catalog(false, &|| false).unwrap();
     println!(
         "{}",
         serde_json::json!({"phase":"cached-list","ms":start.elapsed().as_secs_f64()*1000.,"models":cached.sessions.iter().filter(|s|s.model.is_some()).count()})

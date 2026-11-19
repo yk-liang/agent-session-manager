@@ -98,7 +98,7 @@ fn cached_summary_does_not_hide_detail_open_error() {
     )
     .unwrap();
     assert_eq!(
-        catalog(temp.path(), OPTIONS, false).unwrap().sessions.len(),
+        catalog(temp.path(), OPTIONS, false, &|| false).unwrap().sessions.len(),
         1
     );
     let mut limit = libc::rlimit {

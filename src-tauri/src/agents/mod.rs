@@ -66,7 +66,7 @@ pub fn ms_to_iso(ms: i64) -> Option<String> {
     ))
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub session_id: String,
@@ -99,7 +99,7 @@ pub struct SessionMeta {
     pub source_files: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub dir_name: String,
@@ -119,7 +119,7 @@ pub struct SessionDetail {
 }
 
 /// 会话目录快照，包含项目分组、会话摘要和读取告警。
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub projects: Vec<Project>,
@@ -134,7 +134,7 @@ pub struct Catalog {
     pub session_group_hints: Vec<SessionGroupHint>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionGroupHint {
     pub project_dir: String,
@@ -156,31 +156,31 @@ pub enum DeletePolicy {
 /// 把 (会话, 项目展示路径) 列表聚合成 Catalog：
 /// 按 project_dir 分组出项目统计，两组结果各按最近活跃时间排序。
 pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
-    let mut groups: std::collections::BTreeMap<String, (String, Vec<SessionMeta>)> =
-        std::collections::BTreeMap::new();
+    let mut groups = std::collections::BTreeMap::<String, Project>::new();
     let mut sessions = Vec::with_capacity(items.len());
-    for (meta, display) in items {
-        groups
+    for (meta, display_path) in items {
+        let project = groups
             .entry(meta.project_dir.clone())
-            .or_insert((display, Vec::new()))
-            .1
-            .push(meta.clone());
+            .or_insert_with(|| Project {
+                dir_name: meta.project_dir.clone(),
+                display_path,
+                session_count: 0,
+                last_activity: None,
+            });
+        project.session_count += 1;
+        if meta.last_ts > project.last_activity {
+            project.last_activity = meta.last_ts.clone();
+        }
         sessions.push(meta);
     }
-    let mut projects: Vec<Project> = groups
-        .into_iter()
-        .map(|(dir_name, (display_path, ms))| {
-            let last_activity = ms.iter().filter_map(|s| s.last_ts.clone()).max();
-            Project {
-                session_count: ms.len(),
-                last_activity,
-                dir_name,
-                display_path,
-            }
-        })
-        .collect();
+    let mut projects: Vec<_> = groups.into_values().collect();
     projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    sessions.sort_by(|a, b| {
+        b.last_ts
+            .cmp(&a.last_ts)
+            .then_with(|| a.project_dir.cmp(&b.project_dir))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
     let mut catalog = Catalog {
         projects,
         sessions,
@@ -211,7 +211,6 @@ pub struct AgentInfo {
     pub resume_entrypoint: Option<&'static str>,
     /// 此数据源可在列表出现后补全/刷新模型名称。
     pub supports_model_names: bool,
-    pub supports_fast_catalog: bool,
     /// 该 Agent 的数据目录（用于「打开数据目录」）
     pub data_dir: Option<String>,
     /// 会话删除策略。
@@ -236,6 +235,16 @@ impl AgentWatchPaths {
             max_depth,
             ..Self::default()
         }
+    }
+}
+
+pub type CatalogRefinement = Box<dyn FnOnce(&dyn Fn() -> bool) -> Result<Catalog, String> + Send>;
+
+pub fn check_catalog_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    if cancelled() {
+        Err("目录更新已取消".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -268,29 +277,24 @@ pub trait AgentSource: Send + Sync {
     fn watch_paths(&self, _usage: bool) -> AgentWatchPaths {
         AgentWatchPaths::default()
     }
-    /// 一次扫描返回项目分组、全部会话与扫描告警（避免重复遍历历史数据）
-    fn catalog(&self, include_empty: bool) -> Result<Catalog, String>;
-    /// 默认数据源保持原行为；大日志数据源可先提供轻量目录。
-    fn quick_catalog(&self, include_empty: bool) -> Result<Catalog, String> {
-        self.catalog(include_empty)
+    #[allow(dead_code)] // Standalone catalog inspection examples.
+    fn catalog(&self, include_empty: bool) -> Result<Catalog, String> {
+        self.scan_catalog(include_empty, &|| false)
     }
-    fn supports_fast_catalog(&self) -> bool {
-        false
-    }
-    /// 精确目录更新；支持增量检查的数据源可在读取各文件前响应取消。
-    fn refine_catalog(
+    fn scan_catalog(
         &self,
         include_empty: bool,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<Catalog, String> {
-        if cancelled() {
-            return Err("目录更新已取消".into());
-        }
-        let catalog = self.catalog(include_empty)?;
-        if cancelled() {
-            return Err("目录更新已取消".into());
-        }
-        Ok(catalog)
+    ) -> Result<Catalog, String>;
+    fn prepare_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Catalog, Option<CatalogRefinement>), String> {
+        check_catalog_cancelled(cancelled)?;
+        let catalog = self.scan_catalog(include_empty, cancelled)?;
+        check_catalog_cancelled(cancelled)?;
+        Ok((catalog, None))
     }
     /// None 表示不识别此令牌；识别后的失效/校验失败必须原样返回，不尝试其他数据源。
     fn read_tool_payload(&self, _token: &str) -> Option<Result<serde_json::Value, String>> {
@@ -396,7 +400,6 @@ pub fn list_agents() -> Vec<AgentInfo> {
             supports_fork: s.supports_fork(),
             resume_entrypoint: s.resume_entrypoint(),
             supports_model_names: s.supports_model_names(),
-            supports_fast_catalog: s.supports_fast_catalog(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
             delete_policy: s.delete_policy(),
         })
@@ -533,7 +536,7 @@ mod tests {
         fn data_dir(&self) -> Option<PathBuf> {
             None
         }
-        fn catalog(&self, _: bool) -> Result<Catalog, String> {
+        fn scan_catalog(&self, _: bool, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(assemble_catalog(vec![]))
         }
@@ -561,19 +564,19 @@ mod tests {
     }
 
     #[test]
-    fn refinement_defaults_honor_cancellation_without_agent_specific_dispatch() {
+    fn catalog_preparation_honors_cancellation_without_agent_specific_dispatch() {
         use std::sync::atomic::Ordering;
         let source = FixtureSource(Default::default());
-        assert!(source.refine_catalog(false, &|| true).is_err());
+        assert!(source.prepare_catalog(false, &|| true).is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 0);
         assert!(source
-            .refine_catalog(false, &|| source.0.load(Ordering::SeqCst) > 0)
+            .prepare_catalog(false, &|| source.0.load(Ordering::SeqCst) > 0)
             .is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 1);
-        assert!(source.refine_catalog(false, &|| false).is_ok());
+        assert!(source.prepare_catalog(false, &|| false).is_ok());
         assert!(source.read_tool_payload("anything").is_none());
         assert!(source.watch_paths(false).transcript_dirs.is_empty());
-        assert!(codex::CodexSource.refine_catalog(false, &|| true).is_err());
+        assert!(codex::CodexSource.prepare_catalog(false, &|| true).is_err());
     }
 
     #[test]

@@ -33,7 +33,7 @@ export class AutoRefreshScheduler {
   setActive(active: boolean) {
     if (this.active === active) return;
     this.active = active;
-    if (active) this.request("focus"); else this.cancelTimer();
+    this.schedule();
   }
 
   setBlocked(blocked: boolean) { this.blocked = blocked; this.schedule(); }

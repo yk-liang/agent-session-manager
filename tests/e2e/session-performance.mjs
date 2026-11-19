@@ -18,10 +18,11 @@ try {
     const catalog=statsPending=>({sessions:[{...meta,model:statsPending?null:meta.model,statsPending}],projects:[{dirName:'p',displayPath:'/tmp/long',sessionCount:1,lastActivity:null}],warnings:[]});
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(cmd,args={})=>{
       state.calls.push({cmd,args});
-      if(cmd==='list_agents')return [{id:'codex',displayName:'Codex',installed:true,supportsFastCatalog:true,deletePolicy:'trash'}];
+      if(cmd==='list_agents')return [{id:'codex',displayName:'Codex',installed:true,deletePolicy:'trash'}];
       if(cmd==='catalog')return catalog(!state.refined);
       if(cmd==='refine_catalog'){state.refining=true;await new Promise(resolve=>state.release=resolve);state.refined=true;return catalog(false);}
       if(cmd==='read_session')return {meta,events};
+      if(cmd==='get_config_workspace')return {agent:args.agent,revision:'fixture',files:[],profiles:[],matchingProfiles:[],overview:{model:null,provider:null,endpoint:null,mcpServers:[]},backups:[],warnings:[]};
       if(cmd==='read_tool_payload')return args.token==='input'?{type:'tool_use',id:'call',name:'shell',input:{cmd:'loaded on demand'}}:{type:'tool_result',tool_use_id:'call',content:'result on demand',is_error:true};
       if(cmd==='search_conversations')return {hits:[{sessionId:'long',projectDir:'p',role:'user',eventIndex:events.length-1,eventId:'last',snippet:'唯一定位针'}],skipped:0,cancelled:false};
       return null;
@@ -54,6 +55,12 @@ try {
   await page.evaluate(()=>window.__PERF__.release());
   await page.waitForFunction(()=>document.querySelector('.session-card-sub').textContent.includes('条消息'));
   assert.equal(await page.locator('.session-card .model-label').textContent(),'logged-codex-model');
+  await page.getByRole('button',{name:'配置',exact:true}).click();
+  await page.getByRole('button',{name:'会话',exact:true}).click();
+  await page.getByText('result on demand',{exact:true}).waitFor();
+  const readCounts = await page.evaluate(() => ['read_session', 'read_tool_payload']
+    .map(command => window.__PERF__.calls.filter(call => call.cmd === command).length));
+  assert.deepEqual(readCounts, [1, 2], 'returning to an open conversation reuses its detail and expanded tool results');
   await page.getByRole('searchbox').fill('唯一定位针');
   await page.locator('.session-search-snippet').waitFor();await page.locator('.session-card').click();
   const mark=page.locator('#ev-6003 mark'); await mark.waitFor();

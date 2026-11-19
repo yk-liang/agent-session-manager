@@ -24,7 +24,7 @@ function fakeClock() {
 test("idle foreground has no periodic scans or timers; a write burst produces one refresh", async () => {
   const time = fakeClock(); let scans = 0;
   const scheduler = new AutoRefreshScheduler(async () => { scans++; }, time.clock);
-  scheduler.setActive(true); await time.tick(150);
+  scheduler.setActive(true); scheduler.request("focus"); await time.tick(150);
   assert.equal(scans, 1);
   await time.tick(100000); assert.equal(scans, 1); assert.equal(time.timers.size, 0);
   for (let i = 0; i < 1000; i++) { scheduler.request("change"); await time.tick(10); }
@@ -42,7 +42,7 @@ test("background, user selection and a manual scan defer updates without losing 
   scheduler.setBlocked(false); await time.tick(179999); assert.equal(scans, 0);
   await time.tick(1); assert.equal(scans, 1);
   scheduler.setActive(false); scheduler.request("change"); await time.tick(10000); assert.equal(scans, 1);
-  scheduler.setActive(true); await time.tick(150); assert.equal(scans, 2);
+  scheduler.setActive(true); scheduler.request("focus"); await time.tick(150); assert.equal(scans, 2);
 });
 
 test("initial and manual reads share the automatic scan budget without dropping file events", async () => {
@@ -66,7 +66,7 @@ test("initial and manual reads share the automatic scan budget without dropping 
 test("events arriving during a scan queue one later scan and never overlap", async () => {
   const time = fakeClock(); let scans = 0, release;
   const scheduler = new AutoRefreshScheduler(async () => { scans++; if (scans === 1) await new Promise(resolve => { release = resolve; }); }, time.clock);
-  scheduler.setActive(true); await time.tick(150); assert.equal(scans, 1);
+  scheduler.setActive(true); scheduler.request("focus"); await time.tick(150); assert.equal(scans, 1);
   for (let i = 0; i < 100; i++) scheduler.request("change");
   await time.tick(1000); assert.equal(scans, 1);
   release(); await Promise.resolve(); await Promise.resolve();
@@ -77,7 +77,7 @@ test("events arriving during a scan queue one later scan and never overlap", asy
 test("slow logs extend the quiet interval to keep automatic scan time within its budget", async () => {
   const time = fakeClock(); let scans = 0;
   const scheduler = new AutoRefreshScheduler(async () => { scans++; time.spend(2000); }, time.clock);
-  scheduler.setActive(true); await time.tick(150); assert.equal(scans, 1);
+  scheduler.setActive(true); scheduler.request("focus"); await time.tick(150); assert.equal(scans, 1);
   scheduler.request("change"); await time.tick(37999); assert.equal(scans, 1);
   await time.tick(1); assert.equal(scans, 2);
 });

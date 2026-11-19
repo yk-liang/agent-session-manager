@@ -105,10 +105,11 @@ fn candidate_files(roots: &[PathBuf], warnings: &mut Vec<String>) -> Vec<PathBuf
     paths
 }
 
-fn catalog_in(roots: &[PathBuf], include_empty: bool) -> Result<Catalog, String> {
+fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<Catalog, String> {
     let mut warnings = Vec::new();
     let mut sessions = BTreeMap::<_, SessionMeta>::new();
     for path in candidate_files(roots, &mut warnings) {
+        super::check_catalog_cancelled(cancelled)?;
         let sources = [path.clone(), super::scanning::sqlite_wal_path(&path)];
         match super::catalog_cache::summary("antigravity-v1", &sources, || {
             let detail = transcript::read(&path, false)?;
@@ -186,8 +187,12 @@ impl AgentSource for AntigravitySource {
             ..Default::default()
         }
     }
-    fn catalog(&self, include_empty: bool) -> Result<Catalog, String> {
-        catalog_in(&conversation_dirs(), include_empty)
+    fn scan_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Catalog, String> {
+        catalog_in(&conversation_dirs(), include_empty, cancelled)
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
         let mut warnings = Vec::new();

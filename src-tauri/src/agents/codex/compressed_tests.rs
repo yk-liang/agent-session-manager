@@ -161,7 +161,7 @@ fn check_mixed_pages(compress_middle: bool) {
     };
     assert!(first.metadata().unwrap().len() < boundary);
 
-    let quick = catalog_with(&root, false, true, &|| false).unwrap();
+    let quick = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
     assert_eq!(quick.sessions.len(), 1);
     let catalog = catalog_in(&root, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
@@ -182,7 +182,7 @@ fn check_mixed_pages(compress_middle: bool) {
         .unwrap()
         .contains("discarded tail"));
     assert_eq!(CodexSource.search_events(meta).unwrap(), detail.events);
-    let warm = catalog_with(&root, false, true, &|| false).unwrap();
+    let warm = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
     assert!(!warm.sessions[0].stats_pending);
     assert_eq!(warm.sessions[0].real_user_count, 2);
     delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |paths| {

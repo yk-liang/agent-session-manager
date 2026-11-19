@@ -1,7 +1,9 @@
+import { eventTextParts } from "./conversationText.ts";
 import type { ContentBlock, SessionEvent } from "./types";
 
 export type Activity = "thinking" | "tool";
 export type Visibility = { tool: boolean; thinking: boolean; context: boolean };
+export const DEFAULT_VISIBILITY: Visibility = { tool: true, thinking: true, context: false };
 export type SessionBlock = {
   index: number;
   content: ContentBlock;
@@ -66,4 +68,38 @@ export function rowVisible({ event, blocks }: SessionRow, visibility: Visibility
     const activity = hasActivity(part);
     return activity ? visibility[activity] : isAttachment(part.content) || part.content.type === "text" && !!part.content.text?.trim();
   });
+}
+
+function createSessionContent(events: SessionEvent[]) {
+  const rows = sessionRows(events);
+  const toc: { idx: number; text: string }[] = [];
+  let hasContext = false;
+  events.forEach((event, idx) => {
+    if (event.type === "context") hasContext = true;
+    if (event.type !== "user" || event.isMeta) return;
+    const text = eventTextParts(event).join("\n");
+    if (text) toc.push({ idx, text });
+  });
+  return {
+    rows, toc, hasContext,
+    visible: visibleSessionRows(rows, DEFAULT_VISIBILITY),
+    reading: { expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>() },
+  };
+}
+
+const sessionContents = new WeakMap<SessionEvent[], ReturnType<typeof createSessionContent>>();
+
+export function sessionContent(events: SessionEvent[]) {
+  let content = sessionContents.get(events);
+  if (!content) {
+    content = createSessionContent(events);
+    sessionContents.set(events, content);
+  }
+  return content;
+}
+
+export function visibleSessionRows(rows: SessionRow[], visibility: Visibility) {
+  const indexes: number[] = [];
+  rows.forEach((row, index) => { if (rowVisible(row, visibility)) indexes.push(index); });
+  return indexes;
 }

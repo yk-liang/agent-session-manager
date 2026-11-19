@@ -1,8 +1,10 @@
 //! 同一逻辑会话的分页日志：解析历史引用与有效前缀，统一供列表、详情、搜索使用。
 use super::*;
+use crate::agents::{catalog_cache::FileCache, check_catalog_cancelled};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::OnceLock;
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 pub(super) struct HistoryBase {
@@ -46,14 +48,28 @@ impl EventDedup {
     }
 }
 
-pub(super) fn headers(paths: Vec<PathBuf>, warnings: &mut Vec<String>) -> Vec<Page> {
+pub(super) fn read_headers(
+    paths: &[PathBuf],
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Page>, String> {
+    static HEADERS: OnceLock<FileCache<(Option<ParsedRollout>, Vec<String>)>> = OnceLock::new();
+    let cache = HEADERS.get_or_init(|| FileCache::new(4096));
     let mut pages = Vec::new();
     for path in paths {
-        let (header, ws) =
-            read_rollout(&path, ReadMode::Header, ReadLimit::default(), None).split();
+        check_catalog_cancelled(cancelled)?;
+        let (header, ws) = cache.load(
+            "codex-header",
+            std::slice::from_ref(path),
+            || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
+            |(header, warnings)| header.is_some() && warnings.is_empty(),
+        )?;
         warnings.extend(ws);
         if let Some(header) = header {
-            pages.push(Page { path, header });
+            pages.push(Page {
+                path: path.clone(),
+                header,
+            });
         }
     }
     let by_path: HashMap<_, _> = pages
@@ -74,20 +90,21 @@ pub(super) fn headers(paths: Vec<PathBuf>, warnings: &mut Vec<String>) -> Vec<Pa
             }
         }
     }
-    pages.retain(|page| is_relevant_session(&page.header) && !compressed_copies.contains(&page.path));
+    pages.retain(|page| {
+        is_relevant_session(&page.header) && !compressed_copies.contains(&page.path)
+    });
     pages.sort_by(|a, b| {
         a.header
             .created_ts
             .cmp(&b.header.created_ts)
             .then(a.path.cmp(&b.path))
     });
-    pages
+    Ok(pages)
 }
 
-pub(super) fn scan(root: &Path, warnings: &mut Vec<String>) -> BTreeMap<String, Vec<Page>> {
-    let paths = all_rollouts_in(root, warnings);
+pub(super) fn group_pages(pages: Vec<Page>) -> BTreeMap<String, Vec<Page>> {
     let mut groups: BTreeMap<String, Vec<Page>> = BTreeMap::new();
-    for page in headers(paths, warnings) {
+    for page in pages {
         groups
             .entry(page.header.session_id.clone())
             .or_default()

@@ -23,7 +23,7 @@ try {
       if (command === 'plugin:event|listen') { const id = ++state.listenerId; state.listeners[id] = args; return id; }
       if (command === 'plugin:event|unlisten') { delete state.listeners[args.eventId]; return null; }
       if (command === 'watch_sessions') { if (args.generation >= state.watch.generation) state.watch = args; return null; }
-      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, supportsModelNames: false, supportsFastCatalog: false, deletePolicy: 'trash' }];
+      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }];
       if (command === 'catalog') {
         ++state.catalogs;
         if (state.holdCatalog) await new Promise(resolve => state.releaseCatalog = resolve);

@@ -15,7 +15,7 @@ try {
       model, modelName: null, firstTs: null, lastTs: null, realUserCount: 1, assistantTextCount: 1,
       userCount: 1, assistantCount: 1, sizeBytes: 100, hasTranscript: true });
     const state = { rows: { qoder: [row("q1", "Qoder question", "mode-id")], codex: [row("c1", "Codex question")] },
-      hold: {}, pending: [], calls: [], naming: [], named: false, deleted: [] };
+      hold: {}, pending: [], calls: [], naming: [], named: false, deleted: [], cancelled: [] };
     const catalog = (agent, empty) => {
       const sessions = [...state.rows[agent], ...(empty ? [{ ...row("empty", "Empty session"), realUserCount: 0 }] : [])];
       return structuredClone({ sessions, projects: sessions.length ? [{ dirName: "source-dir", displayPath: "/tmp/source", sessionCount: sessions.length, lastActivity: null }] : [], warnings: [] });
@@ -32,8 +32,19 @@ try {
       if (command === "list_agents") return [
         { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, supportsModelNames: true, deletePolicy: "trash" },
         { id: "codex", displayName: "Codex", installed: true, supportsFork: false, deletePolicy: "trash" }];
+      if (command === "cancel_catalog") {
+        const stale = state.pending.filter(request => request.generation < args.generation);
+        state.pending = state.pending.filter(request => request.generation >= args.generation);
+        for (const request of stale) {
+          state.cancelled.push(request.agent);
+          request.reject(Error("catalog cancelled"));
+        }
+        return null;
+      }
       if (command === "catalog") {
-        if (state.hold[args.agent]) return new Promise((resolve, reject) => state.pending.push({ agent: args.agent, empty: args.includeEmpty, resolve, reject }));
+        if (state.hold[args.agent]) return new Promise((resolve, reject) => state.pending.push({
+          agent: args.agent, empty: args.includeEmpty, generation: args.generation, resolve, reject,
+        }));
         return catalog(args.agent, args.includeEmpty);
       }
       if (command === "resolve_model_names") {
@@ -86,13 +97,14 @@ try {
 
   await codex(); await cards.filter({ hasText: "Codex question" }).waitFor({ timeout: 750 });
   await qoder(); await cards.filter({ hasText: "Qoder question" }).waitFor({ timeout: 750 });
-  assert.equal(await page.evaluate(() => window.__CACHE_TEST__.pending.filter(p => p.agent === "qoder").length), 1);
+  await page.waitForFunction(() => window.__CACHE_TEST__.pending.filter(p => p.agent === "qoder").length === 1);
+  assert.ok(await page.evaluate(() => window.__CACHE_TEST__.cancelled.includes("qoder") && window.__CACHE_TEST__.cancelled.includes("codex")));
   await page.evaluate(() => { window.__CACHE_TEST__.add(); window.__CACHE_TEST__.release("qoder"); });
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 2);
   await page.evaluate(() => window.__CACHE_TEST__.release("codex"));
   await waitLoaded();
   assert.equal(await cards.filter({ hasText: "Codex question" }).count(), 0);
-  pass("rapid switching coalesces scans, background refresh adds new sessions, and stale Agent responses cannot replace the active list");
+  pass("rapid switching cancels previous scans, and the latest refresh updates the matching list");
 
   await project.click();
   await cards.filter({ hasText: /^Qoder question/ }).click();
@@ -175,15 +187,17 @@ try {
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   await codex();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "codex"));
-  assert.equal(await cards.count(), 0, "uncached Agent must not inherit the previous Agent's cards");
-  assert.equal(await page.locator(".detail-actions").count(), 0);
+  const assertCodexFallback = async () => {
+    assert.equal(await cards.count(), 1);
+    assert.equal(await cards.filter({ hasText: "Codex question" }).count(), 1);
+    assert.equal(await page.locator(".detail-actions").count(), 0);
+  };
+  await assertCodexFallback();
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
-  assert.equal(await cards.count(), 0);
-  assert.equal(await page.locator(".detail-actions").count(), 0);
+  await assertCodexFallback();
   await page.evaluate(() => window.__CACHE_TEST__.release("codex", true));
   await waitLoaded();
-  assert.equal(await cards.count(), 0);
-  assert.equal(await page.locator(".detail-actions").count(), 0);
+  await assertCodexFallback();
   await reload();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "codex"));
   assert.equal(await page.locator(".detail-actions").count(), 0);

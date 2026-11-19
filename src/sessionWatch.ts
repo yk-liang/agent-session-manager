@@ -7,52 +7,65 @@ interface ChangeSignal { agent: string; generation: number; error?: string }
 let generation = Date.now();
 const nextGeneration = () => (generation = Math.max(generation + 1, Date.now()));
 
-/** 与当前目录上下文绑定；恢复前台时检查一次，后台关闭文件事件流。 */
-export function observeSessionChanges(agent: string, scheduler: AutoRefreshScheduler, onError: (error: string) => void) {
+export function observeSessionChanges(
+  agent: string,
+  scheduler: AutoRefreshScheduler,
+  onError: (error: string) => void,
+  initialRefresh?: () => Promise<void>,
+) {
+  const native = isTauri();
   let disposed = false;
+  let listening = false;
   let focused = document.hasFocus();
-  // 原生窗口焦点优先，WebView 内部的焦点变化不能把后台窗口重新判为前台。
+  // 优先使用原生窗口焦点，避免 WebView 内的焦点事件恢复后台监听。
   let nativeFocused: boolean | undefined;
   let active: boolean | undefined;
-  let currentGeneration = 0;
-  const native = isTauri();
-  const update = (force = false) => {
-    if (disposed) return;
+  let watchGeneration = 0;
+
+  const update = async () => {
     const foreground = (nativeFocused ?? focused) && document.visibilityState === "visible";
-    if (!force && active === foreground) return;
+    if (disposed || !listening || active === foreground) return;
     active = foreground;
+    if (!foreground) scheduler.setActive(false);
+    const ticket = watchGeneration = nextGeneration();
+    try {
+      if (native) await watchSessions(foreground ? agent : null, ticket);
+    } catch (error) {
+      if (!disposed && ticket === watchGeneration && foreground) onError(String(error));
+    }
+    if (disposed || ticket !== watchGeneration) return;
     scheduler.setActive(foreground);
-    currentGeneration = nextGeneration();
-    const requestGeneration = currentGeneration;
-    if (native) void watchSessions(foreground ? agent : null, requestGeneration).then(() => {
-      // 注册监听的间隙可能已有新日志；补一次轻量检查，避免丢掉新建目录事件。
-      if (!disposed && active && currentGeneration === requestGeneration) scheduler.request("focus");
-    }).catch((error) => { if (!disposed && active && currentGeneration === requestGeneration) onError(String(error)); });
+    if (initialRefresh) {
+      const refresh = initialRefresh;
+      initialRefresh = undefined;
+      await refresh();
+    } else if (foreground) {
+      scheduler.request("focus");
+    }
   };
-  const focus = () => { focused = true; update(); };
-  const blur = () => { focused = false; update(); };
-  const visibility = () => { focused = document.hasFocus(); update(); };
+
+  const focus = () => { focused = true; void update(); };
+  const blur = () => { focused = false; void update(); };
+  const visibility = () => { focused = document.hasFocus(); void update(); };
   window.addEventListener("focus", focus);
   window.addEventListener("blur", blur);
   document.addEventListener("visibilitychange", visibility);
+
   const subscriptions = native ? Promise.allSettled([
     listen<ChangeSignal>("session-files-changed", ({ payload }) => {
-      if (disposed || !active || payload.agent !== agent || payload.generation !== currentGeneration) return;
+      if (disposed || !active || payload.agent !== agent || payload.generation !== watchGeneration) return;
       if (payload.error) onError(payload.error);
       scheduler.request("change");
     }),
-    listen<boolean>("session-window-focus", ({ payload }) => { nativeFocused = payload; update(); }),
-  ]).then((results) => {
-    const unlisten = [];
-    for (const result of results) {
-      if (result.status === "fulfilled") unlisten.push(result.value);
-      else if (!disposed) onError(String(result.reason));
-    }
-    return unlisten;
-  }) : Promise.resolve([]);
-  void subscriptions.then(() => {
-    if (!disposed) update(true);
-  }).catch((error) => { if (!disposed) onError(String(error)); });
+    listen<boolean>("session-window-focus", ({ payload }) => { nativeFocused = payload; void update(); }),
+  ]) : Promise.resolve([]);
+  void subscriptions.then(results => {
+    if (disposed) return;
+    for (const result of results) if (result.status === "rejected") onError(String(result.reason));
+    listening = true;
+    void update();
+  });
+
   return () => {
     disposed = true;
     scheduler.setActive(false);
@@ -60,6 +73,8 @@ export function observeSessionChanges(agent: string, scheduler: AutoRefreshSched
     window.removeEventListener("blur", blur);
     document.removeEventListener("visibilitychange", visibility);
     if (native) void watchSessions(null, nextGeneration()).catch(() => {});
-    void subscriptions.then((unlisten) => Promise.allSettled(unlisten.map((off) => off()))).catch(() => {});
+    void subscriptions.then(results => {
+      for (const result of results) if (result.status === "fulfilled") result.value();
+    }).catch(() => {});
   };
 }

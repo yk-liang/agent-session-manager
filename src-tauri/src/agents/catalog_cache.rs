@@ -55,12 +55,12 @@ struct State<T> {
     clock: u64,
 }
 
-struct FileCache<T> {
+pub(super) struct FileCache<T> {
     state: Mutex<State<T>>,
     capacity: usize,
 }
 impl<T: Clone> FileCache<T> {
-    fn new(capacity: usize) -> Self {
+    pub(super) fn new(capacity: usize) -> Self {
         Self {
             state: Mutex::new(State {
                 entries: HashMap::new(),
@@ -70,7 +70,7 @@ impl<T: Clone> FileCache<T> {
         }
     }
 
-    fn load(
+    pub(super) fn load(
         &self,
         kind: &str,
         paths: &[PathBuf],

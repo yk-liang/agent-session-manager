@@ -483,10 +483,15 @@ impl AgentSource for PiSource {
     fn watch_paths(&self, _usage: bool) -> super::AgentWatchPaths {
         super::AgentWatchPaths::transcripts("sessions", None)
     }
-    fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
+    fn scan_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::Catalog, String> {
         let mut warnings = Vec::new();
         let mut items = Vec::new();
         for path in all_session_files(&mut warnings) {
+            super::check_catalog_cancelled(cancelled)?;
             // 列表阶段用轻量解析（不保留事件正文）
             let result = super::catalog_cache::summary("pi-context-v2", &[path.clone()], || {
                 let (parsed, warnings) = parse_pi_session(&path, false).split();

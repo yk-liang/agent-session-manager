@@ -33,8 +33,10 @@ fn load_catalog(
     root: &std::path::Path,
     desktop_db: Option<&std::path::Path>,
     include_empty: bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<super::Catalog, String> {
-    let mut catalog = claude_family::catalog(&root.join("projects"), OPTS, include_empty)?;
+    let mut catalog = claude_family::catalog(&root.join("projects"), OPTS, include_empty, cancelled)?;
+    super::check_catalog_cancelled(cancelled)?;
     desktop::apply(desktop_db, &mut catalog.sessions, &mut catalog.warnings);
     models::apply_cached(root, &mut catalog.sessions);
     if let Some(home) = root.parent() {
@@ -93,11 +95,16 @@ impl AgentSource for QoderSource {
     fn supports_model_names(&self) -> bool {
         true
     }
-    fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
+    fn scan_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::Catalog, String> {
         load_catalog(
             &qoder_dir(),
             desktop::database_path().as_deref(),
             include_empty,
+            cancelled,
         )
     }
     fn resolve_model_names(&self, ids: &[String]) -> std::collections::HashMap<String, String> {
@@ -187,7 +194,7 @@ mod tests {
         let writer = rusqlite::Connection::open(&db).unwrap();
         writer.execute_batch("CREATE TABLE chat_sessions(session_id TEXT PRIMARY KEY,title TEXT,deleted_at INTEGER); INSERT INTO chat_sessions VALUES('aaaa','Named desktop session',NULL)").unwrap();
         let before = std::fs::read(&db).unwrap();
-        let catalog = load_catalog(dir.path(), Some(&db), false).unwrap();
+        let catalog = load_catalog(dir.path(), Some(&db), false, &|| false).unwrap();
         let meta = &catalog.sessions[0];
         assert_eq!(meta.title.as_deref(), Some("Named desktop session"));
         assert_eq!(meta.session_id, "aaaa");
@@ -220,7 +227,7 @@ mod tests {
             records.push_str(&format!("2026-10-15T16:01:14.710+08:00 INFO  debug.message [QoderInferRequest details] model_config={{\"key\":\"{model}\",\"display_name\":\"{name}\"}}, custom_model=null\n"));
         }
         std::fs::write(logs.join("qodercli.log"), records).unwrap();
-        let catalog = load_catalog(dir.path(), None, false).unwrap();
+        let catalog = load_catalog(dir.path(), None, false, &|| false).unwrap();
         assert_eq!(catalog.sessions.len(), cases.len());
         assert!(catalog
             .sessions
@@ -232,7 +239,7 @@ mod tests {
             .collect::<Vec<_>>();
         let names = models::resolve_with(dir.path(), &ids, std::collections::HashMap::new);
         assert_eq!(names.len(), cases.len());
-        let catalog = load_catalog(dir.path(), None, false).unwrap();
+        let catalog = load_catalog(dir.path(), None, false, &|| false).unwrap();
         for (id, model, name) in cases {
             let meta = catalog
                 .sessions

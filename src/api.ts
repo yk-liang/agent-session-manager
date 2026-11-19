@@ -34,15 +34,15 @@ export const collectorStatus = () => invoke<import("./types").CollectorStatus>("
 export const setCollectorEnabled = (enabled: boolean) => invoke<import("./types").CollectorStatus>("set_collector_enabled", { enabled });
 export const openCollectorSettings = () => invoke<void>("open_collector_settings");
 
-export const catalog = (agent: string, includeEmpty = false) =>
-  invoke<Catalog>("catalog", { agent, includeEmpty });
+export const catalog = (agent: string, includeEmpty: boolean, generation: number, revision?: number) =>
+  invoke<Catalog | null>("catalog", { agent, includeEmpty, generation, revision });
 
-let refinementGeneration = Date.now();
-export const nextRefinementGeneration = () => ++refinementGeneration;
-export const refineCatalog = (agent: string, includeEmpty: boolean, generation: number) =>
-  invoke<Catalog>("refine_catalog", { agent, includeEmpty, generation });
-export const cancelCatalogRefinement = () =>
-  invoke<void>("cancel_catalog_refinement", { generation: nextRefinementGeneration() });
+let catalogGeneration = Date.now();
+export const nextCatalogGeneration = () => ++catalogGeneration;
+export const refineCatalog = (agent: string, includeEmpty: boolean, generation: number, revision?: number) =>
+  invoke<Catalog | null>("refine_catalog", { agent, includeEmpty, generation, revision });
+export const cancelCatalog = () =>
+  invoke<void>("cancel_catalog", { generation: nextCatalogGeneration() });
 export const readToolPayload = (token: string) => invoke<import("./types").ContentBlock>("read_tool_payload", { token });
 
 export const resolveModelNames = (agent: string, models: string[]) =>

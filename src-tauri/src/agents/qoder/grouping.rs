@@ -117,6 +117,7 @@ mod tests {
             &temp.path().join(".qoder/projects"),
             super::super::OPTS,
             false,
+            &|| false,
         )
         .unwrap();
         let before = serde_json::to_value(&catalog.sessions).unwrap();
@@ -221,7 +222,7 @@ mod tests {
             fs::write(base.join(source).join(format!("{id}.jsonl")),format!("{}\n",
                 serde_json::json!({"type":"user","sessionId":id,"entrypoint":"cli","cwd":cwd,"message":{"content":"hello"}}))).unwrap();
         }
-        let mut catalog = claude_family::catalog(&base, super::super::OPTS, false).unwrap();
+        let mut catalog = claude_family::catalog(&base, super::super::OPTS, false, &|| false).unwrap();
         for (source, _, cwd) in &cases {
             assert_eq!(
                 catalog

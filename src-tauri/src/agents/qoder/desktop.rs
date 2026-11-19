@@ -121,7 +121,7 @@ mod tests {
         writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE chat_sessions(session_id TEXT PRIMARY KEY,title TEXT,deleted_at INTEGER); INSERT INTO chat_sessions VALUES('aaaa','Desktop title',NULL)").unwrap();
         let transcript = root.path().join("projects/source/aaaa.jsonl");
         let original = fs::read(&transcript).unwrap();
-        let load = || super::super::load_catalog(root.path(), Some(&path), false).unwrap();
+        let load = || super::super::load_catalog(root.path(), Some(&path), false, &|| false).unwrap();
         assert_eq!(load().sessions[0].title.as_deref(), Some("Desktop title"));
         writer
             .execute(
@@ -157,7 +157,7 @@ mod tests {
             INSERT INTO chat_sessions VALUES('bbbb',NULL,'Deleted title',1);
             INSERT INTO chat_sessions VALUES('cccc',NULL,'   ',NULL);
             INSERT INTO chat_sessions VALUES('other','dddd','Wrong parent title',NULL)").unwrap();
-        let data = super::super::load_catalog(root.path(), Some(&path), false).unwrap();
+        let data = super::super::load_catalog(root.path(), Some(&path), false, &|| false).unwrap();
         assert_eq!(data.sessions.len(), 4);
         for session in data.sessions {
             assert_eq!(
@@ -176,7 +176,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fixture(root.path(), "aaaa");
         let path = root.path().join("main.sqlite");
-        let load = || super::super::load_catalog(root.path(), Some(&path), false).unwrap();
+        let load = || super::super::load_catalog(root.path(), Some(&path), false, &|| false).unwrap();
         let missing = load();
         assert_eq!(missing.sessions[0].title.as_deref(), Some("Log title"));
         assert!(missing.warnings.is_empty());

@@ -447,17 +447,22 @@ fn query_session_rows(
 
 /// 批量计数/会话表读取均三态化：部分失败降级为告警 + 已有数据，
 /// 不再让整个 catalog 因局部问题直接失败。
+#[cfg(test)]
 fn catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
+    cached_catalog(path, include_empty, &|| false)
+}
+
+fn cached_catalog(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     let mut wal = path.as_os_str().to_os_string();
     wal.push("-wal");
     super::catalog_cache::database(
         &[path.to_path_buf(), PathBuf::from(wal)],
         include_empty,
-        || scan_catalog_at(path, include_empty),
+        || scan_catalog_at(path, include_empty, cancelled),
     )
 }
 
-fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
+fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     if !path.exists() {
         return Ok(super::Catalog {
             projectless_session_ids: Vec::new(),
@@ -487,6 +492,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
     };
     // 降级时逐会话回退需要区分"有损坏记录"与"查询失败"，
     // 给出准确的告警；检测失败则 None，统一兜底措辞
+    super::check_catalog_cancelled(cancelled)?;
     let corrupt = if counts_complete {
         None
     } else {
@@ -504,10 +510,12 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
             warnings,
         });
     };
+    super::check_catalog_cancelled(cancelled)?;
     let historical_models = models::latest(&conn, None, &mut warnings);
     let mut missing_id = 0u32;
     let mut items = Vec::new();
     for row in rows {
+        super::check_catalog_cancelled(cancelled)?;
         if row.id.is_empty() {
             missing_id += 1;
             continue;
@@ -686,8 +694,12 @@ impl AgentSource for OpenCodeSource {
         // 委托官方 CLI 删除，直接改库，无法进废纸篓
         super::DeletePolicy::Permanent
     }
-    fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
-        let mut catalog = catalog_at(&db_path(), include_empty)?;
+    fn scan_catalog(
+        &self,
+        include_empty: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::Catalog, String> {
+        let mut catalog = cached_catalog(&db_path(), include_empty, cancelled)?;
         let names = models::names();
         for meta in &mut catalog.sessions {
             models::decorate_meta(meta, &names);
