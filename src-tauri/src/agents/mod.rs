@@ -3,6 +3,7 @@ mod context;
 pub(crate) mod diagnostics;
 #[cfg(test)]
 mod context_test_support;
+pub(crate) mod antigravity;
 pub mod claude;
 pub mod claude_family;
 pub mod codex;
@@ -149,6 +150,7 @@ pub enum DeletePolicy {
     Trash,
     /// 永久删除（如委托官方 CLI 直接改库），不可还原
     Permanent,
+    ReadOnly,
 }
 
 /// 把 (会话, 项目展示路径) 列表聚合成 Catalog：
@@ -205,12 +207,14 @@ pub struct AgentInfo {
     pub display_name: String,
     pub installed: bool,
     pub supports_fork: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_entrypoint: Option<&'static str>,
     /// 此数据源可在列表出现后补全/刷新模型名称。
     pub supports_model_names: bool,
     pub supports_fast_catalog: bool,
     /// 该 agent 的数据目录（用于「打开数据目录」）
     pub data_dir: Option<String>,
-    /// 删除会话的落地方式（回收站 / 永久删除）
+    /// 删除会话的落地方式，或标记会话只读。
     pub delete_policy: DeletePolicy,
 }
 
@@ -245,6 +249,9 @@ pub trait AgentSource: Send + Sync {
     fn supports_fork(&self) -> bool {
         false
     }
+    fn resume_entrypoint(&self) -> Option<&'static str> {
+        None
+    }
     fn supports_model_names(&self) -> bool {
         false
     }
@@ -254,6 +261,9 @@ pub trait AgentSource: Send + Sync {
     }
     /// 数据目录（会话存储的根）
     fn data_dir(&self) -> Option<PathBuf>;
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        self.data_dir().into_iter().collect()
+    }
     /// usage 可包含归档、子代理及压缩日志；默认不猜测任何数据目录布局。
     fn watch_paths(&self, _usage: bool) -> AgentWatchPaths {
         AgentWatchPaths::default()
@@ -303,7 +313,9 @@ pub trait AgentSource: Send + Sync {
         self.read_session(&meta.project_dir, &meta.session_id)
             .map(|detail| detail.events)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String>;
+    fn delete_session(&self, _project_dir: &str, _session_id: &str) -> Result<(), String> {
+        Err("该 Agent 的会话为只读".into())
+    }
     /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
     /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
     fn deletion_targets(
@@ -329,6 +341,7 @@ pub fn all_sources() -> Vec<Box<dyn AgentSource>> {
         Box::new(codex::CodexSource),
         Box::new(opencode::OpenCodeSource),
         Box::new(pi::PiSource),
+        Box::new(antigravity::AntigravitySource),
     ]
 }
 
@@ -381,6 +394,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
             display_name: s.display_name().to_string(),
             installed: s.is_installed(),
             supports_fork: s.supports_fork(),
+            resume_entrypoint: s.resume_entrypoint(),
             supports_model_names: s.supports_model_names(),
             supports_fast_catalog: s.supports_fast_catalog(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
@@ -531,6 +545,18 @@ mod tests {
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {
             None
+        }
+    }
+
+    #[test]
+    fn delete_semantics_per_agent() {
+        for source in all_sources() {
+            let expected = match source.id() {
+                "opencode" => DeletePolicy::Permanent,
+                "antigravity" => DeletePolicy::ReadOnly,
+                _ => DeletePolicy::Trash,
+            };
+            assert_eq!(source.delete_policy(), expected, "{}", source.id());
         }
     }
 

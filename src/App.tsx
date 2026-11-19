@@ -438,6 +438,7 @@ export default function App() {
             showEmpty={showEmpty}
             onShowEmpty={changeShowEmpty}
             batchMode={batchMode}
+            supportsDelete={currentAgent?.deletePolicy !== "readOnly"}
             checkedKeys={checkedKeys}
             onToggleBatch={toggleBatch}
             onToggleSession={toggleSession}

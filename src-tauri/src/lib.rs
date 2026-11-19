@@ -269,6 +269,9 @@ async fn delete_session(
 ) -> Result<(), String> {
     run_backend(move || {
         let source = agents::find_source(&agent)?;
+        if source.delete_policy() == agents::DeletePolicy::ReadOnly {
+            return Err("该 Agent 的会话为只读".into());
+        }
         let targets = source.deletion_targets(&project_dir, &session_id)?;
         usage::preserve_before_delete(&agent, targets.as_deref(), || {
             // 保存期间可能新建主日志或状态目录；实际删除集合必须仍与已保存的范围一致。

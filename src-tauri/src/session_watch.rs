@@ -16,10 +16,12 @@ pub struct WatchSpec {
 }
 
 impl WatchSpec {
+    #[cfg(test)]
     pub(crate) fn for_usage(agent: &str, root: PathBuf) -> Self {
         Self::registered(agent, root, true)
     }
 
+    #[allow(dead_code)] // 供独立监听示例使用。
     pub fn new(agent: &str, root: PathBuf) -> Self {
         Self::registered(agent, root, false)
     }
@@ -121,7 +123,7 @@ impl WatchSpec {
                 .filter(|(p, _)| seen.insert(p.clone()))
                 .collect();
         }
-        // 用量关注五个数据根，递归元数据通知也能捕获后创建的 transcripts 目录；
+        // 用量递归监听数据根，元数据通知也能捕获后创建的 transcripts 目录；
         // relevant 仍过滤配置/凭据/请求日志，不读取它们的内容。
         if self.all_usage {
             return vec![(self.root.clone(), RecursiveMode::Recursive)];
@@ -182,37 +184,38 @@ impl SessionWatcher {
     ) -> Result<(), String> {
         let spec = agent
             .map(|agent| {
-                if agent == "usage" {
-                    let mut members = Vec::new();
-                    for source in crate::agents::all_sources() {
-                        if let Some(root) = source.data_dir().filter(|p| p.is_dir()) {
-                            members.push(WatchSpec::from_paths(
-                                source.id(),
-                                root,
-                                source.watch_paths(true),
-                                true,
-                            ));
-                        }
+                let usage = agent == "usage";
+                let sources = if usage {
+                    crate::agents::all_sources()
+                } else {
+                    vec![crate::agents::find_source(&agent)?]
+                };
+                let mut members = Vec::new();
+                for source in sources {
+                    for root in source
+                        .watch_roots()
+                        .into_iter()
+                        .filter(|root| !usage || root.is_dir())
+                    {
+                        members.push(WatchSpec::from_paths(
+                            source.id(),
+                            root,
+                            source.watch_paths(usage),
+                            usage,
+                        ));
                     }
-                    if members.is_empty() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(WatchSpec {
+                }
+                Ok::<_, String>(match members.len() {
+                    0 => None,
+                    1 if !usage => members.pop(),
+                    _ => Some(WatchSpec {
                         agent,
                         root: PathBuf::new(),
                         paths: Default::default(),
-                        all_usage: true,
+                        all_usage: usage,
                         members,
-                    }));
-                }
-                let source = crate::agents::find_source(&agent)?;
-                let root = source.data_dir().ok_or("缺少会话数据目录")?;
-                Ok::<_, String>(Some(WatchSpec::from_paths(
-                    &agent,
-                    root,
-                    source.watch_paths(false),
-                    false,
-                )))
+                    }),
+                })
             })
             .transpose()?
             .flatten();

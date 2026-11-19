@@ -15,6 +15,7 @@ interface Props {
   showEmpty: boolean;
   onShowEmpty: (v: boolean) => void;
   batchMode: boolean;
+  supportsDelete: boolean;
   checkedKeys: Set<string>;
   onToggleBatch: () => void;
   onToggleSession: (session: SessionMeta) => void;
@@ -46,6 +47,7 @@ export default function SessionList({
   showEmpty,
   onShowEmpty,
   batchMode,
+  supportsDelete,
   checkedKeys,
   onToggleBatch,
   onToggleSession,
@@ -107,9 +109,11 @@ export default function SessionList({
             />
             显示空会话
           </label>
-          <button onClick={onToggleBatch} disabled={deleting || loading || searchPending || (!batchMode && sessions.length === 0)}>
-            {batchMode ? "完成" : "批量管理"}
-          </button>
+          {supportsDelete && (
+            <button onClick={onToggleBatch} disabled={deleting || loading || searchPending || (!batchMode && sessions.length === 0)}>
+              {batchMode ? "完成" : "批量管理"}
+            </button>
+          )}
         </div>
       </div>
       {batchMode && (

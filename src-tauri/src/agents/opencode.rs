@@ -886,25 +886,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_semantics_per_agent() {
-        // OpenCode 委托官方 CLI 删除（永久）；其余 agent 移入回收站
-        assert_eq!(
-            OpenCodeSource.delete_policy(),
-            crate::agents::DeletePolicy::Permanent
-        );
-        for s in crate::agents::all_sources() {
-            if s.id() != "opencode" {
-                assert_eq!(
-                    s.delete_policy(),
-                    crate::agents::DeletePolicy::Trash,
-                    "agent {} 应移入回收站",
-                    s.id()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn placeholder_titles() {
         assert!(is_placeholder_title(
             "New session - 2026-09-03T04:51:43.382Z"

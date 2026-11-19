@@ -3,10 +3,11 @@ export interface AgentInfo {
   displayName: string;
   installed: boolean;
   supportsFork: boolean;
+  resumeEntrypoint?: string;
   supportsModelNames?: boolean;
   supportsFastCatalog?: boolean;
   dataDir: string | null;
-  deletePolicy: "trash" | "permanent";
+  deletePolicy: "trash" | "permanent" | "readOnly";
 }
 
 export interface SessionMeta {

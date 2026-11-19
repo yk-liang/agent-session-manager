@@ -6,6 +6,12 @@ use std::io::{Error, ErrorKind};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+pub(crate) fn sqlite_wal_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push("-wal");
+    path.with_file_name(name)
+}
+
 /// 以「非阻塞 + 普通文件复核」方式打开 JSONL 转录，供所有会话解析器共用。
 /// 裸 `File::open` 打开 FIFO（read-only）会阻塞到有写端为止——一个被换成
 /// FIFO 的会话文件足以卡死整轮扫描以及无关会话的删除。这里用 O_NONBLOCK

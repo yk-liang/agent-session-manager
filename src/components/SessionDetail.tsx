@@ -473,7 +473,7 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
           <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
         </div>
         <div className="detail-actions">
-          {meta.hasTranscript && (
+          {meta.hasTranscript && (!agent.resumeEntrypoint || meta.entrypoint === agent.resumeEntrypoint) && (
             <>
               <button onClick={copyResume}>复制恢复命令</button>
               <button onClick={() => resume(false)}>在终端恢复</button>
@@ -482,9 +482,9 @@ export default function SessionDetailView({ detail, agent, onDeleted, onDeleting
               )}
             </>
           )}
-          <button className="danger" onClick={() => setConfirmOpen(true)}>
-            删除
-          </button>
+          {agent.deletePolicy !== "readOnly" && (
+            <button className="danger" onClick={() => setConfirmOpen(true)}>删除</button>
+          )}
           {meta.hasTranscript && (
             <span className="view-toggles">
               <ViewToggle label="工具调用" checked={showTools} onChange={setShowTools} />
