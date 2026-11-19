@@ -13,6 +13,7 @@ import RequestEvents from "./RequestEvents";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 import { ModelLabel } from "./SessionModel";
+import { ModelIcon } from "./BrandIcon";
 import Dropdown from "./Dropdown";
 import ReadDiagnostics from "./ReadDiagnostics";
 
@@ -139,10 +140,10 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
     agents.some(a => (agent === "all" || a.id === agent) && errors.has(a.id));
   const allModels = modelTotals(scopedRows);
   const options = [{ id: "all", name: "全部模型" },
-    ...allModels.map(({ model: id, modelName: name }) => ({ id, name })),
+    ...allModels.map(({ model: id, modelName: name }) => ({ id, name, icon: <ModelIcon id={id} name={name} /> })),
   ];
   if (model !== "all" && !allModels.some(row => row.model === model)) {
-    options.splice(1, 0, { id: model, name: model });
+    options.splice(1, 0, { id: model, name: model, icon: <ModelIcon id={model} /> });
   }
   const models = model === "all" ? allModels : modelTotals(rows);
   const series = usageSeries(rows, period, now);

@@ -33,6 +33,7 @@ try {
   assert.equal(await page.locator('[role="option"][value="all"]').count(), 0);
   assert.equal(await menu.locator('[value="pi"]').count(), 0);
   assert.equal(await menu.locator('[value="qoder"]').textContent(), 'Qoder');
+  assert.match(decodeURIComponent(await menu.locator('[value="claude"] img').getAttribute('src')), /<title>Claude Code<\/title>|claudecode-color/);
   await switcher.click();
   assert.equal(await switcher.getAttribute('aria-expanded'), 'false', 'the same trigger click must close the menu');
   assert.equal(await menu.count(), 0);

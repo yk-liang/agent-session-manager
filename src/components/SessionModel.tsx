@@ -1,8 +1,9 @@
 import type { SessionMeta } from "../types";
+import { ModelIcon } from "./BrandIcon";
 
 export function ModelLabel({ id, name = id, badge = false }: { id: string; name?: string; badge?: boolean }) {
   const tooltip = name === id ? id : `${name}\n模型 ID：${id}`;
-  return <span className={`model-label${badge ? " badge" : ""}`} title={tooltip}>{name}</span>;
+  return <span className={`model-label${badge ? " badge" : ""}`} title={tooltip}><ModelIcon id={id} name={name} />{name}</span>;
 }
 
 /** 列表与会话信息共用名称和原始 ID，长名称交给布局处理。 */

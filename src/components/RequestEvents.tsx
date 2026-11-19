@@ -10,6 +10,8 @@ import { shortPath } from "../utils";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 import { ModelLabel } from "./SessionModel";
+import AgentIcon from "./AgentIcon";
+import { ProviderIcon } from "./BrandIcon";
 import Dropdown from "./Dropdown";
 
 interface Props {
@@ -163,9 +165,9 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
           return <Fragment key={event.id}><tr data-event-id={event.id} className={expanded === event.id ? "request-selected" : undefined}>
             <td><button className="request-expand" aria-label={`查看请求详情 ${event.id}`} aria-expanded={expanded === event.id} onClick={() => setExpanded(expanded === event.id ? null : event.id)}><UiIcon icon={ChevronDown} /></button></td>
             <td>{date ? <><span>{date.toLocaleTimeString("zh-CN", { hour12: false })}</span><small>{dateKey(date).replace(/-/g, "/")}</small></> : "未记录"}</td>
-            <td className="request-model"><ModelLabel id={event.model} name={event.model === "unknown" ? "未知模型" : modelLabel(event.agent, event.model, event.modelName)} />{r.provider && <small title={r.provider}>{r.provider}</small>}</td>
+            <td className="request-model"><ModelLabel id={event.model} name={event.model === "unknown" ? "未知模型" : modelLabel(event.agent, event.model, event.modelName)} />{r.provider && <small title={r.provider}><ProviderIcon provider={r.provider} />{r.provider}</small>}</td>
             <td><span>{r.effort ?? "—"}</span><small>{r.tier ?? "—"}</small></td>
-            <td className="request-source"><span>{names.get(event.agent) ?? event.agent}</span><small title={r.client ? `客户端：${r.client}` : r.kind ? `原始来源类型：${r.kind}` : "未记录客户端"}>{client}</small></td>
+            <td className="request-source"><span><AgentIcon agent={event.agent} inline />{names.get(event.agent) ?? event.agent}</span><small title={r.client ? `客户端：${r.client}` : r.kind ? `原始来源类型：${r.kind}` : "未记录客户端"}>{client}</small></td>
             <td><span className={`request-result ${event.status}`}>{resultNames[event.status]}</span>{r.scope === "usage_delta" && <small>累计差额</small>}{r.scope === "error" && <small>错误事件</small>}</td>
             <td className="request-timing" title={r.timing ? timingNames[r.timing] : "日志未记录请求耗时"}><span>{event.outputTps == null ? "—" : `${estimated ? "≈ " : ""}${event.outputTps.toFixed(1)} t/s`}</span><small>{r.latencyMs == null ? "—" : `${estimated ? "≈ " : ""}${duration(r.latencyMs)}`}</small>{r.ttftMs != null && <small title={`${r.ttftScope === "turn" ? "本轮" : "请求"}首 Token：${duration(r.ttftMs)}`}>{r.ttftScope === "turn" ? "本轮首字 " : "首字 "}{duration(r.ttftMs)}</small>}</td>
             <td className="numeric">{input}</td>

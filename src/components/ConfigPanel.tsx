@@ -6,6 +6,7 @@ import FileDiff from "./ConfigFileDiff";
 import FileEditor from "./ConfigFileEditor";
 import HelpTip from "./HelpTip";
 import AgentIcon from "./AgentIcon";
+import { ModelIcon, ProviderIcon } from "./BrandIcon";
 import type {
   ConfigActivity,
   ConfigChangeKind,
@@ -301,6 +302,7 @@ export default function ConfigPanel({
             <div>
               <span>模型</span>
               <strong title={workspace.overview.model}>
+                <ModelIcon id={workspace.overview.model} />
                 {workspace.overview.model}
               </strong>
             </div>
@@ -308,7 +310,7 @@ export default function ConfigPanel({
           {workspace.overview.provider && (
             <div>
               <span>提供商</span>
-              <strong>{workspace.overview.provider}</strong>
+              <strong title={workspace.overview.provider}><ProviderIcon provider={workspace.overview.provider} />{workspace.overview.provider}</strong>
             </div>
           )}
           {workspace.overview.endpoint && (

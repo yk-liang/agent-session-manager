@@ -27,7 +27,7 @@ try {
     const event = (agent, model, i, modelName = model) => ({
       ...tokens, id: `${agent}-${i}`, agent, model, modelName, time: Date.now() - (i + 1) * 1000,
       session: 'fixture-session', status: model === 'mode-failed-only' ? 'failed' : 'success', partial: false,
-      request: { client: 'cli', project: '/fixture/qoder', scope: 'request' }, outputTps: null,
+      request: { client: 'cli', project: '/fixture/qoder', scope: 'request', provider: 'openrouter' }, outputTps: null,
     });
     const events = Array.from({ length: 55 }, (_, i) => event('qoder',
       i === 1 ? 'mode-unresolved' : i === 2 ? 'mode-failed-only' : i >= 50 ? 'mode-history-only' : primaryId, i));
@@ -100,8 +100,13 @@ try {
   const list = await openDropdown(page, '统计模型');
   const primaryOption = list.locator(`[role="option"][value="${primaryId}"]`);
   assert.equal(await primaryOption.textContent(), primaryName);
+  const qwenIcon = await primaryOption.locator('img').getAttribute('src');
+  assert.match(decodeURIComponent(qwenIcon), /<title>Qwen<\/title>|qwen-color/);
+  assert.equal(await rowLabel(primaryId).locator('img').getAttribute('src'), qwenIcon);
+  assert.match(decodeURIComponent(await table.locator('.request-model small[title="openrouter"] img').first().getAttribute('src')), /<title>OpenRouter<\/title>|openrouter-color/);
   assert.match(await rowLabel(primaryId).getAttribute('title'), /模型 ID：mode-d26/);
   assert.equal(await rowLabel('mode-unresolved').textContent(), 'mode-unresolved');
+  assert.equal(await rowLabel('mode-unresolved').locator('img').count(), 0);
   assert.deepEqual(await page.locator('.usage-stat strong').allTextContents(), stats, 'names must not alter token totals');
   await rowLabel('mode-failed-only').filter({ hasText: 'Qwen failed request model' }).waitFor();
   console.log(`PASS: request rows, model filters and summary labels agree; raw IDs, totals and Agent boundaries are preserved (${engine})`);
