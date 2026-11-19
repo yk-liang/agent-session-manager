@@ -1,4 +1,5 @@
 //! 本地 token 统计。解析/去重规则参考 ccusage，运行时不依赖其程序或定价服务。
+mod antigravity;
 mod cache;
 #[cfg(test)]
 mod cold_start_tests;
@@ -15,6 +16,7 @@ mod parse;
 mod request_parse;
 pub mod service;
 mod storage;
+mod source;
 pub mod summary;
 #[cfg(test)]
 mod summary_tests;
@@ -30,6 +32,7 @@ pub(crate) use cache::Store;
 #[cfg(test)]
 use chrono::{Local, TimeZone, Utc};
 use sha2::{Digest, Sha256};
+use source::Source;
 #[cfg(test)]
 use std::{collections::BTreeMap, time::Instant};
 use std::{
@@ -41,7 +44,7 @@ use std::{
 #[cfg(test)]
 use types::{RecordedFields, Tokens, UsageReport, UsageRow};
 
-pub const AGENTS: [&str; 5] = ["qoder", "claude", "codex", "opencode", "pi"];
+pub const AGENTS: [&str; 6] = ["qoder", "claude", "codex", "opencode", "pi", "antigravity"];
 
 #[cfg(test)]
 struct ReportSnapshot {
@@ -86,6 +89,7 @@ fn unchanged_sources(
     cancel: &dyn Fn() -> bool,
     strict: bool,
 ) -> Result<bool, CollectionError> {
+    let input = Source::for_agent(agent);
     let mut warnings = Vec::new();
     let paths = discover(agent, roots, &mut warnings, cancel, strict)?;
     if !warnings.is_empty() || paths.len() != sources.len() {
@@ -95,11 +99,7 @@ fn unchanged_sources(
         if cancel() {
             return Err("统计已取消".into());
         }
-        let stamps = if agent == "opencode" {
-            opencode::stamps(&path)
-        } else {
-            cache::stamp(&path).map(|s| vec![s])
-        };
+        let stamps = input.stamps(&path);
         match stamps {
             Ok(stamps) if sources.get(&path) == Some(&stamps) => {}
             Err(e) if strict => return Err(CollectionError::source(&path, e)),
@@ -112,6 +112,9 @@ fn unchanged_sources(
 pub fn roots(agent: &str) -> Result<Vec<PathBuf>, String> {
     if !AGENTS.contains(&agent) {
         return Err("不支持的用量来源".into());
+    }
+    if agent == "antigravity" {
+        return Ok(crate::agents::antigravity::conversation_dirs());
     }
     let root = crate::agents::find_source(agent)?
         .data_dir()
@@ -240,6 +243,7 @@ fn discover(
     cancel: &dyn Fn() -> bool,
     strict: bool,
 ) -> Result<BTreeSet<PathBuf>, CollectionError> {
+    let input = Source::for_agent(agent);
     let mut found = BTreeSet::new();
     let mut pending = roots.to_vec();
     let mut visited = HashSet::new();
@@ -279,19 +283,14 @@ fn discover(
             let kind = entry
                 .file_type()
                 .map_err(|e| CollectionError::io(&path, "file_type", &e))?;
-            if kind.is_dir() && agent != "opencode" {
+            if kind.is_dir() && input.recursive() {
                 // Pi 扩展的 debug 导出会复制主记录，不是额外模型调用。
                 if path.file_name().is_none_or(|n| n != "subagent-artifacts") {
                     pending.push(path);
                 }
             } else {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let eligible = if agent == "opencode" {
-                    name.starts_with("opencode") && name.ends_with(".db")
-                } else {
-                    name.ends_with(".jsonl") || agent == "codex" && name.ends_with(".jsonl.zst")
-                };
-                if eligible {
+                if input.discovers(&name, kind) {
                     found.insert(path);
                 }
             }
@@ -326,6 +325,7 @@ fn collect_at(
         return Err("统计已取消".into());
     }
     let started = Instant::now();
+    let input = Source::for_agent(agent);
     let key = scope(agent, roots);
     let revision = store.revision()?;
     let timezone = timezone_key();
@@ -389,11 +389,7 @@ fn collect_at(
                 return Err("统计已取消".into());
             }
             let old = files.get(&path);
-            let loaded = if agent == "opencode" {
-                opencode::read(&path, old, force, cancel)
-            } else {
-                cache::read_file(&path, agent, old, force, cancel)
-            };
+            let loaded = input.read(&path, old, force, cancel);
             match loaded {
                 Ok((file, read)) => {
                     bytes += read;
@@ -425,7 +421,7 @@ fn collect_at(
     }
     let readable = warnings.is_empty()
         && files.values().all(|f| {
-            f.problem.is_none() && f.parser_version >= if agent == "opencode" { 4 } else { 3 }
+            f.problem.is_none() && f.parser_version >= input.parser_version()
         });
     ledger::absorb(agent, &mut history, &files, &mut recorded);
     let (records, mut partial, extra) = normalize::records(agent, &history);

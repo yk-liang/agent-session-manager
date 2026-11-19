@@ -94,6 +94,21 @@ impl<'a> Message<'a> {
         Self::decode(self.repeated(number).next_back().unwrap_or_default())
     }
 
+    pub(crate) fn indices(&self, number: u32) -> std::io::Result<Vec<i64>> {
+        let mut values = Vec::new();
+        for field in self.fields(number) {
+            match field {
+                Field::Number(value) => values.push(i64::try_from(value).map_err(|_| invalid())?),
+                Field::Bytes(mut packed) => {
+                    while !packed.is_empty() {
+                        values.push(i64::try_from(varint(&mut packed)?).map_err(|_| invalid())?);
+                    }
+                }
+            }
+        }
+        Ok(values)
+    }
+
     pub(crate) fn millis(&self, number: u32) -> std::io::Result<Option<i64>> {
         let time = self.message(number)?;
         let secs = time.number(1).unwrap_or_default();

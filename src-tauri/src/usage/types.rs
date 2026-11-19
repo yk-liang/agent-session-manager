@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// 输入已包含缓存，输出已包含思考；细分字段不再次计入总量。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -96,6 +97,8 @@ pub(super) struct Sample {
     /// OpenCode fork 会改写消息 ID，保留只含原始请求元数据的摘要以识别复制历史。
     #[serde(default)]
     pub copy_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "RequestIdentities::is_empty")]
+    pub request_identities: RequestIdentities,
     /// Codex 保留累计快照，跨分页建立基线后才转为一次调用的增量。
     pub cumulative: bool,
     #[serde(default)]
@@ -104,6 +107,22 @@ pub(super) struct Sample {
     pub last_usage: Option<Tokens>,
     #[serde(default)]
     pub thread_total: Option<Tokens>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(super) struct RequestIdentities {
+    pub keys: BTreeSet<String>,
+    pub steps: BTreeSet<String>,
+}
+impl RequestIdentities {
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.steps.is_empty()
+    }
+
+    pub fn merge(&mut self, next: &Self) {
+        self.keys.extend(next.keys.iter().cloned());
+        self.steps.extend(next.steps.iter().cloned());
+    }
 }
 impl Sample {
     pub fn migrate_availability(&mut self) {

@@ -39,6 +39,17 @@ pub(super) fn stamp(path: &Path) -> std::io::Result<Stamp> {
         changed_ns: m.ctime_nsec(),
     })
 }
+pub(super) const JSONL_PARSER_VERSION: u8 = 3;
+
+pub(super) fn sqlite_stamps(path: &Path) -> std::io::Result<Vec<Stamp>> {
+    let mut stamps = vec![stamp(path)?];
+    match stamp(&crate::agents::scanning::sqlite_wal_path(path)) {
+        Ok(value) => stamps.push(value),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(stamps)
+}
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub(super) struct FileCache {
     /// 缓存结构/提取语义升级时重读现存源；不改变累计账本或旧缓存的定位键。
@@ -486,7 +497,7 @@ pub(super) fn read_file(
     force: bool,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
-    let force = force || old.is_some_and(|old| old.parser_version < 3);
+    let force = force || old.is_some_and(|old| old.parser_version < JSONL_PARSER_VERSION);
     let current = stamp(path).map_err(|e| diagnostics::io("usage_sync", "path_metadata", path, &e))?;
     if !force && old.is_some_and(|old| old.problem.is_none() && old.stamps == [current.clone()]) {
         return Ok((old.unwrap().clone(), 0));
@@ -536,7 +547,7 @@ pub(super) fn read_file(
     let mut bytes_read = 0;
     let mut line = Vec::new();
     result.pending = false;
-    result.parser_version = 3;
+    result.parser_version = JSONL_PARSER_VERSION;
     loop {
         if cancel() {
             return Err("统计已取消".into());

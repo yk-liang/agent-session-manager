@@ -6,7 +6,7 @@
 
 在一个 macOS 应用里，找回 AI 编程会话、切换配置、查看 Token 用量。
 
-支持 **Qoder、Claude Code、Codex、OpenCode 和 Pi**。
+支持 **Qoder、Claude Code、Codex、OpenCode、Pi 和 Antigravity**。
 
 [下载最新版本](https://github.com/yk-liang/agent-session-manager/releases/latest) · [反馈问题](https://github.com/yk-liang/agent-session-manager/issues)
 
@@ -23,6 +23,7 @@
 ![按项目浏览 Codex 会话，阅读 Markdown 对话并恢复会话](docs/images/sessions.png)
 
 Codex 支持 CLI、IDE 与桌面应用生成的本地会话；OpenCode 兼容 v1 和 v2 数据格式。
+Antigravity 读取本地 SQLite 会话库，支持浏览、搜索和用量统计。CLI 会话可以通过 `agy` 恢复。Antigravity 会话在本应用中为只读。
 
 Codex 会话页支持普通 `.jsonl` 和 Zstandard 压缩的 `.jsonl.zst` 日志，按逻辑会话合并分页。会话页列出未归档的用户会话，用量统计同时涵盖已归档日志。
 
@@ -83,8 +84,11 @@ Codex 会话页支持普通 `.jsonl` 和 Zstandard 压缩的 `.jsonl.zst` 日志
 | Codex | `~/.codex/sessions/`、`~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |
 | Pi | `~/.pi/agent/sessions/` |
+| Antigravity | `~/.gemini/antigravity*/conversations/`、`~/.config/antigravity/conversations/` |
 
-五类 Agent 中可识别的自动临时工作区（如系统临时目录中的 pytest 运行目录）会归入“未归属项目”。真实 Git 仓库和 Codex 显式项目归属优先；普通手工临时目录仍保留原分组。归组仅影响展示，不移动日志或修改会话工作目录。
+可用 `ANTIGRAVITY_DATA_DIR` 指定数据根目录或会话目录，多个目录用逗号分隔。
+
+各 Agent 中可识别的自动临时工作区（如系统临时目录中的 pytest 运行目录）会归入“未归属项目”。真实 Git 仓库和 Codex 显式项目归属优先；普通手工临时目录仍保留原分组。归组仅影响展示，不移动日志或修改会话工作目录。
 
 Qoder 会话优先展示桌面端已保存的会话名；没有桌面端记录时使用日志命名，未命名会话以首次有效提问兜底。模型标签对应会话最后一次运行配置，名称优先取当前官方模型目录，离线时使用已有名称或历史日志兜底。
 

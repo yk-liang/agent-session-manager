@@ -60,6 +60,7 @@ fn relevant(agent: &str, roots: &[PathBuf], event: &Event) -> Changes {
     if event.need_rescan() {
         return Changes::All;
     }
+    let input = super::source::Source::for_agent(agent);
     let mut paths = BTreeSet::new();
     for path in &event.paths {
         for root in roots {
@@ -79,18 +80,8 @@ fn relevant(agent: &str, roots: &[PathBuf], event: &Event) -> Changes {
             {
                 continue;
             }
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if agent == "opencode" {
-                if path.parent() != Some(root) {
-                    continue;
-                }
-                if name.starts_with("opencode") && name.ends_with(".db") {
-                    paths.insert(path.clone());
-                } else if name.starts_with("opencode") && name.ends_with(".db-wal") {
-                    paths.insert(path.with_file_name(name.trim_end_matches("-wal")));
-                }
-            } else if name.ends_with(".jsonl") || agent == "codex" && name.ends_with(".jsonl.zst") {
-                paths.insert(path.clone());
+            if let Some(path) = input.changed_file(root, path) {
+                paths.insert(path);
             }
         }
     }
@@ -432,6 +423,16 @@ mod tests {
             relevant("opencode", &[root.clone()], &event("opencode.db-shm")),
             Changes::Empty
         ));
+        assert!(matches!(
+            relevant("antigravity", &[root.clone()], &event("session.db-wal")),
+            Changes::Paths(paths) if paths == BTreeSet::from([root.join("session.db")])
+        ));
+        for name in ["session.db-shm", "conversation_summaries.db", "settings.json"] {
+            assert!(matches!(
+                relevant("antigravity", &[root.clone()], &event(name)),
+                Changes::Empty
+            ));
+        }
         assert!(matches!(
             relevant("claude", &[root.clone()], &event("settings.json")),
             Changes::Empty

@@ -6,7 +6,7 @@
 
 Find past AI coding sessions, switch configurations, and track token usage in one macOS app.
 
-Supports **Qoder, Claude Code, Codex, OpenCode, and Pi**.
+Supports **Qoder, Claude Code, Codex, OpenCode, Pi, and Antigravity**.
 
 [Download the latest release](https://github.com/yk-liang/agent-session-manager/releases/latest) · [Report an issue](https://github.com/yk-liang/agent-session-manager/issues)
 
@@ -23,6 +23,7 @@ Screenshots show the current source build with fictional projects, conversations
 ![Codex sessions grouped by project, with Markdown conversation history and resume controls](docs/images/sessions.png)
 
 Codex support includes local sessions from the CLI, IDE integrations, and desktop app. OpenCode supports both v1 and v2 data formats.
+Antigravity reads local SQLite conversations for browsing, search, and usage. CLI sessions can be resumed with `agy`. Antigravity conversations are read-only in this app.
 
 Codex session browsing supports both `.jsonl` and Zstandard-compressed `.jsonl.zst` logs, with log pages merged into one conversation. The Sessions view lists unarchived user conversations; Usage also covers archived logs.
 
@@ -83,8 +84,11 @@ The app reads existing local Agent data. If no sessions appear, check that the A
 | Codex | `~/.codex/sessions/`, `~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |
 | Pi | `~/.pi/agent/sessions/` |
+| Antigravity | `~/.gemini/antigravity*/conversations/`, `~/.config/antigravity/conversations/` |
 
-Recognized automatic temporary workspaces, such as pytest runs under a system temporary directory, appear under **未归属项目 (Unassigned)** for all five Agents. Real Git repositories and explicit Codex project assignments take precedence; ordinary manual temporary directories keep their existing groups. Grouping only affects display: logs and session working directories are unchanged.
+`ANTIGRAVITY_DATA_DIR` accepts a data root or a conversations directory. Use commas to specify multiple directories.
+
+Recognized automatic temporary workspaces, such as pytest runs under a system temporary directory, appear under **未归属项目 (Unassigned)** for all supported Agents. Real Git repositories and explicit Codex project assignments take precedence; ordinary manual temporary directories keep their existing groups. Grouping only affects display: logs and session working directories are unchanged.
 
 Qoder sessions use saved desktop titles when available, then log titles or the first meaningful user prompt. Model badges use the session's latest runtime selection and prefer names from the current official model list, falling back to previously resolved names or historical logs when offline.
 

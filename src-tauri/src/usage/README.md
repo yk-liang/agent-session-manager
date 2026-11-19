@@ -44,10 +44,11 @@ Qoder / Claude Code 的适配器复用删除校验生成目标清单，删除前
 - Codex 优先使用明确的单次 last 计量，累计只用于推进/去重与缺失单次时的增量。逐响应 ledger 和通知可能使用不同累计范围，因此先匹配响应 ID/单次计量，再补未覆盖增量。history_base 分页采用精确边界，不套用 fork 的时间启发式。
 - 旧 fork 可把父请求改写到创建时刻；参考上游连续 1 秒回放窗口，并要求父记录存在、首条紧邻创建、至少两条不同累计值。停止连续回放后保留子线程新调用。subagent_history_start_ordinal 在本机部分旧日志会推进到真实调用之后，不能单独作为继承截止线。
 - Pi 扫描所有已保存分支及额外 usage 类型；短 entry ID 仅在同一父分支链内去重。OpenCode 的 message 计量不与 step-finish 相加，模型来自历史记录。
+- Antigravity 从各会话库的 `steps` 和 `gen_metadata` 读取 protobuf 计量和计时。相同消息、响应或提供商 ID 的副本合并，身份缺失时使用确认的步骤匹配。缓存计入输入，思考计入输出。字段参考 [ccusage Antigravity 适配器](https://github.com/ccusage/ccusage/tree/v20.0.51/rust/adapters/antigravity) 和 [agent-events](https://github.com/haowang02/agent-events)。
 - OpenCode fork 会生成新消息 ID、复制原始时间与 tokens，且不保证根 fork 有 parent_id。使用原始请求创建时间/模型/Agent/path 的摘要与会话创建时间识别继承历史：原始调用即使时间和计数相同也分别保留，副本只补原始调用未保留的历史，分叉后新调用分别计量。来源：[OpenCode v1.19.3 fork](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/session/session.ts#L653-L689)。已有旧观测按消息 ID 补充元数据，无法重读的旧观测保留并标记去重不完整，不凭相同计数删除历史。
 - 输入/输出分别记录字段可用性及缺失覆盖；同一调用的最终完整快照可补齐早期缺失分项，汇总遇到任何缺分项调用则保留 incomplete。旧账本没有这类标记时只保守识别完整记录/正值，旧的部分记录不能凭零推断“确实用量为零”。
 
-修改映射/解析字段时更新对应来源的缓存版本；JSONL 来源使用 `FileCache.parser_version=3`，OpenCode 为 `4`。0.1.31 升级会重读现存源以补充请求元数据；0.1.32/0.1.33 复用该解析版本及偏移，保留原缓存 scope 以迁移已删日志。账本不能跟随缓存版本删除。界面取消不发布半份报表；后台每份来源完整解析、事务提交后独立保留，后续大文件/失败不回滚已入账来源。历史损坏、缺基线或语义不明应保留完整性标记。
+修改映射/解析字段时更新对应来源的缓存版本；JSONL 来源使用 `FileCache.parser_version=3`，OpenCode 为 `4`，Antigravity 为 `1`。0.1.31 升级会重读现存源以补充请求元数据；0.1.32/0.1.33 复用该解析版本及偏移，保留原缓存 scope 以迁移已删日志。账本不能跟随缓存版本删除。界面取消不发布半份报表；后台每份来源完整解析、事务提交后独立保留，后续大文件/失败不回滚已入账来源。历史损坏、缺基线或语义不明应保留完整性标记。
 
 验证入口：`cargo test --offline --locked usage:: -- --test-threads=1`、`cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`、`npm run test:e2e -- usage` 和 `npm run test:integration -- collector`。后者独立启动 release 采集进程，仅使用临时五类日志/账本，验证无窗口采集、单实例、目录创建、重启/删除保留、暂停与真实 CPU/内存。本机对账和已知差异见 `docs/research/agent-usage-2026-10-21.md` 的实施记录。后续维护由本项目负责；参考上游时先锁定 revision，再核对字段和回归期望，不能只为对齐总数而覆盖已验证的本地规则。
 

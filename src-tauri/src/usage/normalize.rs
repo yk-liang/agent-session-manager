@@ -36,6 +36,8 @@ pub(super) fn unique(samples: impl IntoIterator<Item = Sample>) -> Vec<Sample> {
             }
             let mut details = old.details.clone();
             details.refine(&s.details);
+            let mut identities = old.request_identities.clone();
+            identities.merge(&s.request_identities);
             let mut request = old.request.clone();
             if old.replayed && !s.replayed {
                 request = s.request.clone();
@@ -47,6 +49,7 @@ pub(super) fn unique(samples: impl IntoIterator<Item = Sample>) -> Vec<Sample> {
             }
             old.details = details;
             old.request = request;
+            old.request_identities = identities;
         } else {
             by_key.insert(s.key.clone(), s);
         }
@@ -113,6 +116,9 @@ pub(super) fn source_keys(agent: &str, path: &Path, file: &FileCache) -> BTreeSe
         if let Some(fingerprint) = &sample.copy_fingerprint {
             keys.insert(format!("copy:{fingerprint}"));
         }
+        keys.extend(
+            sample.request_identities.keys.iter().map(|key| format!("request:{key}")),
+        );
     }
     if matches!(agent, "claude" | "qoder") {
         for key in &file.state.unmeasured_ids {
@@ -258,6 +264,11 @@ pub(super) fn records(
     }
     if agent == "opencode" {
         return super::opencode::records(files);
+    }
+    if agent == "antigravity" {
+        let records = super::antigravity::records(files);
+        let partial = records.iter().any(|sample| sample.partial && sample.tokens.total() > 0);
+        return (records, partial, Vec::new());
     }
     let mut partial = false;
     let mut out = Vec::new();

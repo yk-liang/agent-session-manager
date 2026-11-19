@@ -383,6 +383,7 @@ fn empty_sample(
         complete: true,
         replayed: false,
         copy_fingerprint: None,
+        request_identities: Default::default(),
         cumulative: false,
         response_id: None,
         last_usage: None,

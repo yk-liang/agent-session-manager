@@ -83,6 +83,21 @@ impl Model {
         })
     }
 
+    pub(crate) fn remember(&self, models: &mut HashMap<u64, Model>) {
+        if let Some(id) = self
+            .id
+            .filter(|_| self.name.is_some() || self.display.is_some())
+        {
+            let entry = models.entry(id).or_default();
+            if self.name.is_some() {
+                entry.name = self.name.clone();
+            }
+            if self.display.is_some() {
+                entry.display = self.display.clone();
+            }
+        }
+    }
+
     pub(crate) fn resolve(
         &self,
         usage_id: Option<u64>,

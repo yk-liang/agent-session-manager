@@ -572,8 +572,8 @@ fn source_specific_cache_and_reasoning_rules_never_double_count() {
 }
 
 #[test]
-fn input_output_availability_distinguishes_unknown_zero_and_partial_for_every_agent() {
-    for agent in AGENTS {
+fn json_usage_distinguishes_unknown_zero_and_partial_for_every_agent() {
+    for agent in ["qoder", "claude", "codex", "opencode", "pi"] {
         let (input, output, total_key) = match agent {
             "opencode" => ("input", "output", "total"),
             "pi" => ("input", "output", "totalTokens"),

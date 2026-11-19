@@ -1,5 +1,5 @@
 use super::{
-    cache::{stamp, FileCache},
+    cache::{sqlite_stamps, FileCache},
     parse::{normalize, recorded_fields, timestamp},
     types::*,
 };
@@ -10,19 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) fn stamps(path: &Path) -> std::io::Result<Vec<super::cache::Stamp>> {
-    let wal = path.with_file_name(format!(
-        "{}-wal",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    let mut stamps = vec![stamp(path)?];
-    match stamp(&wal) {
-        Ok(value) => stamps.push(value),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    Ok(stamps)
-}
+pub(super) const PARSER_VERSION: u8 = 4;
 
 pub(super) fn read(
     path: &Path,
@@ -30,8 +18,8 @@ pub(super) fn read(
     force: bool,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
-    let force = force || old.is_some_and(|old| old.parser_version < 4);
-    let stamps = stamps(path).map_err(|e| e.to_string())?;
+    let force = force || old.is_some_and(|old| old.parser_version < PARSER_VERSION);
+    let stamps = sqlite_stamps(path).map_err(|e| e.to_string())?;
     if !force && old.is_some_and(|old| old.problem.is_none() && old.stamps == stamps) {
         return Ok((old.unwrap().clone(), 0));
     }
@@ -69,7 +57,7 @@ pub(super) fn read(
         })
         .map_err(|e| e.to_string())?;
     let mut result = FileCache {
-        parser_version: 4,
+        parser_version: PARSER_VERSION,
         stamps,
         ..Default::default()
     };
@@ -117,6 +105,7 @@ pub(super) fn read(
             complete: true,
             replayed: created.zip(session_created).is_some_and(|(t, s)| t < s),
             copy_fingerprint,
+            request_identities: Default::default(),
             cumulative: false,
             response_id: None,
             last_usage: None,

@@ -1,5 +1,5 @@
 //! 采集只提交变化来源的计量，不为后台文件事件生成全历史报表。
-use super::{cache, ledger, opencode, scope, Store};
+use super::{ledger, scope, source::Source, Store};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -32,6 +32,7 @@ pub(super) fn collect_with_progress(
     cancel: &dyn Fn() -> bool,
     progress: &dyn Fn(usize, usize),
 ) -> Result<Ingested, String> {
+    let input = Source::for_agent(agent);
     let key = scope(agent, roots);
     if store.ledger()?.updated(agent).is_none() {
         // 从只有可重建缓存的旧版本升级时，先接入已采集数据，包括已删除的源文件。
@@ -75,22 +76,14 @@ pub(super) fn collect_with_progress(
             _ => {}
         }
         result.checked_files += 1;
-        let stamps = if agent == "opencode" {
-            opencode::stamps(path)
-        } else {
-            cache::stamp(path).map(|s| vec![s])
-        }
-        .map_err(|error| crate::agents::diagnostics::io("usage_sync", "source_stamps", path, &error))?;
-        if store.unchanged(&key, path, &stamps, if agent == "opencode" { 4 } else { 3 }) {
+        let stamps = input.stamps(path)
+            .map_err(|error| crate::agents::diagnostics::io("usage_sync", "source_stamps", path, &error))?;
+        if store.unchanged(&key, path, &stamps, input.parser_version()) {
             continue;
         }
         let old = store.load_file(&key, path);
-        let (file, bytes) = if agent == "opencode" {
-            opencode::read(path, old.as_ref(), false, cancel)
-        } else {
-            cache::read_file(path, agent, old.as_ref(), false, cancel)
-        }
-        .map_err(|e| super::CollectionError::source(path, e).to_string())?;
+        let (file, bytes) = input.read(path, old.as_ref(), false, cancel)
+            .map_err(|e| super::CollectionError::source(path, e).to_string())?;
         let changed = old.as_ref().is_none_or(|old| {
             old.stamps != file.stamps
                 || old.parser_version != file.parser_version
