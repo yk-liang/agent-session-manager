@@ -42,6 +42,12 @@ fn known_name(id: u64) -> Option<&'static str> {
     })
 }
 
+fn placeholder_id(name: &str) -> Option<u64> {
+    name.to_ascii_lowercase()
+        .strip_prefix("model_placeholder_m")?
+        .parse::<u64>().ok()?.checked_add(1000)
+}
+
 fn effort(value: &str) -> Option<&str> {
     let suffix = value
         .rsplit_once(" (")
@@ -89,8 +95,10 @@ impl Model {
             .filter(|_| self.name.is_some() || self.display.is_some())
         {
             let entry = models.entry(id).or_default();
-            if self.name.is_some() {
-                entry.name = self.name.clone();
+            if let Some(name) = &self.name {
+                if entry.name.is_none() || placeholder_id(name).is_none() {
+                    entry.name = Some(name.clone());
+                }
             }
             if self.display.is_some() {
                 entry.display = self.display.clone();
@@ -113,19 +121,16 @@ impl Model {
         let display = context
             .and_then(|m| m.display.as_deref())
             .or_else(|| observed.and_then(|m| m.display.as_deref()));
-        let raw = context
-            .and_then(|m| m.name.as_deref())
-            .or_else(|| observed.and_then(|m| m.name.as_deref()));
+        let names = [context, observed].into_iter().flatten()
+            .filter_map(|m| m.name.as_deref());
+        let raw = names.clone().find(|name| placeholder_id(name).is_none());
+        let id = id.or_else(|| names.filter_map(placeholder_id).next());
         let name = id
             .and_then(known_name)
             .map(str::to_owned)
             .or_else(|| {
                 raw.and_then(|raw| {
                     let lower = raw.to_ascii_lowercase();
-                    if let Some(number) = lower.strip_prefix("model_placeholder_m") {
-                        return known_name(number.parse::<u64>().ok()?.checked_add(1000)?)
-                            .map(str::to_owned);
-                    }
                     Some(
                         match lower.as_str() {
                             "gemini-pro-default" | "gemini-pro-agent" => "gemini-3.1-pro",
@@ -135,6 +140,7 @@ impl Model {
                             | "gemini-3-flash-agent-a"
                             | "gemini-3-flash-agent-b" => "gemini-3.5-flash-high",
                             "gemini-3-flash-c" | "gemini-3-flash" => "gemini-3-flash-preview",
+                            "model_openai_gpt_oss_120b_medium" => "gpt-oss-120b-medium",
                             _ => raw,
                         }
                         .to_owned(),
@@ -143,13 +149,18 @@ impl Model {
             })
             .or_else(|| {
                 display.map(|name| {
-                    name.split(" (")
+                    let id = name.split(" (")
                         .next()
                         .unwrap_or(name)
                         .to_lowercase()
                         .split_whitespace()
                         .collect::<Vec<_>>()
-                        .join("-")
+                        .join("-");
+                    if id.starts_with("claude-") {
+                        id.replace('.', "-")
+                    } else {
+                        id
+                    }
                 })
             })
             .or_else(|| id.map(|id| format!("antigravity-model-{id}")))

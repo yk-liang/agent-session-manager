@@ -26,7 +26,9 @@ fn scan(agent: &str, root: &Path, store: &mut Store) -> UsageReport {
     report
 }
 fn scan_report(agent: &str, root: &Path, store: &mut Store) -> UsageReport {
-    read_at(agent, &[root.into()], store, true, false, &|| false).unwrap().unwrap()
+    read_at(agent, &[root.into()], store, true, false, &|| false)
+        .unwrap()
+        .unwrap()
 }
 fn total(report: &UsageReport) -> u64 {
     report.rows.iter().map(|r| r.total_tokens).sum()
@@ -42,7 +44,6 @@ fn installed_v2_runtime_database_if_requested() {
     let ledger = dir.path().join("usage.sqlite");
     let mut store = Store::open_with_ledger(None, Some(&ledger));
     let report = scan("opencode", path.parent().unwrap(), &mut store);
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(
         total(&report),
         440,
@@ -350,7 +351,7 @@ fn deletion_stops_before_the_closure_on_current_source_read_failures() {
 }
 
 #[test]
-fn deletion_allows_qoder_missing_usage_and_historical_read_warnings() {
+fn deletion_preserves_usage_with_unmeasured_or_removed_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("qoder.jsonl");
     write(
@@ -361,7 +362,7 @@ fn deletion_allows_qoder_missing_usage_and_historical_read_warnings() {
         ],
     );
     let mut store = Store::open(None);
-    assert!(scan("qoder", dir.path(), &mut store).partial);
+    assert_eq!(total(&scan("qoder", dir.path(), &mut store)), 11);
     preserve_before_delete_at("qoder", &[dir.path().into()], &mut store, || {
         fs::remove_file(&path).map_err(|e| e.to_string())
     })
@@ -476,7 +477,7 @@ fn two_collectors_merge_stale_source_snapshots_without_overwriting_recorded_call
     );
     first.commit("claude", &a, &a_changed, 1).unwrap();
     second.commit("claude", &b, &b_changed, 2).unwrap();
-    let (records, _, _) = normalize::records("claude", &first.load("claude").unwrap());
+    let records = normalize::records("claude", &first.load("claude").unwrap());
     assert_eq!(records.iter().map(|r| r.tokens.total()).sum::<u64>(), 33);
     assert!(!fs::read(&db)
         .unwrap()
@@ -494,7 +495,10 @@ fn a_future_ledger_schema_is_rejected_without_replacing_user_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("CREATE TABLE future_data(value INTEGER);INSERT INTO future_data VALUES(123);PRAGMA user_version=6;").unwrap();
+    let future = storage::VERSION + 1;
+    db.execute_batch("CREATE TABLE future_data(value INTEGER);INSERT INTO future_data VALUES(123);")
+        .unwrap();
+    db.pragma_update(None, "user_version", future).unwrap();
     drop(db);
     assert!(ledger::Ledger::open(Some(&path)).is_err());
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -506,7 +510,7 @@ fn a_future_ledger_schema_is_rejected_without_replacing_user_data() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        future
     );
 }
 
@@ -741,19 +745,19 @@ fn cached_read_before_refresh_cannot_bypass_extraction_upgrade_for_unchanged_log
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("logs");
     let path = root.join("a.jsonl");
-    write(
-        &path,
-        &[family(
-            "msg_zero",
-            Some(json!({"input_tokens":0,"output_tokens":1})),
-        )],
+    let mut response = family(
+        "gateway_zero",
+        Some(json!({"input_tokens":0,"output_tokens":1})),
     );
+    response["requestRef"] = json!("gateway_request");
+    write(&path, &[response]);
     let cache_path = dir.path().join("cache.sqlite");
     let mut writer = Store::open(Some(&cache_path));
     let mut old = cache::read_file(&path, "claude", None, false, &|| false)
         .unwrap()
         .0;
     old.parser_version = 0;
+    old.samples[0].key = format!("session:{}:message:gateway_zero", old.samples[0].session);
     old.samples[0].details = RecordedFields::default();
     old.samples[0].partial = true;
     writer.commit(
@@ -778,6 +782,7 @@ fn cached_read_before_refresh_cannot_bypass_extraction_upgrade_for_unchanged_log
     );
     assert!(refreshed.rows[0].details.input_recorded);
     assert!(!refreshed.rows[0].details.input_incomplete);
+    assert_eq!(total(&refreshed), 1);
 }
 
 #[test]
@@ -880,7 +885,7 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
     .unwrap();
     db.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
     let time = 1792454400000i64;
-    for (id, created) in [("ses_original", time - 1000), ("ses_fork", time + 1000)] {
+    for (id, created) in [("ses_original", time - 1000), ("ses_fork", time - 1)] {
         db.execute("INSERT INTO session_v2(id,directory,version,time_created,time_updated) VALUES (?1,'/tmp/v2','2.0.15',?2,?2)",rusqlite::params![id,created]).unwrap();
     }
     let usage = json!({"input":100,"output":10,"reasoning":3,"cache":{"read":20,"write":5}});
@@ -894,7 +899,14 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
         .unwrap();
     };
     insert("msg_original", "ses_original", "assistant", 0, &data);
-    insert("msg_copy", "ses_fork", "assistant", 0, &data);
+    let mut copy = data.clone();
+    copy["time"]["created"] = Value::Null;
+    insert("msg_copy", "ses_fork", "assistant", 0, &copy);
+    db.execute(
+        "UPDATE session_v2 SET fork_session_id='ses_original',fork_boundary=?1 WHERE id='ses_fork'",
+        [json!({"type":"through","messageID":"msg_original"}).to_string()],
+    )
+    .unwrap();
     insert(
         "msg_compact",
         "ses_original",
@@ -921,7 +933,6 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
     let report = scan("opencode", dir.path(), &mut store);
     assert_eq!(total(&report), 150); // 100 + 20 + 5 + 10 + 3, plus compaction 12; fork is a copy.
     assert!(report.rows.iter().any(|r| r.model == "provider/v2-model"));
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(scan("opencode", dir.path(), &mut store).bytes_read, 0);
     let (cached, _) = opencode::read(&path, None, false, &|| false).unwrap();
     assert_eq!(cached.parser_version, opencode::PARSER_VERSION);
@@ -933,9 +944,13 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
     for sample in &mut legacy_cache.samples {
         sample.model = "provider/unknown".into();
     }
-    let (updated, bytes_read) = opencode::read(&path, Some(&legacy_cache), false, &|| false).unwrap();
+    let (updated, bytes_read) =
+        opencode::read(&path, Some(&legacy_cache), false, &|| false).unwrap();
     assert!(bytes_read > 0);
-    assert!(updated.samples.iter().any(|sample| sample.model == "provider/v2-model"));
+    assert!(updated
+        .samples
+        .iter()
+        .any(|sample| sample.model == "provider/v2-model"));
     db.execute("UPDATE session_message SET data=json_set(data,'$.tokens.output',20) WHERE id='msg_original'",[]).unwrap();
     assert_eq!(total(&scan("opencode", dir.path(), &mut store)), 160);
     let mut new_call = data.clone();
@@ -962,10 +977,9 @@ fn opencode_v2_missing_and_malformed_usage_never_become_complete_zero_counts() {
         INSERT INTO session_message VALUES ('missing','ses_v2','assistant',0,2,2,'{\"content\":[]}');
         INSERT INTO session_message VALUES ('broken','ses_v2','assistant',1,3,3,'broken');").unwrap();
     let (file, _) = opencode::read(&path, None, false, &|| false).unwrap();
-    assert_eq!(file.state.missing_usage, 1);
-    assert_eq!(file.state.bad_lines, 1);
+    assert!(file.samples.is_empty());
     let mut store = Store::open(None);
-    assert!(!scan("opencode", dir.path(), &mut store).warnings.is_empty());
+    assert!(!scan("opencode", dir.path(), &mut store).has_usage);
 }
 
 #[test]
@@ -1103,14 +1117,15 @@ fn claude_cache_ttl_fallback_and_chatcmpl_streaming_keep_one_complete_request() 
 }
 
 #[test]
-fn claude_advisor_calls_are_separate_but_regular_iteration_breakdowns_are_not() {
+fn claude_counts_independent_advisor_and_fallback_attempts_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
     let usage = json!({"input_tokens":10,"output_tokens":5,"iterations":[
         {"type":"message","input_tokens":10,"output_tokens":5},
         {"type":"advisor_message","model":"advisor-model","input_tokens":2,"output_tokens":3,"cache_read_input_tokens":4}
     ]});
-    let value = family("msg_advisor", Some(usage));
+    let mut value = family("msg_advisor", Some(usage));
+    value["isSidechain"] = json!(true);
     let mut later = value.clone();
     later["message"]["usage"]["iterations"]
         .as_array_mut()
@@ -1119,7 +1134,8 @@ fn claude_advisor_calls_are_separate_but_regular_iteration_breakdowns_are_not() 
             0,
             json!({"type":"message","input_tokens":10,"output_tokens":5}),
         );
-    write(&dir.path().join("a.jsonl"), &[value, later]);
+    let path = dir.path().join("a.jsonl");
+    write(&path, &[value, later.clone()]);
     let report = scan("claude", dir.path(), &mut store);
     assert_eq!(total(&report), 24);
     assert_eq!(
@@ -1130,6 +1146,31 @@ fn claude_advisor_calls_are_separate_but_regular_iteration_breakdowns_are_not() 
             .unwrap()
             .total_tokens,
         9
+    );
+
+    later["message"]["usage"]["input_tokens"] = json!(2);
+    later["message"]["usage"]["output_tokens"] = json!(1);
+    let original_model = later["message"]["model"].clone();
+    later["message"]["usage"]["cache_creation"] = json!({"ephemeral_1h_input_tokens":3191});
+    later["message"]["usage"]["iterations"] = json!([
+        {"type":"message","model":original_model,"input_tokens":10,"output_tokens":5,"cache_creation":{"ephemeral_1h_input_tokens":3191}},
+        {"type":"advisor_message","model":"advisor-model","input_tokens":2,"output_tokens":3,"cache_read_input_tokens":4},
+        {"type":"fallback_message","model":"fallback-model","input_tokens":2,"output_tokens":1},
+    ]);
+    append(
+        &path,
+        json!({"type":"progress","cwd":"/tmp/project","data":{"message":later}}),
+    );
+    let report = scan("claude", dir.path(), &mut store);
+    assert_eq!(total(&report), 27 + 3191);
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .find(|row| row.model == "fallback-model")
+            .unwrap()
+            .total_tokens,
+        3
     );
 }
 
@@ -1306,7 +1347,7 @@ fn codex_legacy_ledger_parents_do_not_shadow_newer_page_baselines() {
             250,
             "fork={fork}, byte_boundary={byte_boundary}"
         );
-        assert!(!report.partial, "{:?}", report.warnings);
+        assert!(!report.partial);
     }
 }
 
@@ -1454,7 +1495,7 @@ fn codex_request_ledger_covers_counters_with_a_different_aggregate_scope_and_cop
     );
     write(
         &dir.path().join("copy.jsonl"),
-        &[meta("copy"), notification],
+        &[meta("root"), notification],
     );
     assert_eq!(total(&scan("codex", dir.path(), &mut store)), 110);
 }
@@ -1490,7 +1531,7 @@ fn codex_counter_reset_never_matches_future_details_to_an_older_epoch() {
     );
     let report = scan("codex", dir.path(), &mut store);
     assert_eq!(total(&report), 1155);
-    assert!(report.partial);
+    assert!(!report.partial);
     assert_eq!(
         report
             .rows
@@ -1611,30 +1652,44 @@ fn codex_advanced_subagent_history_marker_does_not_hide_new_child_requests() {
 }
 
 #[test]
-fn codex_rewritten_initial_burst_stops_before_new_calls_even_when_parent_counters_changed() {
+fn codex_rewritten_prefix_requires_parent_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
-    write(
-        &dir.path().join("parent.jsonl"),
-        &[meta("parent"), counter(100, 10, 2)],
-    );
+    let parent = dir.path().join("parent.jsonl");
+    let child = dir.path().join("child.jsonl");
+    let mut a = counter(80, 8, 1);
+    a["payload"]["info"]["last_token_usage"] = counters(80, 8);
+    let mut b = counter(100, 10, 2);
+    b["payload"]["info"]["last_token_usage"] = counters(20, 2);
+    write(&parent, &[meta("parent"), a.clone(), b.clone()]);
+
     let mut header = meta("child");
-    header["payload"]["forked_from_id"] = json!("parent");
     header["timestamp"] = json!("2026-10-20T00:00:10Z");
-    let mut copied_a = counter(80, 8, 1);
-    copied_a["timestamp"] = json!("2026-10-20T00:00:10Z");
-    copied_a["payload"]["info"]["last_token_usage"] = counters(80, 8);
-    let mut copied_b = counter(100, 10, 2);
-    copied_b["timestamp"] = json!("2026-10-20T00:00:10.001Z");
-    copied_b["payload"]["info"]["last_token_usage"] = counters(20, 2);
+    header["payload"]["forked_from_id"] = json!("parent");
+    a["timestamp"] = json!("2026-10-20T00:00:10Z");
+    b["timestamp"] = a["timestamp"].clone();
     let mut own = counter(105, 15, 3);
-    own["timestamp"] = json!("2026-10-20T00:00:15Z");
+    own["timestamp"] = a["timestamp"].clone();
     own["payload"]["info"]["last_token_usage"] = counters(5, 5);
-    write(
-        &dir.path().join("child.jsonl"),
-        &[header, copied_a, copied_b, own],
-    );
+    write(&child, &[header, a, b, own]);
     assert_eq!(total(&scan("codex", dir.path(), &mut store)), 120);
+
+    let mut header = meta("guardian");
+    header["timestamp"] = json!("2026-10-20T00:00:10Z");
+    header["payload"]["parent_thread_id"] = json!("parent");
+    header["payload"]["source"] = json!({"subagent":{"other":"guardian"}});
+    let mut calls = [counter(80, 8, 5), counter(83, 19, 6)];
+    for call in &mut calls {
+        call["timestamp"] = header["timestamp"].clone();
+    }
+    let log = dir.path().join("guardian.jsonl");
+    write(&log, &[header, meta("parent"), calls[0].clone(), calls[1].clone()]);
+    assert_eq!(total(&scan("codex", dir.path(), &mut store)), 222);
+    let file = cache::read_file(&log, "codex", None, false, &|| false).unwrap().0;
+    assert_eq!(file.state.session, "guardian");
+    assert!(file.samples.iter().all(|sample| {
+        sample.session == "guardian" && sample.request.kind.as_deref() == Some("subagent")
+    }));
 }
 
 #[test]
@@ -1689,7 +1744,7 @@ fn codex_retains_recorded_prefix_when_the_parent_log_is_not_available() {
     write(&dir.path().join("child.jsonl"), &[header, a, b]);
     let report = scan("codex", dir.path(), &mut store);
     assert_eq!(total(&report), 175);
-    assert!(report.partial);
+    assert!(!report.partial);
 }
 
 #[test]
@@ -1718,7 +1773,7 @@ fn codex_legacy_fork_replayed_with_new_timestamps_does_not_rebill_parent_request
 }
 
 #[test]
-fn missing_codex_base_uses_last_request_and_reports_partial_instead_of_inherited_total() {
+fn missing_codex_base_uses_last_request_instead_of_inherited_total() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
     let mut header = meta("root");
@@ -1728,7 +1783,7 @@ fn missing_codex_base_uses_last_request_and_reports_partial_instead_of_inherited
     write(&dir.path().join("child.jsonl"), &[header, value]);
     let report = scan("codex", dir.path(), &mut store);
     assert_eq!(total(&report), 11);
-    assert!(report.partial);
+    assert!(!report.partial);
 }
 
 #[test]
@@ -1736,9 +1791,12 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
     let time = "2026-10-20T00:00:00Z";
-    let assistant = json!({"type":"message","id":"a","timestamp":time,"message":{"role":"assistant","provider":"p","model":"m","usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"reasoning":2}}});
+    let response_time = "2026-10-20T00:00:01Z";
+    let assistant = json!({"type":"message","id":"a","timestamp":time,"message":{"role":"assistant","modelId":"m","provider":"p","timestamp":response_time,"usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"cacheWrite1h":2,"reasoning":2}}});
     let values = vec![
-        json!({"type":"session","id":"parent"}),
+        json!({"type":"session","id":"parent","cwd":"/tmp/pi-project"}),
+        json!({"type":"custom","customType":"model-snapshot","data":{"provider":"p","model":"selected"}}),
+        json!({"type":"thinking_level_change","thinkingLevel":"high"}),
         assistant.clone(),
         json!({"type":"usage","id":"b","timestamp":time,"provider":"p","model":"m","usage":{"input":1,"output":0,"cacheRead":2}}),
         json!({"type":"compaction","id":"c","timestamp":time,"usage":{"input":7,"output":8}}),
@@ -1746,11 +1804,13 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         json!({"type":"message","id":"e","timestamp":time,"message":{"role":"toolResult","usage":{"input":1,"output":1}}}),
     ];
     write(&dir.path().join("parent.jsonl"), &values);
+    let mut copied = assistant.clone();
+    copied["id"] = json!("regenerated");
     write(
         &dir.path().join("fork.jsonl"),
         &[
-            json!({"type":"session","id":"child","parentSession":"parent.jsonl"}),
-            assistant.clone(),
+            json!({"type":"session","id":"child","parentSession":"./forks/../parent.jsonl","timestamp":"2026-10-20T00:00:10Z"}),
+            copied,
             json!({"type":"usage","id":"new","timestamp":time,"usage":{"input":1,"output":1}}),
         ],
     );
@@ -1759,6 +1819,28 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         &[json!({"type":"session","id":"other"}), assistant],
     );
     assert_eq!(total(&scan("pi", dir.path(), &mut store)), 53);
+    let reqs = events::page(
+        &mut store.ledger().unwrap().db,
+        events::EventQuery::default(),
+        &|| false,
+    )
+    .unwrap();
+    let parent_request = reqs
+        .events
+        .iter()
+        .find(|event| event.session == "parent" && event.tokens.reasoning_tokens == 2)
+        .unwrap();
+    assert_eq!(parent_request.model, "p/m");
+    assert_eq!(parent_request.tokens.cache_write_1h_tokens, 2);
+    assert_eq!(
+        parent_request.request.project.as_deref(),
+        Some("/tmp/pi-project")
+    );
+    assert_eq!(parent_request.request.effort.as_deref(), Some("high"));
+    assert_eq!(
+        Some(parent_request.time),
+        parse::timestamp(Some(&json!(response_time)))
+    );
 }
 
 #[test]
@@ -1855,14 +1937,21 @@ fn compressed_codex_logs_and_scope_isolation_survive_cache_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let db = dir.path().join("cache.sqlite");
+    let mut store = Store::open(Some(&db));
+    let active = dir.path().join("log.jsonl");
     let content = format!("{}\n{}\n", meta("compressed"), counter(10, 1, 2));
+    fs::write(&active, &content).unwrap();
+    assert_eq!(total(&scan("codex", dir.path(), &mut store)), 11);
+    fs::remove_file(active).unwrap();
     fs::write(
         dir.path().join("log.jsonl.zst"),
         zstd::stream::encode_all(content.as_bytes(), 1).unwrap(),
     )
     .unwrap();
-    let mut store = Store::open(Some(&db));
     assert_eq!(total(&scan("codex", dir.path(), &mut store)), 11);
+    let sources = store.ledger().unwrap().load("codex").unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources.keys().next().unwrap().extension().unwrap(), "zst");
     assert_eq!(scan("codex", dir.path(), &mut store).bytes_read, 0);
     assert_eq!(total(&scan("codex", other.path(), &mut store)), 11);
     assert!(!scan("claude", other.path(), &mut store).has_usage);

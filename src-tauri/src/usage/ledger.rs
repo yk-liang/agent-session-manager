@@ -1,6 +1,5 @@
 //! 累计用量的持久化原始计量账本。源日志消失只影响读取缓存，不删除已采集计量。
 use super::{cache::FileCache, normalize, types::Sample};
-use crate::agents::diagnostics;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
@@ -26,9 +25,9 @@ impl SyncLock {
             .recursive(true)
             .mode(0o700)
             .create(parent)
-            .map_err(|e| diagnostics::io("usage_sync", "create_ledger_directory", parent, &e))?;
+            .map_err(|e| format!("无法创建用量账本目录：{e}"))?;
         if fs::symlink_metadata(parent)
-            .map_err(|e| diagnostics::io("usage_sync", "ledger_directory_metadata", parent, &e))?
+            .map_err(|e| format!("无法读取用量账本目录：{e}"))?
             .file_type()
             .is_symlink()
         {
@@ -43,10 +42,10 @@ impl SyncLock {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&lock_path)
-            .map_err(|e| diagnostics::io("usage_sync", "open_sync_lock", &lock_path, &e))?;
+            .map_err(|e| format!("无法打开用量同步锁：{e}"))?;
         if !file
             .metadata()
-            .map_err(|e| diagnostics::io("usage_sync", "sync_lock_metadata", &lock_path, &e))?
+            .map_err(|e| format!("无法读取用量同步锁：{e}"))?
             .is_file()
         {
             return Err("用量同步锁必须是普通文件".into());
@@ -63,7 +62,7 @@ impl SyncLock {
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) {
-                return Err(diagnostics::io("usage_sync", "lock", &lock_path, &error));
+                return Err(format!("无法锁定用量账本：{error}"));
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
@@ -81,14 +80,7 @@ impl Drop for SyncLock {
 pub(super) fn reader(path: &Path) -> Result<Connection, String> {
     let db = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ledger::open(None)?.db),
-        Err(e) => {
-            return Err(diagnostics::io(
-                "usage_query",
-                "ledger_path_metadata",
-                path,
-                &e,
-            ))
-        }
+        Err(e) => return Err(format!("无法读取用量账本：{e}")),
         Ok(meta) if !meta.is_file() => return Err("用量账本必须是普通文件".into()),
         Ok(_) => {
             // macOS 的 /var 本身是符号链接；只规范化父目录，仍拒绝账本文件被替换成链接。
@@ -96,7 +88,7 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
                 .parent()
                 .ok_or("用量账本路径无效")?
                 .canonicalize()
-                .map_err(|e| diagnostics::io("usage_query", "resolve_ledger_directory", path, &e))?
+                .map_err(|e| format!("无法解析用量账本目录：{e}"))?
                 .join(path.file_name().ok_or("用量账本路径无效")?);
             Connection::open_with_flags(
                 canonical,
@@ -104,14 +96,14 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                     | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )
-            .map_err(|e| diagnostics::database("usage_query", "open_ledger", path, &e))?
+            .map_err(|e| format!("无法打开用量账本：{e}"))?
         }
     };
     db.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| diagnostics::database("usage_query", "ledger_busy_timeout", path, &e))?;
+        .map_err(|e| format!("无法设置用量账本超时：{e}"))?;
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(|e| diagnostics::database("usage_query", "ledger_read_version", path, &e))?;
+        .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
     if version > super::storage::VERSION {
         return Err("用量账本来自较新版本，请先升级应用".into());
     }
@@ -133,13 +125,9 @@ impl Ledger {
                 .recursive(true)
                 .mode(0o700)
                 .create(parent)
-                .map_err(|e| {
-                    diagnostics::io("usage_sync", "create_ledger_directory", parent, &e)
-                })?;
+                .map_err(|e| format!("无法创建用量账本目录：{e}"))?;
             if fs::symlink_metadata(parent)
-                .map_err(|e| {
-                    diagnostics::io("usage_sync", "ledger_directory_metadata", parent, &e)
-                })?
+                .map_err(|e| format!("无法读取用量账本目录：{e}"))?
                 .file_type()
                 .is_symlink()
             {
@@ -151,36 +139,26 @@ impl Ledger {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(path)
-                .map_err(|e| diagnostics::io("usage_sync", "open_ledger_file", path, &e))?;
+                .map_err(|e| format!("无法打开用量账本：{e}"))?;
             if !file
                 .metadata()
-                .map_err(|e| diagnostics::io("usage_sync", "ledger_file_metadata", path, &e))?
+                .map_err(|e| format!("无法读取用量账本：{e}"))?
                 .is_file()
             {
                 return Err("用量账本必须是普通文件".into());
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| diagnostics::io("usage_sync", "ledger_permissions", path, &e))?;
+                .map_err(|e| format!("无法设置用量账本权限：{e}"))?;
             Connection::open(path)
-                .map_err(|e| diagnostics::database("usage_sync", "open_ledger", path, &e))?
         } else {
-            Connection::open_in_memory().map_err(|e| {
-                diagnostics::database("usage_sync", "open_ledger", Path::new(":memory:"), &e)
-            })?
-        };
-        let error = |stage, e| {
-            diagnostics::database(
-                "usage_sync",
-                stage,
-                path.unwrap_or(Path::new(":memory:")),
-                &e,
-            )
-        };
+            Connection::open_in_memory()
+        }
+        .map_err(|e| format!("无法打开用量账本：{e}"))?;
         db.busy_timeout(std::time::Duration::from_millis(1500))
-            .map_err(|e| error("ledger_busy_timeout", e))?;
+            .map_err(|e| format!("无法设置用量账本超时：{e}"))?;
         let version: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|e| error("ledger_read_version", e))?;
+            .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
         if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
@@ -190,13 +168,13 @@ impl Ledger {
             PRAGMA journal_size_limit=16777216;
             CREATE TABLE IF NOT EXISTS usage_ledger_sources(agent TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(agent,path));
             CREATE TABLE IF NOT EXISTS usage_ledger_updates(agent TEXT PRIMARY KEY,updated INTEGER NOT NULL);")
-            .map_err(|e| error("ledger_initialize", e))?;
+            .map_err(|e| format!("无法初始化用量账本：{e}"))?;
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| error("ledger_migration_lock", e))?;
+            .map_err(|e| format!("无法启动用量账本迁移：{e}"))?;
         let version: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|e| error("ledger_read_version", e))?;
+            .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
         if version > super::storage::VERSION {
             return Err("用量账本来自较新版本，请先升级应用".into());
         }
@@ -204,19 +182,16 @@ impl Ledger {
         if version < 4 {
             tx.execute_batch(
                 "ALTER TABLE usage_ledger_sources ADD COLUMN dirty INTEGER NOT NULL DEFAULT 1;
-                ALTER TABLE usage_ledger_sources ADD COLUMN health TEXT;
                 ALTER TABLE usage_request_events ADD COLUMN source TEXT NOT NULL DEFAULT '';
                 DROP TABLE IF EXISTS usage_request_health;",
             )
-            .map_err(|e| error("ledger_migrate_events", e))?;
+            .map_err(|e| format!("无法迁移请求记录：{e}"))?;
             tx.execute("UPDATE usage_request_index SET indexed=0", [])
-                .map_err(|e| error("ledger_migrate_event_index", e))?;
-            tx.pragma_update(None, "user_version", 4)
-                .map_err(|e| error("ledger_write_version", e))?;
+                .map_err(|e| format!("无法迁移请求索引：{e}"))?;
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS usage_sync_state(agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);")
-            .map_err(|e| error("ledger_initialize_sync_state", e))?;
-        if version < super::storage::VERSION {
+            .map_err(|e| format!("无法初始化用量同步状态：{e}"))?;
+        if version < 5 {
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS usage_source_keys(
             agent TEXT NOT NULL,path TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(agent,path,key));
@@ -224,11 +199,18 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS usage_source_dirty ON usage_ledger_sources(agent,dirty,path);
             CREATE INDEX IF NOT EXISTS usage_request_source ON usage_request_events(agent,source);",
             )
-            .map_err(|e| error("ledger_initialize_source_index", e))?;
+            .map_err(|e| format!("无法初始化用量来源索引：{e}"))?;
             super::storage::migrate(&tx)?;
+        } else if version == 5 {
+            tx.execute_batch("ALTER TABLE usage_ledger_sources DROP COLUMN health;")
+                .map_err(|e| format!("无法迁移用量来源：{e}"))?;
+        }
+        if version < super::storage::VERSION {
+            tx.pragma_update(None, "user_version", super::storage::VERSION)
+                .map_err(|e| format!("无法更新用量账本版本：{e}"))?;
         }
         tx.commit()
-            .map_err(|e| error("ledger_migration_commit", e))?;
+            .map_err(|e| format!("无法提交用量账本迁移：{e}"))?;
         super::storage::compact_migrated(&db);
         Ok(Self { db })
     }
@@ -294,10 +276,13 @@ impl Ledger {
                 )
                 .optional()
                 .map_err(|_| "无法读取累计用量")?;
-            let combined = match existing {
-                Some(old) => merge(agent, &old, incoming),
-                None => incoming.clone(),
+            let existing = match existing {
+                None if agent == "codex" => previous_codex_source(&tx, path, incoming)?,
+                existing => existing,
             };
+            let combined = existing
+                .as_ref()
+                .map_or_else(|| incoming.clone(), |old| merge(agent, old, incoming));
             let data = super::storage::encode(&combined)?;
             tx.execute(
                 "INSERT INTO usage_ledger_sources(agent,path,data) VALUES (?1,?2,?3)
@@ -306,6 +291,9 @@ impl Ledger {
             )
             .map_err(|_| "无法保存累计用量，本次操作尚未删除会话")?;
             source_keys(&tx, agent, path, &combined)?;
+            if agent == "codex" && path.extension().is_some_and(|ext| ext == "zst") {
+                replace_covered_archives(&tx, path, incoming)?;
+            }
         }
         tx.execute(
             "INSERT OR REPLACE INTO usage_ledger_updates VALUES (?1,?2)",
@@ -359,12 +347,18 @@ pub(super) fn observation_ids(samples: &[Sample]) -> Vec<String> {
         .map(|sample| {
             let identity = if let Some(id) = &sample.response_id {
                 format!("response:{id}")
+            } else if let Some(ordinal) = sample.ordinal {
+                format!(
+                    "ordinal:{}:{ordinal}:{}:{}:{}",
+                    sample.session,
+                    sample.timestamp,
+                    sample.tokens.input_tokens,
+                    sample.tokens.output_tokens,
+                )
             } else {
                 let encoded = serde_json::to_vec(&(
                     sample.session.as_str(),
                     sample.timestamp,
-                    sample.ordinal,
-                    sample.model.as_str(),
                     &sample.tokens,
                     &sample.last_usage,
                     sample.cumulative,
@@ -379,20 +373,140 @@ pub(super) fn observation_ids(samples: &[Sample]) -> Vec<String> {
         .collect()
 }
 
-/// 合并采集观测，不按当前文件/数据库剩余内容覆盖已经发生的调用。
-pub(super) fn merge(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCache {
+fn previous_codex_source(
+    tx: &Connection,
+    path: &Path,
+    incoming: &FileCache,
+) -> Result<Option<FileCache>, String> {
+    let Some(origin) = &incoming.origin_path else {
+        return Ok(None);
+    };
+    let mut stmt = tx
+        .prepare_cached(
+            "SELECT s.id,s.data FROM usage_source_keys k
+         JOIN usage_ledger_sources s ON s.id=k.source
+         WHERE s.agent='codex' AND k.key=?1",
+        )
+        .map_err(|_| "无法查找 Codex 历史来源")?;
+    let rows = stmt
+        .query_map([format!("file:{}", origin.display())], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                super::storage::decode::<FileCache>(row.get_ref(1)?)?,
+            ))
+        })
+        .map_err(|_| "无法读取 Codex 历史来源")?;
+    for row in rows {
+        let (id, old) = row.map_err(|_| "无法读取 Codex 历史来源")?;
+        if old.parser_version < incoming.parser_version
+            && super::cache::covers_observations(incoming, &old)
+        {
+            tx.execute(
+                "UPDATE usage_ledger_sources SET path=?1 WHERE id=?2",
+                params![path.to_string_lossy(), id],
+            )
+            .map_err(|_| "无法更新 Codex 来源身份")?;
+            return Ok(Some(old));
+        }
+    }
+    Ok(None)
+}
+
+fn replace_covered_archives(
+    tx: &Connection,
+    path: &Path,
+    incoming: &FileCache,
+) -> Result<(), String> {
+    let rewrite = || -> rusqlite::Result<()> {
+        let target: i64 = tx.query_row(
+            "SELECT id FROM usage_ledger_sources WHERE agent='codex' AND path=?1",
+            [path.to_string_lossy()],
+            |row| row.get(0),
+        )?;
+        let other_sources = tx.prepare_cached(
+            "SELECT s.id,s.data FROM usage_source_keys k JOIN usage_ledger_sources s ON s.id=k.source
+            WHERE s.agent='codex' AND k.key=?1 AND s.id<>?2",
+        )?.query_map(params![format!("physical:{}", normalize::physical_id(path)), target], |row| {
+            Ok((row.get::<_, i64>(0)?, super::storage::decode::<FileCache>(row.get_ref(1)?)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        for (id, old) in other_sources {
+            if old.parser_version > incoming.parser_version
+                || !super::cache::covers_observations(incoming, &old)
+            {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO usage_source_keys SELECT ?1,key FROM usage_source_keys WHERE source=?2",
+                params![target, id],
+            )?;
+            tx.execute(
+                "UPDATE usage_request_events SET source=?1 WHERE agent='codex' AND source=?2",
+                params![target, id],
+            )?;
+            tx.execute("DELETE FROM usage_source_keys WHERE source=?1", [id])?;
+            tx.execute("DELETE FROM usage_ledger_sources WHERE id=?1", [id])?;
+        }
+        Ok(())
+    };
+    rewrite().map_err(|e| format!("无法归并 Codex 归档来源：{e}"))
+}
+
+fn merge_reparsed(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCache {
     let mut merged = incoming.clone();
-    if incoming.state.session.is_empty() && !old.state.session.is_empty() {
+    if super::cache::covers_observations(incoming, old) {
+        return merged;
+    }
+    let refreshed = |previous: &[Sample], current: &[Sample]| {
+        let keys: std::collections::HashSet<_> = current
+            .iter()
+            .filter(|sample| !sample.key.is_empty())
+            .map(|sample| sample.key.as_str())
+            .collect();
+        let mut samples: Vec<_> = if agent == "codex" {
+            let observations: std::collections::HashSet<_> =
+                observation_ids(current).into_iter().collect();
+            observation_ids(previous)
+                .into_iter()
+                .zip(previous)
+                .filter(|(id, sample)| {
+                    !keys.contains(sample.key.as_str()) && !observations.contains(id)
+                })
+                .map(|(_, sample)| sample.clone())
+                .collect()
+        } else {
+            previous
+                .iter()
+                .filter(|sample| !keys.contains(sample.key.as_str()))
+                .cloned()
+                .collect()
+        };
+        samples.extend_from_slice(current);
+        samples
+    };
+    merged.samples = refreshed(&old.samples, &incoming.samples);
+    merged.failures = refreshed(&old.failures, &incoming.failures);
+    merged
+}
+
+pub(super) fn merge(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCache {
+    if incoming.parser_version > old.parser_version {
+        return merge_reparsed(agent, old, incoming);
+    }
+    if incoming.parser_version < old.parser_version {
+        return merge_reparsed(agent, incoming, old);
+    }
+    let mut merged = incoming.clone();
+    if merged.state.session.is_empty() && !old.state.session.is_empty() {
         merged.state = old.state.clone();
     }
     merged.offset = old.offset.max(incoming.offset);
-    merged.failures = normalize::unique(old.failures.iter().chain(&incoming.failures).cloned());
+    let failures = old.failures.iter().chain(&incoming.failures).cloned();
+    merged.failures = normalize::unique(agent, failures);
     if agent != "codex" {
-        merged.samples = normalize::unique(old.samples.iter().chain(&incoming.samples).cloned());
+        merged.samples =
+            normalize::unique(agent, old.samples.iter().chain(&incoming.samples).cloned());
         return merged;
     }
-    // 累计通知需要保持首次观察的原始顺序。指纹的出现次数保留同毫秒的真实相同调用，
-    // 同时使追加重读、头部改写和截断后的重叠区不会被当成新增消耗。
     let mut samples = old.samples.clone();
     let mut positions: HashMap<_, _> = observation_ids(&samples)
         .into_iter()
@@ -407,7 +521,7 @@ pub(super) fn merge(agent: &str, old: &FileCache, incoming: &FileCache) -> FileC
             let mut details = samples[index].details.clone();
             details.refine(&sample.details);
             let mut request = samples[index].request.clone();
-            request.merge(&sample.request);
+            request.merge_codex(&sample.request);
             if normalize::prefer(sample, &samples[index]) {
                 samples[index] = sample.clone();
             }
@@ -441,9 +555,7 @@ pub(super) fn absorb(
             .join(format!("ledger-{identity}"))
             .join(path.file_name().unwrap_or_default());
         if history.get(&key).is_some_and(|old| {
-            old.stamps == file.stamps
-                && old.problem == file.problem
-                && old.parser_version == file.parser_version
+            old.stamps == file.stamps && old.parser_version == file.parser_version
         }) {
             continue;
         }

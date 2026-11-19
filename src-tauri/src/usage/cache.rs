@@ -1,5 +1,5 @@
 use super::{parse, types::*};
-use crate::agents::{diagnostics, scanning::open_jsonl_diagnosed};
+use crate::agents::scanning::open_jsonl;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +13,11 @@ use std::{
 
 /// 压缩计量载荷的预算（字节）；未确认入账的旧缓存不参与淘汰，小型文件索引另计。
 const MAX_CACHED_USAGE_BYTES: i64 = 64 * 1024 * 1024;
+
+pub(super) fn path() -> Option<PathBuf> {
+    dirs::cache_dir()
+        .map(|dir| dir.join("com.liangyukun.agent-session-manager/token-usage-v1.sqlite3"))
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct Stamp {
@@ -39,7 +44,35 @@ pub(super) fn stamp(path: &Path) -> std::io::Result<Stamp> {
         changed_ns: m.ctime_nsec(),
     })
 }
-pub(super) const JSONL_PARSER_VERSION: u8 = 3;
+pub(super) fn covers_observations(current: &FileCache, old: &FileCache) -> bool {
+    if !old.stamps.is_empty() && old.stamps == current.stamps {
+        return true;
+    }
+    if current.offset < old.offset || !(64..=2048).contains(&old.head_len) || old.tail.is_empty() {
+        return false;
+    }
+    let Some(path) = current.origin_path.as_deref() else {
+        return false;
+    };
+    let digest = if path.extension().is_some_and(|ext| ext == "zst") {
+        archive_fingerprint
+    } else {
+        fingerprint
+    };
+    digest(path, 0, old.head_len).ok().as_ref() == Some(&old.head)
+        && digest(path, old.offset.saturating_sub(64), old.offset.min(64))
+            .ok().as_ref() == Some(&old.tail)
+}
+
+pub(super) fn jsonl_parser_version(agent: &str) -> u8 {
+    match agent {
+        "codex" => 9,
+        "claude" => 8,
+        "pi" => 6,
+        "qoder" => 5,
+        _ => 3,
+    }
+}
 
 pub(super) fn sqlite_stamps(path: &Path) -> std::io::Result<Vec<Stamp>> {
     let mut stamps = vec![stamp(path)?];
@@ -52,7 +85,7 @@ pub(super) fn sqlite_stamps(path: &Path) -> std::io::Result<Vec<Stamp>> {
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub(super) struct FileCache {
-    /// 缓存结构/提取语义升级时重读现存源；不改变累计账本或旧缓存的定位键。
+    /// 解析规则更新时重新读取现有来源。
     #[serde(default)]
     pub parser_version: u8,
     /// 账本中的来源键包含会话身份，原始路径仅用于解析父历史关系，不再用于读取正文。
@@ -70,7 +103,6 @@ pub(super) struct FileCache {
     /// 保留缺少用量的失败记录，汇总时跳过其计量。
     #[serde(default)]
     pub failures: Vec<Sample>,
-    pub problem: Option<String>,
 }
 
 #[cfg(test)]
@@ -342,22 +374,15 @@ impl Store {
                             params![scope, path.to_string_lossy()],
                         )?;
                     }
-                    if file.problem.is_none() {
-                        tx.execute(
-                            "INSERT OR REPLACE INTO usage_file_stamps VALUES (?1,?2,?3,?4)",
-                            params![
-                                scope,
-                                path.to_string_lossy(),
-                                file.parser_version,
-                                serde_json::to_string(&file.stamps).unwrap_or_default()
-                            ],
-                        )?;
-                    } else {
-                        tx.execute(
-                            "DELETE FROM usage_file_stamps WHERE scope=?1 AND path=?2",
-                            params![scope, path.to_string_lossy()],
-                        )?;
-                    }
+                    tx.execute(
+                        "INSERT OR REPLACE INTO usage_file_stamps VALUES (?1,?2,?3,?4)",
+                        params![
+                            scope,
+                            path.to_string_lossy(),
+                            file.parser_version,
+                            serde_json::to_string(&file.stamps).unwrap_or_default()
+                        ],
+                    )?;
                 }
             }
             tx.execute(
@@ -480,13 +505,19 @@ impl Store {
     }
 }
 
-fn fingerprint(path: &Path, start: u64, len: u64) -> Result<String, String> {
-    let mut f = open_jsonl_diagnosed(path, "usage_sync")?;
-    f.seek(SeekFrom::Start(start))
-        .map_err(|e| diagnostics::io("usage_sync", "fingerprint_seek", path, &e))?;
+fn fingerprint(path: &Path, start: u64, len: u64) -> std::io::Result<String> {
+    let mut f = open_jsonl(path)?;
+    f.seek(SeekFrom::Start(start))?;
     let mut data = Vec::new();
-    f.take(len).read_to_end(&mut data)
-        .map_err(|e| diagnostics::io("usage_sync", "fingerprint_read", path, &e))?;
+    f.take(len).read_to_end(&mut data)?;
+    Ok(format!("{:x}", Sha256::digest(data)))
+}
+
+fn archive_fingerprint(path: &Path, start: u64, len: u64) -> std::io::Result<String> {
+    let mut stream = zstd::stream::read::Decoder::new(open_jsonl(path)?)?;
+    std::io::copy(&mut stream.by_ref().take(start), &mut std::io::sink())?;
+    let mut data = Vec::new();
+    stream.take(len).read_to_end(&mut data)?;
     Ok(format!("{:x}", Sha256::digest(data)))
 }
 
@@ -497,9 +528,11 @@ pub(super) fn read_file(
     force: bool,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
-    let force = force || old.is_some_and(|old| old.parser_version < JSONL_PARSER_VERSION);
-    let current = stamp(path).map_err(|e| diagnostics::io("usage_sync", "path_metadata", path, &e))?;
-    if !force && old.is_some_and(|old| old.problem.is_none() && old.stamps == [current.clone()]) {
+    let parser_version = jsonl_parser_version(agent);
+    let force = force || old.is_some_and(|old| old.parser_version < parser_version);
+    let io_error = |e: std::io::Error| e.to_string();
+    let current = stamp(path).map_err(io_error)?;
+    if !force && old.is_some_and(|old| old.stamps == [current.clone()]) {
         return Ok((old.unwrap().clone(), 0));
     }
     let compressed = path.extension().is_some_and(|s| s == "zst");
@@ -524,18 +557,15 @@ pub(super) fn read_file(
     } else {
         FileCache::default()
     };
-    result.problem = None;
     if result.state.session.is_empty() {
         result.state.session = path.to_string_lossy().into_owned();
     }
-    let mut file = open_jsonl_diagnosed(path, "usage_sync")?;
+    let mut file = open_jsonl(path).map_err(io_error)?;
     let start = if compressed { 0 } else { result.offset };
-    file.seek(SeekFrom::Start(start))
-        .map_err(|e| diagnostics::io("usage_sync", "seek", path, &e))?;
+    file.seek(SeekFrom::Start(start)).map_err(io_error)?;
     let mut reader: Box<dyn BufRead> = if compressed {
         Box::new(BufReader::new(
-            zstd::stream::read::Decoder::new(file)
-                .map_err(|e| diagnostics::io("usage_sync", "decompress_init", path, &e))?,
+            zstd::stream::read::Decoder::new(file).map_err(io_error)?,
         ))
     } else {
         Box::new(BufReader::with_capacity(
@@ -547,15 +577,13 @@ pub(super) fn read_file(
     let mut bytes_read = 0;
     let mut line = Vec::new();
     result.pending = false;
-    result.parser_version = JSONL_PARSER_VERSION;
+    result.parser_version = parser_version;
     loop {
         if cancel() {
             return Err("统计已取消".into());
         }
-        let (bytes, terminated, oversized) = bounded_line(reader.as_mut(), &mut line).map_err(|e| {
-            let stage = if compressed { "decompress_read" } else { "read" };
-            format!("{}\nbyte_offset: {position}", diagnostics::io("usage_sync", stage, path, &e))
-        })?;
+        let (bytes, terminated, oversized) =
+            bounded_line(reader.as_mut(), &mut line, if agent == "codex" { 32 } else { 16 }).map_err(io_error)?;
         if bytes == 0 {
             break;
         }
@@ -567,25 +595,7 @@ pub(super) fn read_file(
         let offset = position;
         position += bytes;
         result.offset = position;
-        if oversized {
-            // 原生 response_item 只是正文/工具记录，计量另在 token_count/usage_record；
-            // 跳过超大正文不等于漏计，不应给用户伪报计量损坏。
-            if agent == "codex" {
-                let prefix = &line[..line.len().min(512)];
-                if [
-                    b"\"type\":\"response_item\"".as_slice(),
-                    b"\"type\": \"response_item\"",
-                ]
-                .iter()
-                .any(|tag| memchr::memmem::find(prefix, tag).is_some())
-                {
-                    continue;
-                }
-            }
-            result.state.bad_lines += 1;
-            continue;
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
+        if oversized || line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         // Codex 工具正文占绝大部分字节；无需为与用量无关的巨大对象分配 JSON 树。
@@ -608,24 +618,20 @@ pub(super) fn read_file(
         {
             continue;
         }
-        match serde_json::from_slice::<serde_json::Value>(&line) {
-            Ok(v) => {
-                let mut samples = parse::parse(agent, &v, offset, &mut result.state);
-                super::request_parse::observe(agent, &v, offset, path, &mut result, &mut samples);
-                result.samples.extend(samples);
-            }
-            Err(_) => result.state.bad_lines += 1,
+        if let Ok(v) = serde_json::from_slice(&line) {
+            parse::read_line(agent, &v, offset, path, &mut result);
         }
     }
     result.stamps = vec![current];
     if !compressed {
         result.head_len = result.offset.min(2048);
-        result.head = fingerprint(path, 0, result.head_len)?;
+        result.head = fingerprint(path, 0, result.head_len).map_err(io_error)?;
         result.tail = fingerprint(
             path,
             result.offset.saturating_sub(64),
             result.offset.min(64),
-        )?;
+        )
+        .map_err(io_error)?;
     }
     Ok((result, bytes_read))
 }
@@ -634,6 +640,7 @@ pub(super) fn read_file(
 fn bounded_line(
     reader: &mut dyn BufRead,
     line: &mut Vec<u8>,
+    limit_mib: usize,
 ) -> std::io::Result<(u64, bool, bool)> {
     line.clear();
     let mut bytes = 0u64;
@@ -645,7 +652,7 @@ fn bounded_line(
         }
         let end = memchr::memchr(b'\n', buffer);
         let n = end.map_or(buffer.len(), |i| i + 1);
-        if line.len() + n <= 16 * 1024 * 1024 && !large {
+        if line.len() + n <= limit_mib * 1024 * 1024 && !large {
             line.extend_from_slice(&buffer[..n]);
         } else {
             large = true;

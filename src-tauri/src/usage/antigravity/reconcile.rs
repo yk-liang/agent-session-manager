@@ -15,7 +15,6 @@ fn merge_tokens(left: &Tokens, right: &Tokens) -> Tokens {
             .saturating_sub(tokens.cache_read_tokens)
             .saturating_sub(tokens.cache_write_tokens)
     };
-    let visible = |tokens: &Tokens| tokens.output_tokens.saturating_sub(tokens.reasoning_tokens);
     let cache_read = left.cache_read_tokens.max(right.cache_read_tokens);
     let cache_write = left.cache_write_tokens.max(right.cache_write_tokens);
     let reasoning = left.reasoning_tokens.max(right.reasoning_tokens);
@@ -24,7 +23,7 @@ fn merge_tokens(left: &Tokens, right: &Tokens) -> Tokens {
             .max(uncached(right))
             .saturating_add(cache_read)
             .saturating_add(cache_write),
-        output_tokens: visible(left).max(visible(right)).saturating_add(reasoning),
+        output_tokens: left.output_tokens.max(right.output_tokens).max(reasoning),
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
         reasoning_tokens: reasoning,
@@ -44,13 +43,8 @@ fn merge(target: &mut Sample, other: Sample) {
         .effort
         .clone()
         .or_else(|| other.request.effort.clone());
-    let failed = target.request.status.as_deref() == Some("failed")
-        || other.request.status.as_deref() == Some("failed");
     target.request.merge(&other.request);
     target.request.effort = effort;
-    if failed {
-        target.request.status = Some("failed".into());
-    }
     target.timestamp = target
         .request
         .started_at
@@ -177,6 +171,7 @@ mod tests {
             ordinal: None,
             complete: true,
             replayed: false,
+            claude_fallback: false,
             copy_fingerprint: None,
             cumulative: false,
             response_id: None,

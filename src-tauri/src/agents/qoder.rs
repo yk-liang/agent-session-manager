@@ -78,8 +78,8 @@ impl AgentSource for QoderSource {
     fn data_dir(&self) -> Option<PathBuf> {
         Some(qoder_dir())
     }
-    fn watch_paths(&self, usage: bool) -> super::AgentWatchPaths {
-        super::AgentWatchPaths::transcripts("projects", if usage { None } else { Some(2) })
+    fn watch_paths(&self) -> super::AgentWatchPaths {
+        super::AgentWatchPaths::transcripts("projects", Some(2))
     }
     fn supports_fork(&self) -> bool {
         true

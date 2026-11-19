@@ -1,5 +1,5 @@
 //! 采集只提交变化来源的计量，不为后台文件事件生成全历史报表。
-use super::{ledger, scope, source::Source, Store};
+use super::{discover, events, ledger, scope, source::Source, source_error, Store};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -55,8 +55,7 @@ pub(super) fn collect_with_progress(
     let paths = match paths {
         Some(paths) => paths,
         None => {
-            discovered = super::discover(agent, roots, &mut Vec::new(), cancel, true)
-                .map_err(|e| e.to_string())?;
+            discovered = discover(agent, roots, cancel)?;
             &discovered
         }
     };
@@ -71,23 +70,23 @@ pub(super) fn collect_with_progress(
         }
         match std::fs::metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(crate::agents::diagnostics::io("usage_sync", "path_metadata", path, &error)),
+            Err(error) => return Err(source_error(path, error)),
             Ok(m) if !m.is_file() => continue,
             _ => {}
         }
         result.checked_files += 1;
-        let stamps = input.stamps(path)
-            .map_err(|error| crate::agents::diagnostics::io("usage_sync", "source_stamps", path, &error))?;
+        let stamps = input
+            .stamps(path)
+            .map_err(|error| source_error(path, error))?;
         if store.unchanged(&key, path, &stamps, input.parser_version()) {
             continue;
         }
         let old = store.load_file(&key, path);
-        let (file, bytes) = input.read(path, old.as_ref(), false, cancel)
-            .map_err(|e| super::CollectionError::source(path, e).to_string())?;
+        let (file, bytes) = input
+            .read(path, old.as_ref(), false, cancel)
+            .map_err(|e| source_error(path, e))?;
         let changed = old.as_ref().is_none_or(|old| {
-            old.stamps != file.stamps
-                || old.parser_version != file.parser_version
-                || old.problem.is_some()
+            old.stamps != file.stamps || old.parser_version != file.parser_version
         });
         if !changed {
             // 首次迁移小索引；以后只比较 stamps，不再加载整份 FileCache。
@@ -117,4 +116,92 @@ pub(super) fn collect_with_progress(
     }
     progress(paths.len(), paths.len());
     Ok(result)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Synced {
+    pub updated_at: i64,
+    pub checked_files: usize,
+    pub changed_files: usize,
+    pub bytes_read: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub agent: String,
+    pub phase: &'static str,
+    /// 已检查的日志文件数；发现目录/等待其他同步时尚不知道总数。
+    pub checked_files: usize,
+    pub total_files: Option<usize>,
+}
+
+#[allow(dead_code)] // 供隔离的用量性能示例与测试使用。
+pub(crate) fn sync_at(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Synced, String> {
+    sync_paths(agent, roots, store, None, cancel)
+}
+
+pub(super) fn sync_paths(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    paths: Option<&BTreeSet<PathBuf>>,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Synced, String> {
+    sync_with_store(agent, roots, store, paths, cancel, &|_| {})
+}
+
+pub(super) fn sync_with_store(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    paths: Option<&BTreeSet<PathBuf>>,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(SyncProgress),
+) -> Result<Synced, String> {
+    let report = |phase, checked_files, total_files| {
+        progress(SyncProgress {
+            agent: agent.into(),
+            phase,
+            checked_files,
+            total_files,
+        })
+    };
+    report("discovering", 0, None);
+    // 即使稍后的文件不可读，也先把本轮已经入账的部分转成持久请求事件。
+    let collected = collect_with_progress(agent, roots, store, paths, cancel, &|done, total| {
+        report("reading", done, Some(total))
+    });
+    if !cancel() {
+        report("indexing", 0, None);
+        events::refresh(&mut store.ledger()?.db, agent, cancel)?;
+    }
+    let result = collected?;
+    if cancel() {
+        return Err("采集已停止".into());
+    }
+    if paths.is_none() {
+        // 必须在目录遍历和请求索引全部成功后标记；部分文件入账不能冒充全量完成。
+        store
+            .ledger()?
+            .db
+            .execute(
+                "INSERT OR IGNORE INTO usage_sync_state(agent,completed_at) VALUES (?1,?2)",
+                rusqlite::params![agent, chrono::Utc::now().timestamp_millis()],
+            )
+            .map_err(|_| "无法保存用量同步状态")?;
+    }
+    report("complete", result.checked_files, Some(result.checked_files));
+    Ok(Synced {
+        updated_at: chrono::Utc::now().timestamp_millis(),
+        checked_files: result.checked_files,
+        changed_files: result.files,
+        bytes_read: result.bytes_read,
+    })
 }

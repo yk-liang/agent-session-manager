@@ -44,12 +44,13 @@ try {
       if (command === 'read_session') return { meta: session, events: [{ type: 'user', message: { content: 'Model fixture' } }] };
       if (command === 'search_conversations') return { hits: [], skipped: 0, cancelled: false };
       if (command === 'read_usage_summary') return { rows: rows.filter(row => inRange(row.bucketStart, args.query)),
-        health: {}, syncedAgents: [agent, 'codex'], revision: '1' };
+        syncedAgents: [agent, 'codex'], revision: '1' };
       if (command === 'read_request_events') {
         queries.push(args.query.model);
-        const page = events.filter(event => inRange(event.time, args.query) && (!args.query.agent || event.agent === args.query.agent)
-          && (!args.query.model || event.model === args.query.model));
-        return { events: page, total: page.length, page: 1, pageSize: 50, revision: '1' };
+        const scope = events.filter(event => inRange(event.time, args.query) && (!args.query.agent || event.agent === args.query.agent));
+        const page = scope.filter(event => !args.query.model || event.model === args.query.model);
+        const models = Object.fromEntries(scope.map(event => [event.model, scope.filter(entry => entry.model === event.model).length]));
+        return { events: page, total: page.length, page: 1, pageSize: 50, revision: '1', filters: { models, projects: {}, results: {} } };
       }
       return null;
     }};
@@ -70,7 +71,8 @@ try {
   await badge.waitFor();
 
   await page.getByRole('button', { name: '用量', exact: true }).click();
-  await page.locator('.request-model .model-label').first().waitFor();
+  const summaryLabels = page.locator('.usage-models tbody .model-label');
+  await summaryLabels.first().waitFor();
   const labels = [opus, gemini, '未知模型', ...extraModels].sort();
   const count = (list, name) => list.getByRole('option', { name, exact: true }).locator('.dropdown-count');
   const picker = await openDropdown(page, '当前 Agent');
@@ -79,15 +81,14 @@ try {
   assert.equal(await count(picker, 'Codex').textContent(), '1');
   assert.equal(await page.locator('.agent-switcher .dropdown-trigger .dropdown-count').count(), 0);
   await picker.getByRole('option', { name: 'Antigravity', exact: true }).click();
-  const requestLabels = page.locator('.request-model .model-label');
-  const summaryLabels = page.locator('.usage-models tbody .model-label');
-  await page.waitForFunction(length => document.querySelectorAll('.request-model .model-label').length === length, labels.length);
-  await summaryLabels.first().waitFor();
-  assert.deepEqual((await requestLabels.allTextContents()).sort(), labels);
-  const showModels = page.getByRole('button', { name: `显示全部 ${labels.length} 个模型`, exact: true });
+  const showModels = page.getByRole('button', { name: `显示全部 ${labels.length} 项`, exact: true });
   await showModels.click();
   assert.deepEqual((await summaryLabels.allTextContents()).sort(), labels);
   assert.equal(await page.getByRole('button', { name: '收起', exact: true }).getAttribute('aria-expanded'), 'true');
+  await page.getByRole('tab', { name: '请求记录', exact: true }).click();
+  const requestLabels = page.locator('.request-model .model-label');
+  await page.waitForFunction(length => document.querySelectorAll('.request-model .model-label').length === length, labels.length);
+  assert.deepEqual((await requestLabels.allTextContents()).sort(), labels);
   await page.setViewportSize({ width: 960, height: 760 });
   const list = await openDropdown(page, '模型');
   assert.deepEqual((await list.locator('.dropdown-option-label').allTextContents()).sort(), [...labels, '全部模型'].sort());
@@ -97,7 +98,7 @@ try {
   const layout = await list.evaluate((element, ids) => {
     const menu = element.parentElement.getBoundingClientRect();
     const row = id => {
-      const option = [...element.querySelectorAll('button')].find(button => button.value === id);
+      const option = [...element.querySelectorAll('[role="option"]')].find(button => button.getAttribute('aria-label') === id);
       const label = option.querySelector('.dropdown-option-label');
       const text = document.createRange();
       text.selectNodeContents(label);
@@ -129,24 +130,23 @@ try {
   assert.equal(await clipped.getAttribute('title'), oversizedModel);
   await search.fill(gemini);
   await page.waitForFunction(() => {
-    const trigger = document.querySelector('.usage-model-select .dropdown-trigger');
-    const menu = document.querySelector('.usage-model-select .dropdown-menu');
+    const trigger = document.querySelector('.request-filter .dropdown-trigger');
+    const menu = document.querySelector('.request-filter .dropdown-menu');
     return Math.abs(trigger.getBoundingClientRect().left - menu.getBoundingClientRect().left) < 1;
   });
   await list.getByRole('option', { name: gemini, exact: true }).click();
+  assert.equal(await page.getByRole('combobox', { name: '模型', exact: true }).textContent(), gemini);
   await page.waitForFunction(model => window.__MODEL_QUERIES__.includes(model), gemini);
   await page.waitForFunction(() => document.querySelectorAll('.request-model .model-label').length === 1);
   assert.equal(await requestLabels.textContent(), gemini);
-  assert.equal(await summaryLabels.textContent(), gemini);
-  assert.equal(await page.getByRole('combobox', { name: '模型', exact: true }).textContent(), gemini);
   await chooseOption(page, '当前 Agent', 'codex');
   const codexModels = await openDropdown(page, '模型');
-  assert.equal(await count(codexModels, gemini).textContent(), '1');
+  await count(codexModels, gemini).getByText('1', { exact: true }).waitFor();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '今日', exact: true }).click();
   const todayModels = await openDropdown(page, '模型');
   await count(todayModels, '全部模型').getByText('0', { exact: true }).waitFor();
-  assert.equal(await todayModels.getByRole('option').count(), 1);
+  await page.waitForFunction(() => document.querySelectorAll('.request-filter .dropdown-option').length === 1);
   await page.keyboard.press('Escape');
   const todayAgents = await openDropdown(page, '当前 Agent');
   assert.equal(await count(todayAgents, 'Codex').textContent(), '0');

@@ -23,8 +23,14 @@ use std::path::{Path, PathBuf};
 
 use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
 pub(crate) use models::model_id;
+pub(crate) use storage::MESSAGE_ERROR_SQL;
 
 fn data_home() -> PathBuf {
+    if let Ok(path) = std::env::var("OPENCODE_DATA_DIR") {
+        if !path.is_empty() {
+            return super::expand_tilde(&path);
+        }
+    }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
             return super::expand_tilde(&xdg).join("opencode");
@@ -64,10 +70,10 @@ fn open_db_scoped(path: &Path, session: Option<&str>) -> Result<Connection, Stri
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| format!("打开 OpenCode 会话库失败：{e}"))?;
+    .map_err(|e| format!("无法打开 OpenCode 会话库：{e}"))?;
     conn.busy_timeout(std::time::Duration::from_millis(300))
         .map_err(|e| e.to_string())?;
-    storage::prepare(&conn, session).map_err(|e| format!("读取 OpenCode 数据结构失败：{e}"))?;
+    storage::prepare(&conn, session).map_err(|e| format!("无法读取 OpenCode 数据库结构：{e}"))?;
     Ok(conn)
 }
 
@@ -173,7 +179,7 @@ fn batch_message_counts(
     if bad_rows > 0 {
         return super::ParseOutcome::Degraded(
             map,
-            format!("OpenCode 有 {bad_rows} 条消息计数记录读取失败，消息数可能不准"),
+            format!("OpenCode 有 {bad_rows} 条消息无法计数"),
         );
     }
     // json_valid 守卫排除了损坏行，但排除 ≠ 完整：
@@ -471,7 +477,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
     let conn = &snapshot;
     let mut warnings = Vec::new();
     // 批量计数三态：必须保留"计数是否完整"——split() 会把 Ok 与
-    // Degraded 拍平成同一个 Some(map)，丢失部分缺失的信号。
+    // 合并计数时保留部分读取失败的状态。
     // 只有完整计数才能把不在表中的会话判为空；降级/失败时
     // 已有条目也可能只是部分计数（坏行会丢掉某个 role 分组），
     // 不能仅凭存在就信任，一律逐会话重查
@@ -605,7 +611,7 @@ fn read_session_mode_at(
     view: bool,
 ) -> Result<SessionDetail, String> {
     if !is_valid_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let db = open_db_scoped(path, Some(session_id))?;
     // 元数据、计数和分段使用同一个只读快照，CLI 同时追加时不会混合两个版本。
@@ -631,7 +637,7 @@ fn read_session_mode_at(
 
 fn search_events_at(path: &Path, meta: &SessionMeta) -> Result<Vec<Value>, String> {
     if !is_valid_session_id(&meta.session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let db = open_db_scoped(path, Some(&meta.session_id))?;
     let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -671,14 +677,9 @@ impl AgentSource for OpenCodeSource {
     fn data_dir(&self) -> Option<PathBuf> {
         Some(data_home())
     }
-    fn watch_paths(&self, usage: bool) -> super::AgentWatchPaths {
+    fn watch_paths(&self) -> super::AgentWatchPaths {
         super::AgentWatchPaths {
             root_files: vec!["opencode.db", "opencode.db-wal"],
-            root_file_patterns: if usage {
-                vec![("opencode", ".db"), ("opencode", ".db-wal")]
-            } else {
-                vec![]
-            },
             ..Default::default()
         }
     }
@@ -716,7 +717,7 @@ impl AgentSource for OpenCodeSource {
     }
     fn delete_session(&self, _project_dir: &str, session_id: &str) -> Result<(), String> {
         if !is_valid_session_id(session_id) {
-            return Err("非法会话 ID".into());
+            return Err("会话 ID 无效".into());
         }
         // 委托官方 CLI：会一并清理子代理会话，避免直接改库。
         // 先解析 opencode 绝对路径：GUI 应用从 Finder 启动只有精简 PATH，
@@ -735,7 +736,7 @@ impl AgentSource for OpenCodeSource {
                     .unwrap_or_default(),
             )
             .output()
-            .map_err(|e| format!("调用 opencode 失败（{}）: {e}", bin.display()))?;
+            .map_err(|e| format!("无法运行 OpenCode（{}）： {e}", bin.display()))?;
         if !output.status.success() {
             return Err(format!(
                 "opencode session delete 失败：{}",

@@ -61,7 +61,7 @@ fn storage_comparison() {
     let mut syncs = Vec::new();
     for agent in AGENTS {
         let start = Instant::now();
-        let result = summary::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
+        let result = ingest::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
         syncs.push(json!({"agent":agent,"ms":elapsed_ms(start),"bytes_read":result.bytes_read,"changed_files":result.changed_files}));
     }
     drop(store);
@@ -69,7 +69,7 @@ fn storage_comparison() {
     let warm_ms = median(|| {
         for agent in AGENTS {
             let result =
-                summary::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
+                ingest::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
             assert_eq!(result.bytes_read, 0, "warm sync reread source logs");
         }
     });

@@ -31,13 +31,13 @@ fn main() {
     for agent in usage::AGENTS {
         let roots = usage::roots(agent).unwrap();
         let started = Instant::now();
-        let first = usage::summary::sync_at(agent, &roots, &mut store, &|| false).unwrap();
+        let first = usage::ingest::sync_at(agent, &roots, &mut store, &|| false).unwrap();
         let first_ms = started.elapsed().as_secs_f64() * 1000.;
         // 重启后的热同步不能依赖内存里的全量历史。
         drop(store);
         store = open();
         let started = Instant::now();
-        let warm = usage::summary::sync_at(agent, &roots, &mut store, &|| false).unwrap();
+        let warm = usage::ingest::sync_at(agent, &roots, &mut store, &|| false).unwrap();
         let warm_ms = started.elapsed().as_secs_f64() * 1000.;
         println!(
             "{}",

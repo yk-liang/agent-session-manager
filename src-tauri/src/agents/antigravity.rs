@@ -181,7 +181,7 @@ impl AgentSource for AntigravitySource {
             .filter(|root| root.is_dir())
             .collect()
     }
-    fn watch_paths(&self, _usage: bool) -> AgentWatchPaths {
+    fn watch_paths(&self) -> AgentWatchPaths {
         AgentWatchPaths {
             root_file_patterns: vec![("", ".db"), ("", ".db-wal")],
             ..Default::default()

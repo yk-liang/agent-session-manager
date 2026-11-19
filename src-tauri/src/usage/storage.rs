@@ -3,7 +3,7 @@ use super::cache::FileCache;
 use rusqlite::{types::ValueRef, Connection};
 use serde::{de::DeserializeOwned, Serialize};
 
-pub(super) const VERSION: i64 = 5;
+pub(super) const VERSION: i64 = 6;
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     let json = serde_json::to_vec(value).map_err(|_| "无法编码用量记录")?;
@@ -51,7 +51,7 @@ pub(super) fn migrate(db: &Connection) -> Result<(), String> {
         db.execute_batch(
             "CREATE TABLE usage_ledger_sources_v5(
             id INTEGER PRIMARY KEY,agent TEXT NOT NULL,path TEXT NOT NULL,data BLOB NOT NULL,
-            dirty INTEGER NOT NULL DEFAULT 1,health TEXT,UNIQUE(agent,path));
+            dirty INTEGER NOT NULL DEFAULT 1,UNIQUE(agent,path));
             CREATE TABLE usage_source_keys_v5(
             source INTEGER NOT NULL,key TEXT NOT NULL,PRIMARY KEY(source,key)) WITHOUT ROWID;
             CREATE TABLE usage_request_events_v5(
@@ -59,10 +59,10 @@ pub(super) fn migrate(db: &Connection) -> Result<(), String> {
             status TEXT NOT NULL,data TEXT NOT NULL,source INTEGER NOT NULL DEFAULT 0);",
         )?;
         {
-            let mut old = db.prepare("SELECT rowid,agent,path,data,dirty,health FROM usage_ledger_sources ORDER BY rowid")?;
+            let mut old = db.prepare("SELECT rowid,agent,path,data,dirty FROM usage_ledger_sources ORDER BY rowid")?;
             let mut rows = old.query([])?;
             let mut insert =
-                db.prepare("INSERT INTO usage_ledger_sources_v5 VALUES (?1,?2,?3,?4,?5,?6)")?;
+                db.prepare("INSERT INTO usage_ledger_sources_v5 VALUES (?1,?2,?3,?4,?5)")?;
             while let Some(row) = rows.next()? {
                 let bytes = compress_legacy(row.get_ref(3)?)?;
                 insert.execute(rusqlite::params![
@@ -70,8 +70,7 @@ pub(super) fn migrate(db: &Connection) -> Result<(), String> {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     bytes,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?
+                    row.get::<_, i64>(4)?
                 ])?;
             }
         }
@@ -95,7 +94,6 @@ pub(super) fn migrate(db: &Connection) -> Result<(), String> {
             CREATE TABLE IF NOT EXISTS usage_storage_state(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
             INSERT OR REPLACE INTO usage_storage_state VALUES ('compact_pending',1);")?;
         super::events::schema(db)?;
-        db.pragma_update(None, "user_version", VERSION)?;
         Ok(())
     };
     run().map_err(|_| "无法升级用量存储，已保留原数据".into())

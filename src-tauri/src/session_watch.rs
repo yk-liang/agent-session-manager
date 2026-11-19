@@ -11,40 +11,24 @@ pub struct WatchSpec {
     agent: String,
     root: PathBuf,
     paths: crate::agents::AgentWatchPaths,
-    all_usage: bool,
     members: Vec<WatchSpec>,
 }
 
 impl WatchSpec {
-    #[cfg(test)]
-    pub(crate) fn for_usage(agent: &str, root: PathBuf) -> Self {
-        Self::registered(agent, root, true)
-    }
-
     #[allow(dead_code)] // 供独立监听示例使用。
     pub fn new(agent: &str, root: PathBuf) -> Self {
-        Self::registered(agent, root, false)
-    }
-
-    fn registered(agent: &str, root: PathBuf, usage: bool) -> Self {
         let paths = crate::agents::find_source(agent)
-            .map(|source| source.watch_paths(usage))
+            .map(|source| source.watch_paths())
             .unwrap_or_default();
-        Self::from_paths(agent, root, paths, usage)
+        Self::from_paths(agent, root, paths)
     }
 
-    pub fn from_paths(
-        agent: &str,
-        root: PathBuf,
-        paths: crate::agents::AgentWatchPaths,
-        all_usage: bool,
-    ) -> Self {
+    pub fn from_paths(agent: &str, root: PathBuf, paths: crate::agents::AgentWatchPaths) -> Self {
         let root = root.canonicalize().unwrap_or(root);
         Self {
             agent: agent.to_string(),
             root,
             paths,
-            all_usage,
             members: vec![],
         }
     }
@@ -73,16 +57,7 @@ impl WatchSpec {
                     if self.paths.max_depth.is_some_and(|max| depth > max) {
                         continue;
                     }
-                    if self.all_usage
-                        && relative
-                            .components()
-                            .any(|c| c.as_os_str() == "subagent-artifacts")
-                    {
-                        return false;
-                    }
-                    return path
-                        .extension()
-                        .is_some_and(|ext| ext == "jsonl" || self.all_usage && ext == "zst")
+                    return path.extension().is_some_and(|ext| ext == "jsonl")
                         || path
                             .file_name()
                             .and_then(|name| name.to_str())
@@ -122,11 +97,6 @@ impl WatchSpec {
                 .flat_map(|s| s.targets())
                 .filter(|(p, _)| seen.insert(p.clone()))
                 .collect();
-        }
-        // 用量递归监听数据根，元数据通知也能捕获后创建的 transcripts 目录；
-        // relevant 仍过滤配置/凭据/请求日志，不读取它们的内容。
-        if self.all_usage {
-            return vec![(self.root.clone(), RecursiveMode::Recursive)];
         }
         let mut targets = vec![(self.root.clone(), RecursiveMode::NonRecursive)];
         for directory in &self.paths.transcript_dirs {
@@ -184,35 +154,19 @@ impl SessionWatcher {
     ) -> Result<(), String> {
         let spec = agent
             .map(|agent| {
-                let usage = agent == "usage";
-                let sources = if usage {
-                    crate::agents::all_sources()
-                } else {
-                    vec![crate::agents::find_source(&agent)?]
-                };
-                let mut members = Vec::new();
-                for source in sources {
-                    for root in source
-                        .watch_roots()
-                        .into_iter()
-                        .filter(|root| !usage || root.is_dir())
-                    {
-                        members.push(WatchSpec::from_paths(
-                            source.id(),
-                            root,
-                            source.watch_paths(usage),
-                            usage,
-                        ));
-                    }
-                }
+                let source = crate::agents::find_source(&agent)?;
+                let mut members: Vec<_> = source
+                    .watch_roots()
+                    .into_iter()
+                    .map(|root| WatchSpec::from_paths(source.id(), root, source.watch_paths()))
+                    .collect();
                 Ok::<_, String>(match members.len() {
                     0 => None,
-                    1 if !usage => members.pop(),
+                    1 => members.pop(),
                     _ => Some(WatchSpec {
                         agent,
                         root: PathBuf::new(),
                         paths: Default::default(),
-                        all_usage: usage,
                         members,
                     }),
                 })
@@ -293,35 +247,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_scope_observes_hidden_archived_and_compressed_records_without_private_sidecars() {
-        let root = PathBuf::from("/tmp/asm-usage-watch");
-        let usage = WatchSpec {
-            agent: "usage".into(),
-            root: PathBuf::new(),
-            paths: Default::default(),
-            all_usage: true,
-            members: vec![
-                WatchSpec::for_usage("claude", root.join("claude")),
-                WatchSpec::for_usage("codex", root.join("codex")),
-                WatchSpec::for_usage("opencode", root.join("opencode")),
-            ],
-        };
-        assert!(usage.relevant(&change(root.join("claude/projects/p/subagents/a.jsonl"))));
-        assert!(usage.relevant(&change(root.join("codex/archived_sessions/a.jsonl.zst"))));
-        assert!(usage.relevant(&change(root.join("codex/sessions/2099/01/01/a.jsonl"))));
-        assert!(!usage.relevant(&change(
-            root.join("claude/projects/p/subagent-artifacts/a.jsonl")
-        )));
-        assert!(usage.relevant(&change(root.join("opencode/opencode.db-wal"))));
-        assert!(usage.relevant(&change(root.join("opencode/opencode-archived.db-wal"))));
-        assert!(usage.relevant(&change(root.join("opencode/opencode-archived.db"))));
-        assert!(!usage.relevant(&change(root.join("opencode/opencode-archived.db-shm"))));
-        assert!(!usage.relevant(&change(root.join("opencode/opencode.db-shm"))));
-        assert!(!usage.relevant(&change(root.join("claude/settings.json"))));
-        assert!(!usage.relevant(&change(root.join("codex/auth.json"))));
-    }
-
-    #[test]
     fn paths_include_transcripts_and_indexes_but_exclude_noisy_or_private_sidecars() {
         let root = PathBuf::from("/tmp/asm-watch-test");
         let qoder = WatchSpec::new("qoder", root.clone());
@@ -362,7 +287,7 @@ mod tests {
         std::fs::create_dir(root.join("records")).unwrap();
         let mut paths = crate::agents::AgentWatchPaths::transcripts("records", Some(2));
         paths.root_files.push("catalog.sqlite");
-        let spec = WatchSpec::from_paths("custom-agent", root.clone(), paths, false);
+        let spec = WatchSpec::from_paths("custom-agent", root.clone(), paths);
         assert!(spec.relevant(&change(root.join("records/project/a.jsonl"))));
         assert!(!spec.relevant(&change(root.join("records/project/children/a.jsonl"))));
         assert!(spec.relevant(&change(root.join("catalog.sqlite"))));
@@ -371,9 +296,9 @@ mod tests {
             .targets()
             .contains(&(root.join("records"), RecursiveMode::Recursive)));
         assert!(
-            WatchSpec::from_paths("custom-agent", root.clone(), Default::default(), true)
+            WatchSpec::from_paths("custom-agent", root.clone(), Default::default())
                 .targets()
-                .contains(&(root, RecursiveMode::Recursive))
+                .contains(&(root, RecursiveMode::NonRecursive))
         );
     }
 

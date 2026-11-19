@@ -18,9 +18,8 @@ try {
       if (command === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: !location.search.includes('empty') && id !== 'pi', supportsFork: false, dataDir: `/Users/demo/.${id}`, deletePolicy: 'trash' }));
       if (command === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (command === 'count_sessions') return args.agent === 'claude' ? window.__CLAUDE_COUNT__ : null;
-      if (command === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
-      if (command === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
-      if (command === 'read_usage_summary') return { rows: [], health: {}, syncedAgents: Object.keys(names), revision: '1' };
+      if (command === 'usage_sync_status') return { sequence: 1, revision: 1, updatedAt: Date.now(), syncing: [], progress: null, failedAgents: [], unavailable: false };
+      if (command === 'read_usage_summary') return { rows: [], syncedAgents: Object.keys(names), revision: '1' };
       if (command === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
     } };

@@ -1,8 +1,4 @@
-//! Codex 本地数据源（CLI、IDE、桌面）：读取活跃和已归档的会话日志。
-//!
-//! 与 Claude 系完全不同：OpenAI Responses 格式（session_meta + response_item）。
-//! 转换为统一对话事件，运行指令与状态通知独立标记为 context。
-//! 项目按 session_meta 里的 cwd 分组。
+//! 读取 Codex CLI、IDE 扩展和桌面端的本地会话，包括归档。运行指令和状态通知作为上下文保留。
 
 mod app_server;
 mod catalog;
@@ -119,7 +115,6 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
-/// 把一条 response_item 转成 0..n 个统一事件
 fn convert_response_item(
     payload: &Value,
     ts: Option<&str>,
@@ -318,7 +313,7 @@ fn read_rollout(
         let envelope: Envelope = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(_) => {
-                // 旧日志可能夹杂合法的 JSON 标量；与原解析器一样忽略，只对坏 JSON 告警。
+                // 旧日志可包含合法的 JSON 标量，跳过这些非事件记录。
                 if serde_json::from_slice::<Value>(&line).is_err() {
                     bad_lines += 1;
                 }
@@ -351,7 +346,7 @@ fn read_rollout(
         }
         let raw_payload = envelope.payload.map(|v| v.get()).unwrap_or("null");
         if matches!(rtype, "turn_context" | "token_usage_record") {
-            // 只提取模型字段，跳过上下文中的大段指令；这些元数据不生成对话卡片。
+            // 只反序列化模型字段，避免加载较大的指令正文。
             if let Ok(context) = serde_json::from_str::<ModelContext>(raw_payload) {
                 if let Some(model) = context
                     .model
@@ -650,7 +645,7 @@ fn read_session_mode(
     mode: ReadMode,
 ) -> Result<SessionDetail, String> {
     if session_id.len() > 64 || session_id.contains(['/', '\\', '\'']) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let mut warnings = Vec::new();
     let paths = storage::rollouts(root, true, &mut warnings, &|| false)?;
@@ -697,7 +692,7 @@ impl AgentSource for CodexSource {
     fn data_dir(&self) -> Option<PathBuf> {
         sessions_root().parent().map(|p| p.to_path_buf())
     }
-    fn watch_paths(&self, _: bool) -> super::AgentWatchPaths {
+    fn watch_paths(&self) -> super::AgentWatchPaths {
         let mut paths = super::AgentWatchPaths::transcripts("sessions", None);
         paths.extra_transcript_suffixes.push(".jsonl.zst");
         paths.transcript_dirs.push(PathBuf::from(storage::ARCHIVED_SESSIONS));

@@ -9,7 +9,7 @@ import SessionList from "./components/SessionList";
 import SessionDetailView from "./components/SessionDetail";
 import SessionDeleteDialog, { type SessionDeletion, type SessionDeleteTarget } from "./components/SessionDeleteDialog";
 import ConfigPanel from "./components/ConfigPanel";
-import UsagePanel from "./components/UsagePanel";
+import UsagePanel from "./usage/UsagePanel";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
 import ReadDiagnostics from "./components/ReadDiagnostics";

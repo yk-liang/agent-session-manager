@@ -1,4 +1,4 @@
-//! macOS 登录后台服务。窗口退出不影响采集；系统授权状态与实际进程分别报告。
+//! macOS 登录后台服务。沿用用户已有的授权与数据目录。
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -9,7 +9,6 @@ use std::{
         io::AsRawFd,
     },
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 pub(super) const PLIST: &str = "com.liangyukun.agent-session-manager.usage-collector.plist";
@@ -131,133 +130,63 @@ pub(super) struct RuntimeStatus {
     pub pid: u32,
     pub version: String,
     pub collected_at: BTreeMap<String, i64>,
-    pub errors: BTreeMap<String, String>,
     pub scan_ms: f64,
     pub bytes_read: u64,
 }
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Status {
-    desired: bool,
-    running: bool,
-    authorization: String,
-    pid: Option<u32>,
-    version: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-pub struct Service(Mutex<Option<String>>);
-impl Service {
-    pub fn status(&self) -> Result<Status, String> {
-        let dir = directory()?;
-        let desired = Settings::load(&dir).map(|s| s.enabled).unwrap_or(false);
-        let active = running(&dir);
-        let runtime: Option<RuntimeStatus> = fs::read(dir.join("status.json"))
+pub fn ensure_login_service() -> Result<(), String> {
+    let authorization = platform::status();
+    if matches!(authorization, "unsupported" | "notBundled") {
+        return Ok(());
+    }
+    let dir = directory()?;
+    let old = match fs::symlink_metadata(dir.join("settings.json")) {
+        Ok(_) => Some(Settings::load(&dir)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("无法检查后台采集设置：{error}")),
+    };
+    let settings = Settings {
+        // 本地 ad hoc 签名的服务可能被 launchd 以签名约束终止，并被 KeepAlive 反复拉起。
+        // 升级时撤销这类旧注册；只有带团队签名的构建才提供登录后台服务。
+        enabled: old.as_ref().is_some_and(|settings| settings.enabled) && platform::can_register(),
+        roots: super::AGENTS
+            .into_iter()
+            .map(|id| super::roots(id).map(|roots| (id.into(), roots)))
+            .collect::<Result<_, _>>()?,
+    };
+    if old.as_ref() != Some(&settings) {
+        write_json(&dir, "settings.json", &settings)?;
+    }
+    if settings.enabled {
+        let previous: Option<RuntimeStatus> = fs::read(dir.join("status.json"))
             .ok()
-            .and_then(|v| serde_json::from_slice(&v).ok());
-        let error = self
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .or_else(|| {
-                runtime.as_ref().filter(|_| active).and_then(|r| {
-                    (!r.errors.is_empty()).then(|| "部分来源采集失败，后台将自动重试".into())
-                })
-            });
-        Ok(Status {
-            desired,
-            running: active,
-            authorization: {
-                let status = platform::status();
-                if !matches!(status, "unsupported" | "notBundled") && !platform::can_register() {
-                    "signingRequired"
-                } else {
-                    status
+            .and_then(|data| serde_json::from_slice(&data).ok());
+        let upgrade = authorization == "enabled"
+            && running(&dir)
+            && previous.is_some_and(|status| status.version != env!("CARGO_PKG_VERSION"));
+        if upgrade {
+            platform::set_enabled(false)?;
+            // unregister 返回时进程可能还在退出，给 SQLite 完成当前事务的时间。
+            for _ in 0..30 {
+                if !running(&dir) {
+                    break;
                 }
-            }
-            .into(),
-            pid: runtime.as_ref().filter(|_| active).map(|r| r.pid),
-            version: runtime.filter(|_| active).map(|r| r.version),
-            error,
-        })
-    }
-    pub fn ensure(&self) -> Result<Status, String> {
-        self.configure(None)
-    }
-    pub fn set_enabled(&self, enabled: bool) -> Result<Status, String> {
-        self.configure(Some(enabled))
-    }
-    fn configure(&self, enabled: Option<bool>) -> Result<Status, String> {
-        let mut error = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let result = (|| {
-            let authorization = platform::status();
-            if matches!(authorization, "unsupported" | "notBundled") {
-                return Ok(());
-            }
-            let can_register = platform::can_register();
-            if enabled == Some(true) && !can_register {
-                return Err("当前安装包不支持退出后的后台采集；打开应用时仍会同步用量".into());
-            }
-            let dir = directory()?;
-            let old = if dir.join("settings.json").exists() {
-                Some(Settings::load(&dir)?)
-            } else {
-                None
-            };
-            let mut settings = Settings {
-                // 本地 ad hoc 签名的服务可能被 launchd 以签名约束终止，并被 KeepAlive 反复拉起。
-                // 升级时撤销这类旧注册；只有带团队签名的构建才提供登录后台服务。
-                enabled: can_register
-                    && enabled.unwrap_or(old.as_ref().map(|s| s.enabled).unwrap_or(false)),
-                roots: BTreeMap::new(),
-            };
-            for id in super::AGENTS {
-                settings.roots.insert(id.into(), super::roots(id)?);
-            }
-            if old.as_ref() != Some(&settings) {
-                write_json(&dir, "settings.json", &settings)?;
-            }
-            if settings.enabled {
-                let previous: Option<RuntimeStatus> = fs::read(dir.join("status.json"))
-                    .ok()
-                    .and_then(|data| serde_json::from_slice(&data).ok());
-                let upgrade = authorization == "enabled"
-                    && running(&dir)
-                    && previous.is_some_and(|status| status.version != env!("CARGO_PKG_VERSION"));
-                if upgrade {
-                    platform::set_enabled(false)?;
-                    // unregister 返回时进程可能还在退出，给 SQLite 完成当前事务的时间。
-                    for _ in 0..30 {
-                        if !running(&dir) {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                }
-                if authorization == "disabled" || upgrade {
-                    platform::set_enabled(true)?;
-                }
-            } else if authorization != "disabled" {
-                platform::set_enabled(false)?;
-            }
-            Ok(())
-        })();
-        *error = result.as_ref().err().cloned();
-        drop(error);
-        result?;
-        self.status()
-    }
-    pub fn check(&self) {
-        if let Ok(dir) = directory() {
-            if Settings::load(&dir).is_ok_and(|s| s.enabled) {
-                let _ = write_json(&dir, "check.json", &chrono::Utc::now().timestamp_millis());
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
+        if authorization == "disabled" || upgrade {
+            platform::set_enabled(true)?;
+        }
+    } else if authorization != "disabled" {
+        platform::set_enabled(false)?;
     }
-    pub fn open_settings(&self) -> Result<(), String> {
-        platform::open_settings()
+    Ok(())
+}
+
+pub fn check_login_service() {
+    if let Ok(dir) = directory() {
+        if Settings::load(&dir).is_ok_and(|settings| settings.enabled) {
+            let _ = write_json(&dir, "check.json", &chrono::Utc::now().timestamp_millis());
+        }
     }
 }
 
@@ -348,13 +277,6 @@ mod platform {
             }
         })
     }
-    pub fn open_settings() -> Result<(), String> {
-        let class = AnyClass::get(c"SMAppService").ok_or("当前系统不支持后台服务设置")?;
-        unsafe {
-            let _: () = msg_send![class, openSystemSettingsLoginItems];
-        }
-        Ok(())
-    }
 }
 #[cfg(not(target_os = "macos"))]
 mod platform {
@@ -365,9 +287,6 @@ mod platform {
         "unsupported"
     }
     pub fn set_enabled(_: bool) -> Result<(), String> {
-        Err("当前系统不支持后台采集服务".into())
-    }
-    pub fn open_settings() -> Result<(), String> {
         Err("当前系统不支持后台采集服务".into())
     }
 }

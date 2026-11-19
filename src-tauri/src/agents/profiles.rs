@@ -1,13 +1,6 @@
-//! 多 Agent 配置方案快照：由各数据源声明受管理的配置文件，负责
-//! 保存、列表、应用（持久事务与安全恢复）与删除。
-//!
-//! 安全要点：
-//! - 配置可能含凭据：存储目录强制 0700，写入文件一律 0600
-//! - 方案列表只返回摘要；文件内容和差异按需返回，不写入日志
-//! - 配置库事务（list/save/delete/apply）由 flock 排他锁串行化：
-//!   单实例插件在 macOS 有探测竞态，不能替代跨进程互斥
-//! - 应用前把所有原文件克隆进各自专属的暂存事务目录（保留权限/ACL），
-//!   新内容原子替换；失败时暂存回改名恢复，绝不把"读不到"当成"不存在"
+//! 配置可能含有凭据。方案目录权限为 0700，写入文件为 0600，列表只返回摘要。
+//! 配置库以 flock 串行化跨进程访问。应用配置前保留原文件的权限和 ACL，
+//! 事务失败时通过重命名恢复。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,7 +25,6 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 快照中的单个配置文件：key 是稳定逻辑键，content 是原始文本内容
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigSnapshot {
@@ -51,7 +43,6 @@ pub struct Profile {
     pub captured_keys: Option<Vec<String>>,
 }
 
-/// 前端可见的单文件在场标记（不含内容）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePresence {
@@ -60,7 +51,6 @@ pub struct FilePresence {
     pub present: bool,
 }
 
-/// 前端可见的配置方案摘要：不含任何配置内容（可能包括凭据）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
@@ -70,7 +60,6 @@ pub struct ProfileSummary {
     pub files: Vec<FilePresence>,
 }
 
-/// 依据 agent 的 config_spec 生成摘要：逐文件标出快照中是否留有内容
 fn summarize(p: &Profile, spec: &[ConfigFile]) -> ProfileSummary {
     let files = spec
         .iter()
@@ -140,7 +129,6 @@ impl RawProfile {
             (".models/default", self.models_default),
         ] {
             if let Some(v) = v {
-                // 迁移一次性把解析后的 JSON 转为美化文本，之后按原始字节管理
                 let content = serde_json::to_string_pretty(&v).unwrap_or_default();
                 files.push(ConfigSnapshot {
                     key: key.to_string(),
@@ -148,8 +136,7 @@ impl RawProfile {
                 });
             }
         }
-        // 只有旧 Qoder 字段格式能证明完整采集范围。其他 agent 缺少
-        // files 时不能凭此继承 settings.json 的删除权限。
+        // 只有旧 Qoder 格式能证明哪些文件应由方案管理。
         let captured_keys = (agent == "qoder").then(|| {
             vec![
                 "settings.json".to_string(),
@@ -186,21 +173,18 @@ pub struct CurrentConfig {
 }
 
 fn store_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "无法确定 home 目录".to_string())?;
-    let new_dir = home.join(".agent-session-manager");
-    // 从旧名 ~/.qoder-session-manager 自动迁移；探测严格化
-    // （只有 NotFound 才算缺失，探测错误显性化），
-    // 迁移失败必须报错，否则会打开空的新库，历史配置看似"消失"
-    let old_dir = home.join(".qoder-session-manager");
-    if !super::present(&new_dir)? && super::present(&old_dir)? {
-        fs::rename(&old_dir, &new_dir).map_err(|e| {
+    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
+    let profile_dir = home.join(".agent-session-manager");
+    let legacy_dir = home.join(".qoder-session-manager");
+    // 旧目录访问或迁移失败时中止，避免用空配置库掩盖历史方案。
+    if !super::present(&profile_dir)? && super::present(&legacy_dir)? {
+        fs::rename(&legacy_dir, &profile_dir).map_err(|e| {
             format!(
-                "迁移配置目录 {:?} → {:?} 失败：{e}；请人工处理，历史配置仍在旧目录中",
-                old_dir, new_dir
+                "无法迁移配置目录 {legacy_dir:?} 到 {profile_dir:?}：{e}。历史配置仍在旧目录中。"
             )
         })?;
     }
-    Ok(new_dir)
+    Ok(profile_dir)
 }
 
 /// 配置库可能含凭据：目录强制 0700。

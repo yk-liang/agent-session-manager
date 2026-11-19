@@ -136,18 +136,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         let mut warnings = Vec::new();
         let mut latest = Model::default();
         let mut last_time = created;
-        if schema.steps {
-            let columns = connection.prepare("SELECT * FROM steps LIMIT 0")?;
-            let status = if columns.column_names().contains(&"status") {
-                "status"
-            } else {
-                "NULL"
-            };
-            let error = if columns.column_names().contains(&"error_details") {
-                "error_details"
-            } else {
-                "NULL"
-            };
+        if let Some(storage::StepColumns { status, error }) = schema.steps {
             let mut stmt = connection.prepare(&format!(
                 "SELECT idx, step_type, metadata,
                     CASE WHEN step_type IN (:user, :response) OR :detail AND step_type = :tool THEN step_payload END,

@@ -1,6 +1,6 @@
 use super::{
     cache::FileCache,
-    request_parse::RequestMeta,
+    request_parse::{RequestError, RequestMeta, RequestOutcome},
     types::{RecordedFields, RequestIdentities, Sample, Tokens},
 };
 use crate::agents::antigravity::{
@@ -16,7 +16,7 @@ use std::{
 mod reconcile;
 
 pub(super) use reconcile::records;
-pub(super) const PARSER_VERSION: u8 = 1;
+pub(super) const PARSER_VERSION: u8 = 4;
 
 const MODEL_ERROR: i64 = 17;
 
@@ -72,21 +72,28 @@ impl Usage {
 
 struct Attempt {
     usage: Usage,
-    failed: bool,
+    error: Option<RequestError>,
 }
 
-fn attempts(fields: &Message<'_>, number: u32, primary: &Usage) -> std::io::Result<Vec<Attempt>> {
-    let mut result = Vec::new();
+#[derive(Default)]
+struct Attempts {
+    primary_error: Option<RequestError>,
+    retries: Vec<Attempt>,
+}
+
+fn attempts(fields: &Message<'_>, number: u32, primary: &Usage) -> std::io::Result<Attempts> {
+    let mut result = Attempts::default();
     let mut mirrored = false;
     for bytes in fields.repeated(number) {
         let attempt = Message::decode(bytes)?;
         let usage = Usage::parse(&attempt.message(2)?);
-        let failed = attempt.text(3).is_some();
-        if !mirrored && usage.tokens().total() > 0 && usage.mirrors(primary) {
+        let error = RequestError::new(None, attempt.text(3));
+        if !mirrored && usage.mirrors(primary) {
             mirrored = true;
+            result.primary_error = error;
             continue;
         }
-        result.push(Attempt { usage, failed });
+        result.retries.push(Attempt { usage, error });
     }
     Ok(result)
 }
@@ -96,11 +103,12 @@ struct Step {
     model: Model,
     time: Option<i64>,
     usage: Usage,
-    attempts: Vec<Attempt>,
+    attempts: Attempts,
+    error: Option<RequestError>,
 }
 
 impl Step {
-    fn parse(kind: i64, metadata: &[u8]) -> std::io::Result<Self> {
+    fn parse(kind: i64, metadata: &[u8], error: &[u8]) -> std::io::Result<Self> {
         let fields = Message::decode(metadata)?;
         let usage = Usage::parse(&fields.message(9)?);
         Ok(Self {
@@ -111,33 +119,39 @@ impl Step {
                 .or(fields.millis(8)?)
                 .filter(|&time| time > 0),
             attempts: attempts(&fields, 28, &usage)?,
+            error: Message::decode(error).ok().and_then(|details| {
+                RequestError::new(None, details.text(2).or_else(|| details.text(3)))
+            }),
             usage,
         })
     }
 
-    fn status(&self) -> Option<&'static str> {
-        match self.kind {
-            MODEL_RESPONSE => Some("success"),
-            MODEL_ERROR => Some("failed"),
-            _ => None,
-        }
+    fn failed(&self) -> bool {
+        self.kind == MODEL_ERROR || self.request_error().is_some()
+    }
+
+    fn request_error(&self) -> Option<&RequestError> {
+        self.attempts.primary_error.as_ref().or_else(|| {
+            self.is_request().then_some(self.error.as_ref()).flatten()
+        })
     }
 
     fn is_request(&self) -> bool {
-        self.status().is_some() || self.usage.tokens().total() > 0
+        matches!(self.kind, MODEL_RESPONSE | MODEL_ERROR) || self.usage.tokens().total() > 0
     }
 }
 
 struct Generation {
     model: Model,
     usage: Usage,
-    attempts: Vec<Attempt>,
+    attempts: Attempts,
     steps: Vec<i64>,
     previous_step: Option<i64>,
     time: Option<i64>,
     ttft: Option<i64>,
     streaming: Option<i64>,
     request_id: Option<String>,
+    error: Option<RequestError>,
 }
 
 impl Generation {
@@ -169,6 +183,7 @@ impl Generation {
             attempts: attempts(&request, 17, &usage)?,
             usage,
             request_id,
+            error: RequestError::new(None, fields.text(5)),
         })
     }
 
@@ -217,7 +232,7 @@ impl Conversation {
     ) {
         let tokens = usage.tokens();
         let measured = tokens.total() > 0;
-        if !measured && request.status.as_deref() != Some("failed") {
+        if !measured && !request.failed() {
             return;
         }
         let (model, effort) = model.resolve(usage.model, &self.models);
@@ -250,6 +265,7 @@ impl Conversation {
             ordinal: None,
             complete: true,
             replayed: false,
+            claude_fallback: false,
             copy_fingerprint: None,
             cumulative: false,
             response_id: None,
@@ -276,7 +292,8 @@ impl Conversation {
                 model,
                 RequestMeta {
                     started_at: time,
-                    status: attempt.failed.then(|| "failed".into()),
+                    status: attempt.error.is_some().then_some(RequestOutcome::Failed),
+                    error: attempt.error.clone(),
                     ..Default::default()
                 },
             );
@@ -293,7 +310,7 @@ pub(super) fn read(
     let stamps = super::cache::sqlite_stamps(path).map_err(|error| error.to_string())?;
     if !force {
         if let Some(old) = old.filter(|old| {
-            old.parser_version == PARSER_VERSION && old.problem.is_none() && old.stamps == stamps
+            old.parser_version == PARSER_VERSION && old.stamps == stamps
         }) {
             return Ok((old.clone(), 0));
         }
@@ -322,9 +339,12 @@ pub(super) fn read(
             models: HashMap::new(),
         };
         file.state.session = conversation.session.clone();
-        if schema.steps {
-            let mut stmt =
-                connection.prepare("SELECT idx, step_type, metadata FROM steps ORDER BY idx")?;
+        if let Some(storage::StepColumns { error, .. }) = schema.steps {
+            let mut stmt = connection.prepare(&format!(
+                "SELECT idx, step_type, metadata,
+                    {error}
+                 FROM steps ORDER BY idx"
+            ))?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 if cancel() {
@@ -332,8 +352,9 @@ pub(super) fn read(
                 }
                 let index: i64 = row.get(0)?;
                 let metadata = row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default();
-                bytes += metadata.len() as u64;
-                let mut step = Step::parse(row.get(1)?, &metadata)
+                let error = row.get::<_, Option<Vec<u8>>>(3)?.unwrap_or_default();
+                bytes += (metadata.len() + error.len()) as u64;
+                let mut step = Step::parse(row.get(1)?, &metadata, &error)
                     .map_err(|error| format!("步骤 {index}：{error}"))?;
                 step.model.id = step.model.id.or(step.usage.model);
                 step.model.remember(&mut conversation.models);
@@ -360,31 +381,44 @@ pub(super) fn read(
             .iter()
             .flat_map(|(&index, step)| step.usage.keys.iter().map(move |key| (key.as_str(), index)))
             .collect();
-        for (index, generation) in generations {
+        let mut current: Option<&Model> = None;
+        for (index, generation) in &generations {
+            if generation.model.name.is_some() || generation.model.display.is_some() {
+                current = Some(&generation.model);
+            }
+            let model_id = generation.usage.model.or(generation.model.id);
+            let model = current
+                .filter(|context| model_id.is_none() || context.id == model_id)
+                .unwrap_or(&generation.model);
             let step_index = generation.step(&steps, &step_keys);
             let step = step_index.and_then(|index| steps.get(&index));
             let key = format!("gen:{session}:{index}");
             let mirror = step_index.map(|index| format!("step:{session}:{index}"));
             let timestamp = generation.time.or(step.and_then(|step| step.time));
+            let error = step
+                .and_then(Step::request_error)
+                .or(generation.attempts.primary_error.as_ref())
+                .or(generation.error.as_ref());
             let latency_ms = generation
                 .ttft
                 .zip(generation.streaming)
                 .and_then(|(first, streaming)| first.checked_add(streaming));
-            let status = step.and_then(Step::status);
             conversation.add(
                 &mut file,
                 key.clone(),
                 mirror.clone(),
                 &generation.usage,
-                &generation.model,
+                model,
                 RequestMeta {
-                    request_id: generation.request_id,
+                    request_id: generation.request_id.clone(),
                     started_at: timestamp,
                     latency_ms,
                     ttft_ms: generation.ttft,
                     timing: latency_ms.or(generation.ttft).map(|_| "recorded".into()),
                     ttft_scope: generation.ttft.map(|_| "request".into()),
-                    status: status.map(str::to_owned),
+                    status: (error.is_some() || step.is_some_and(Step::failed))
+                        .then_some(RequestOutcome::Failed),
+                    error: error.cloned(),
                     ..Default::default()
                 },
             );
@@ -392,13 +426,14 @@ pub(super) fn read(
                 &mut file,
                 &key,
                 mirror.as_deref(),
-                &generation.attempts,
-                &generation.model,
+                &generation.attempts.retries,
+                model,
                 timestamp,
             );
         }
         for (index, step) in &steps {
             let key = format!("step:{session}:{index}");
+            if step.is_request() {
             conversation.add(
                 &mut file,
                 key.clone(),
@@ -407,15 +442,17 @@ pub(super) fn read(
                 &step.model,
                 RequestMeta {
                     started_at: step.time,
-                    status: step.status().map(str::to_owned),
+                    status: step.failed().then_some(RequestOutcome::Failed),
+                    error: step.request_error().cloned(),
                     ..Default::default()
                 },
             );
+            }
             conversation.add_attempts(
                 &mut file,
                 &key,
                 Some(&key),
-                &step.attempts,
+                &step.attempts.retries,
                 &step.model,
                 step.time,
             );
@@ -471,8 +508,8 @@ mod tests {
         assert!(assistant_texts > 0);
         let roots = usage::roots(AGENT).unwrap();
         let mut store = usage::Store::open_with_ledger(None, None);
-        let first = usage::summary::sync_at(AGENT, &roots, &mut store, &|| false).unwrap();
-        let repeated = usage::summary::sync_at(AGENT, &roots, &mut store, &|| false).unwrap();
+        let first = usage::ingest::sync_at(AGENT, &roots, &mut store, &|| false).unwrap();
+        let repeated = usage::ingest::sync_at(AGENT, &roots, &mut store, &|| false).unwrap();
         assert_eq!(repeated.changed_files, 0);
         usage::event_tests::assert_index_matches_full(&mut store, AGENT);
         let mut tokens = Tokens::default();
@@ -480,7 +517,7 @@ mod tests {
         let mut failures = 0;
         let files = store.ledger().unwrap().load(AGENT).unwrap();
         for sample in records(&files) {
-            failures += usize::from(sample.request.status.as_deref() == Some("failed"));
+            failures += usize::from(sample.request.failed());
             if sample.tokens.total() > 0 {
                 measured += 1;
                 tokens.add(&sample.tokens);

@@ -9,7 +9,7 @@ fn seed(dir: &std::path::Path) -> Store {
         "message":{"id":"msg_a","model":"fixture","usage":{"input_tokens":100,"output_tokens":10}}});
     fs::write(logs.join("session.jsonl"), format!("{record}\n")).unwrap();
     let mut store = Store::open_with_ledger(None, Some(&dir.join("ledger.sqlite")));
-    summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
     store
 }
 
@@ -161,7 +161,7 @@ fn cold_start_cancelled_import_keeps_committed_progress_and_wal_permissions() {
     );
     drop(store);
     let mut restarted = Store::open_with_ledger(Some(&cache), Some(&path));
-    let synced = summary::sync_at("claude", &[logs], &mut restarted, &|| false).unwrap();
+    let synced = ingest::sync_at("claude", &[logs], &mut restarted, &|| false).unwrap();
     assert_eq!(
         summary::read_from(&mut restarted, Default::default(), &|| false)
             .unwrap()
@@ -218,7 +218,7 @@ fn cold_start_large_import_is_queryable_and_restart_reads_no_unchanged_logs() {
     let worker = std::thread::spawn(move || {
         let _writer = ledger::SyncLock::acquire(&writer_path, &|| false).unwrap();
         let mut store = Store::open_with_ledger(Some(&writer_cache), Some(&writer_path));
-        let result = summary::sync_at("claude", &[writer_logs], &mut store, &|| false);
+        let result = ingest::sync_at("claude", &[writer_logs], &mut store, &|| false);
         complete.store(true, Ordering::SeqCst);
         result.unwrap()
     });
@@ -266,7 +266,7 @@ fn cold_start_large_import_is_queryable_and_restart_reads_no_unchanged_logs() {
     );
     drop(db);
     let mut restarted = Store::open_with_ledger(Some(&cache), Some(&path));
-    let warm = summary::sync_at("claude", &[logs], &mut restarted, &|| false).unwrap();
+    let warm = ingest::sync_at("claude", &[logs], &mut restarted, &|| false).unwrap();
     assert_eq!((warm.changed_files, warm.bytes_read), (0, 0));
     let sum: u64 = summary::read_from(&mut restarted, Default::default(), &|| false)
         .unwrap()

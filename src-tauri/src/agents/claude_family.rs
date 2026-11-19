@@ -1,6 +1,4 @@
-//! Claude 系 CLI（QoderCLI / Claude Code）共享的 JSONL 会话解析。
-//! 两者的会话都存储在 `<base>/<路径转义目录>/<session-uuid>.jsonl`，
-//! 每行一个事件，消息通过 uuid/parentUuid 构成树形链。
+//! Qoder 和 Claude Code 共用的 JSONL 会话解析。消息由 uuid 和 parentUuid 串联。
 
 mod context;
 #[cfg(test)]
@@ -40,10 +38,7 @@ pub fn unescape_dir_name(name: &str) -> String {
     name.replace('-', "/")
 }
 
-/// 从用户消息中提取有意义的文本（用于标题回退和 real_user_count 统计）。
-/// 斜杠命令消息的真实用户输入在 `<command-args>` 内，其余标签
-/// （`<command-message>` / `<command-name>` / `<environment_context>` 等）是
-/// CLI 注入的噪音；剥离噪音后再判空，避免把真实问题当作空消息。
+/// 斜杠命令的用户输入在 `<command-args>` 内。注入的上下文不计入用户消息。
 pub fn extract_user_text(msg: &Value) -> Option<String> {
     let content = msg.get("content")?;
     let texts: Vec<&str> = match content {
@@ -64,8 +59,7 @@ pub fn extract_user_text(msg: &Value) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.chars().take(80).collect())
 }
 
-/// Only structurally complete metadata envelopes are removed from title text.
-/// The detail adapter preserves them as inspectable context events.
+/// 完整的元数据块从标题中排除，仍可在会话上下文中查看。
 pub(super) fn strip_noise_tags(text: &str) -> String {
     context::visible_text(text)
 }
@@ -96,7 +90,7 @@ fn parse_meta_with(
         )),
     };
     let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
-        return super::ParseOutcome::Failed(format!("会话文件名非法：{:?}", path));
+        return super::ParseOutcome::Failed(format!("会话文件名无效：{:?}", path));
     };
 
     let mut meta = SessionMeta {
@@ -289,9 +283,7 @@ fn summary_cache_kind(dir_name: &str, opts: FamilyOptions) -> String {
     )
 }
 
-/// 单遍扫描：每个项目目录只读一次，同时产出项目分组与会话列表。
-/// 读取失败不再静默跳过，记入 warnings；base 不存在/不可读同样降级为
-/// warning（与 read_dir_warned 的统一遍历语义一致），不让整个 catalog 失败。
+/// 一次扫描生成项目分组和会话列表。读取失败时保留已读会话和诊断。
 pub fn catalog(
     base: &Path,
     opts: FamilyOptions,
@@ -332,7 +324,7 @@ fn project_display_path(dir_name: &str, sessions: &[SessionMeta]) -> String {
                 .filter(|cwd| !cwd.trim().is_empty())
                 .map(|cwd| (meta.real_user_count == 0, cwd))
         })
-        // Prefer populated sessions; break ties deterministically, independently of read_dir.
+        // 优先采用有正文的会话。条件相同时使用与枚举顺序无关的排序。
         .min()
         .map(|(_, cwd)| cwd.to_string())
         .unwrap_or_else(|| unescape_dir_name(dir_name))
@@ -417,10 +409,10 @@ pub fn read_session(
     opts: FamilyOptions,
 ) -> Result<SessionDetail, String> {
     if !is_safe_name(project_dir) {
-        return Err("非法项目目录名".into());
+        return Err("项目目录名无效".into());
     }
     if !is_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let path = base.join(project_dir).join(format!("{session_id}.jsonl"));
     let missing = match std::fs::metadata(&path) {
@@ -492,7 +484,7 @@ pub fn read_session(
     })
 }
 
-/// 删除会话：jsonl 与同名状态目录一起移入废纸篓
+/// 会话日志和同名状态目录一并移入废纸篓。
 pub fn delete_session(base: &Path, project_dir: &str, session_id: &str) -> Result<(), String> {
     delete_session_with(base, project_dir, session_id, |targets| {
         trash::delete_all(targets).map_err(|e| format!("移入废纸篓失败：{e}"))
@@ -515,10 +507,10 @@ pub(crate) fn deletion_targets(
     session_id: &str,
 ) -> Result<Vec<PathBuf>, String> {
     if !is_safe_name(project_dir) {
-        return Err("非法项目目录名".into());
+        return Err("项目目录名无效".into());
     }
     if !is_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let dir = base.join(project_dir);
     let jsonl = dir.join(format!("{session_id}.jsonl"));
@@ -530,7 +522,6 @@ pub(crate) fn deletion_targets(
     let jsonl_present = super::present(&jsonl)?;
     let state_present = super::present(&state_dir)?;
 
-    // 全部目标先验证、后删除：任一校验失败都不动任何文件
     let mut targets: Vec<PathBuf> = Vec::new();
     if jsonl_present {
         targets.push(super::verify_within_root(

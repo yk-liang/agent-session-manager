@@ -9,8 +9,13 @@ pub(crate) const TOOL_RESULT: i64 = 132;
 pub(crate) type ReadResult<T> = Result<T, Box<dyn Error>>;
 
 pub(crate) struct Schema {
-    pub steps: bool,
+    pub steps: Option<StepColumns>,
     pub generations: bool,
+}
+
+pub(crate) struct StepColumns {
+    pub status: &'static str,
+    pub error: &'static str,
 }
 
 fn open(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
@@ -54,11 +59,19 @@ pub(crate) fn read<T>(
     load: impl FnOnce(&Connection, Schema) -> ReadResult<T>,
 ) -> Result<T, String> {
     snapshot(path, |connection| {
+        let steps = if has_table(connection, "steps")? {
+            let stmt = connection.prepare("SELECT * FROM steps LIMIT 0")?;
+            let columns = stmt.column_names();
+            let column = |name: &'static str| if columns.contains(&name) { name } else { "NULL" };
+            Some(StepColumns { status: column("status"), error: column("error_details") })
+        } else {
+            None
+        };
         let schema = Schema {
-            steps: has_table(connection, "steps")?,
+            steps,
             generations: has_table(connection, "gen_metadata")?,
         };
-        if !schema.steps && !schema.generations && path.metadata()?.len() > 0 {
+        if schema.steps.is_none() && !schema.generations && path.metadata()?.len() > 0 {
             return Err("缺少会话表".into());
         }
         load(connection, schema)

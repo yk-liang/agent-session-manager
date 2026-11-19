@@ -278,8 +278,8 @@ pub trait AgentSource: Send + Sync {
     fn watch_roots(&self) -> Vec<PathBuf> {
         self.data_dir().into_iter().collect()
     }
-    /// usage 可包含归档、子代理及压缩日志；默认不猜测任何数据目录布局。
-    fn watch_paths(&self, _usage: bool) -> AgentWatchPaths {
+    /// 返回会话列表需要监听的路径。
+    fn watch_paths(&self) -> AgentWatchPaths {
         AgentWatchPaths::default()
     }
     #[allow(dead_code)] // Standalone catalog inspection examples.
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(source.0.load(Ordering::SeqCst), 1);
         assert!(source.prepare_catalog(filter, &|| false).is_ok());
         assert!(source.read_tool_payload("anything").is_none());
-        assert!(source.watch_paths(false).transcript_dirs.is_empty());
+        assert!(source.watch_paths().transcript_dirs.is_empty());
         assert!(codex::CodexSource.prepare_catalog(filter, &|| true).is_err());
     }
 

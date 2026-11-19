@@ -1,3 +1,4 @@
+import { addUsageInitScript } from '../helpers/usage-collector.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -9,14 +10,18 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 const pageErrors = [];
 page.on('pageerror', error => pageErrors.push(error.message));
 try {
-  await page.addInitScript(() => {
+  await addUsageInitScript(page, (_, createCollector) => {
     Object.defineProperty(document, 'hasFocus', { value: () => false });
     const row = id => ({ sessionId: id, projectDir: 'project', title: `Cached ${id}`, model: null, cwd: '/synthetic/project', realUserCount: 1, assistantTextCount: 1, hasTranscript: true, sizeBytes: 123, firstTs: null, lastTs: null });
     const state = window.__DIAGNOSTICS__ = { catalogMode: new URL(location.href).searchParams.get('catalog'), readable: [], copied: '', contentBroken: null, partial: false, syncFails: true, hold: null, release: null, listeners: new Map() };
     const failure = (operation, id = 'aaaa', code = 24) => `会话文件访问失败：/synthetic/project/${id}.jsonl\noperation: ${operation}\nstage: open\nerror_kind: ${code === 13 || code === 1 ? 'PermissionDenied' : 'Uncategorized'}\nos_code: ${code}\ncause: ${code === 1 ? 'Operation not permitted' : code === 13 ? 'Permission denied' : 'Too many open files'} (os error ${code})\nprocess: gui\npid: 1234\napp_version: 0.1.39`;
     const syntaxError = '会话内容无法解析：/synthetic/project/bbbb.jsonl（第 2 行）\noperation: session_detail\nstage: parse_json\nerror_kind: JsonSyntax\nos_code: none\ncause: trailing comma at line 1 column 8\nline: 2\ncolumn: 8';
     state.failure = failure;
-    window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (command, args = {}) => {
+    state.collector = createCollector(['qoder', 'claude'], async agent => {
+      if (state.syncFails && agent === 'qoder') throw failure('usage_sync', 'aaaa', 13);
+      return false;
+    });
+    window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: state.collector.bridge(async (command, args = {}) => {
       if (command === 'list_agents') return ['qoder', 'claude'].map(id => ({ id, displayName: id === 'qoder' ? 'Qoder' : 'Claude Code', installed: true, supportsFork: false, deletePolicy: 'trash' }));
       if (command === 'catalog') {
         if (state.catalogMode === 'failed') return { sessions: [], projects: [], warnings: Array.from({ length: 283 }, (_, i) => failure('catalog_metadata', `session-${i}`, 1)) };
@@ -32,15 +37,11 @@ try {
       if (command === 'plugin:clipboard-manager|write_text') { state.copied = args.text; return null; }
       if (command === 'plugin:event|listen') { state.listeners.set(args.event, args.handler); return 1; }
       if (command === 'search_conversations') return { hits: [], skipped: 0, cancelled: false };
-      if (command === 'sync_request_events') {
-        if (state.syncFails && args.agent === 'qoder') throw failure('usage_sync', 'aaaa', 13);
-        return { updatedAt: Date.now(), checkedFiles: 2, changedFiles: 0, bytesRead: 0 };
-      }
-      if (command === 'read_usage_summary') return { rows: [], health: {}, syncedAgents: ['qoder', 'claude'], revision: '1' };
+      if (command === 'read_usage_summary') return { rows: [], syncedAgents: ['qoder', 'claude'], revision: '1' };
       if (command === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: 50, revision: '1' };
-      if (command === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
       return null;
-    } };
+    }) };
+    void state.collector.check();
   });
   const card = id => page.locator('.session-card').filter({ hasText: `Cached ${id}` });
   const errorPanel = page.locator('.session-read-error');
@@ -59,8 +60,8 @@ try {
   assert.equal(await copied(), await page.evaluate(() => window.__DIAGNOSTICS__.failure('session_detail')));
   await card('bbbb').click();
   await page.waitForFunction(() => document.querySelectorAll('.read-error-badge').length === 2);
-  await page.locator('.catalog-warnings').getByText('1 条读取提示', { exact: true }).waitFor();
-  assert.match(await page.locator('.catalog-warnings').textContent(), /部分会话未能读取/);
+  await page.locator('.catalog-warnings').getByText('部分会话无法读取', { exact: true }).waitFor();
+  assert.match(await page.locator('.catalog-warnings').textContent(), /部分会话无法读取/);
   for (const width of [960, 1280]) {
     await page.setViewportSize({ width, height: 800 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
@@ -100,19 +101,15 @@ try {
   console.log(`PASS: invalid content has a distinct error; partial content keeps a copyable warning and can recover (${engine})`);
 
   await page.getByRole('button', { name: '用量', exact: true }).click();
-  const usageError = page.locator('.usage-sync-error');
-  await usageError.waitFor();
-  assert.match(await usageError.textContent(), /已保存的用量仍可查看/);
-  assert.deepEqual(await usageError.locator('.read-error-fields dd').allTextContents(), ['open', 'PermissionDenied', '13']);
-  await usageError.getByRole('button', { name: '复制诊断详情', exact: true }).click();
-  await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: usage_sync'));
-  assert.match(await copied(), /cause: Permission denied \(os error 13\)/);
-  await usageError.locator('summary').click();
-  await page.screenshot({ path: path.join(artifactDir, 'usage-read-diagnostics.png') });
+  const syncFailure = page.getByRole('button', { name: '同步状态，同步失败' });
+  await syncFailure.click();
+  const syncPanel = page.getByRole('dialog', { name: '用量同步状态' });
+  await syncPanel.getByText('读取失败，等待重试', { exact: true }).waitFor();
+  assert.doesNotMatch(await syncPanel.textContent(), /诊断详情|Permission denied/);
   await page.evaluate(() => { window.__DIAGNOSTICS__.syncFails = false; });
-  await usageError.getByRole('button', { name: '重试同步', exact: true }).click();
-  await usageError.waitFor({ state: 'detached' });
-  console.log(`PASS: usage sync exposes the original GUI diagnostic and clears it after a successful retry (${engine})`);
+  await syncPanel.getByRole('button', { name: '重试同步', exact: true }).click();
+  await syncFailure.waitFor({ state: 'hidden' });
+  console.log(`PASS: usage sync shows a concise failure and clears it after a successful retry (${engine})`);
 
   await page.getByRole('button', { name: '会话', exact: true }).click();
   await page.evaluate(() => { window.__DIAGNOSTICS__.hold = 'aaaa'; });
@@ -128,11 +125,11 @@ try {
 
   // Replay the reported cold-start shape: every file fails open and no summary is available.
   await page.goto(`${baseURL}?catalog=failed`);
-  await page.locator('.catalog-warnings').getByText('283 条读取提示', { exact: true }).waitFor();
+  await page.locator('.catalog-warnings').getByText('诊断详情（283 条）', { exact: true }).waitFor();
   assert.doesNotMatch(await page.locator('.sidebar').textContent(), /0 个会话|暂无会话/, 'failed reads must not imply an empty history');
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /会话数量暂不可确认/);
-  assert.match(await page.locator('.session-cards').textContent(), /会话列表读取不完整/);
-  assert.doesNotMatch(await page.locator('.session-cards').textContent(), /没有匹配的会话/);
+  assert.match(await page.locator('.session-cards').textContent(), /暂无可显示的会话/);
+  assert.doesNotMatch(await page.locator('.session-cards').textContent(), /暂无会话/);
   await page.setViewportSize({ width: 960, height: 600 });
   await page.screenshot({ path: path.join(artifactDir, 'catalog-all-unreadable.png') });
 

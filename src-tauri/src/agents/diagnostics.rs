@@ -10,10 +10,7 @@ fn context(
     cause: &str,
 ) -> String {
     let executable = std::env::current_exe().ok();
-    let collector = std::env::args_os().any(|arg| arg == "--usage-collector");
-    let process = if collector {
-        "usage_collector"
-    } else if executable
+    let process = if executable
         .as_ref()
         .is_some_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
     {
@@ -92,13 +89,8 @@ fn platform() -> String {
 }
 
 pub fn io(operation: &str, stage: &str, path: &Path, error: &io::Error) -> String {
-    let subject = if operation.starts_with("usage_") {
-        "用量数据"
-    } else {
-        "会话文件"
-    };
     format!(
-        "{subject}访问失败：{}\n{}",
+        "会话文件访问失败：{}\n{}",
         path.display(),
         context(
             operation,
@@ -108,21 +100,6 @@ pub fn io(operation: &str, stage: &str, path: &Path, error: &io::Error) -> Strin
             error.raw_os_error(),
             &error.to_string()
         )
-    )
-}
-
-pub fn database(operation: &str, stage: &str, path: &Path, error: &rusqlite::Error) -> String {
-    let kind = error
-        .sqlite_error()
-        .map_or_else(|| "SQLiteError".into(), |e| format!("SQLite{:?}", e.code));
-    // SQLite 的扩展码不是系统 errno；没有原始 OS 错误时不可猜测成权限错误。
-    let code = error
-        .sqlite_error()
-        .map_or_else(|| "none".into(), |e| e.extended_code.to_string());
-    format!(
-        "用量数据库操作失败：{}\n{}\nsqlite_code: {code}",
-        path.display(),
-        context(operation, stage, path, &kind, None, &error.to_string())
     )
 }
 

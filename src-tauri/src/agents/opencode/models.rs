@@ -24,7 +24,12 @@ pub(crate) fn model_id(message: &Value) -> Option<String> {
         .or_else(|| text(nested))?;
     let provider =
         text(message.get("providerID")).or_else(|| text(nested.and_then(|v| v.get("providerID"))));
-    Some(provider.map_or_else(|| model.into(), |provider| format!("{provider}/{model}")))
+    Some(match provider {
+        Some(provider) if model.split_once('/').is_none_or(|(prefix, _)| prefix != provider) => {
+            format!("{provider}/{model}")
+        }
+        _ => model.to_owned(),
+    })
 }
 
 /// 一次读取轻量消息元数据，不连接 part 表，也不逐会话扫描工具输出。

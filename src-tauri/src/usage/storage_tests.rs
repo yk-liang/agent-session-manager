@@ -28,7 +28,7 @@ fn legacy(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     );
     write(&logs.join("copy.jsonl"), &[record("msg_shared", 10)]);
     let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     drop(store);
     let mut db = Connection::open(&ledger).unwrap();
     let tx = db.transaction().unwrap();
@@ -39,20 +39,19 @@ fn legacy(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         INSERT INTO old_events SELECT e.id,e.agent,e.time,e.model,e.status,e.data,s.path FROM usage_request_events e JOIN usage_ledger_sources s ON s.id=e.source;") .unwrap();
     {
         let mut stmt = tx
-            .prepare("SELECT agent,path,data,dirty,health FROM usage_ledger_sources")
+            .prepare("SELECT agent,path,data,dirty FROM usage_ledger_sources")
             .unwrap();
         let mut rows = stmt.query([]).unwrap();
         while let Some(row) = rows.next().unwrap() {
             let mut value: Value = storage::decode(row.get_ref(2).unwrap()).unwrap();
             value["unknown_legacy_metadata"] = json!({"keep":"exactly", "count":17});
             tx.execute(
-                "INSERT INTO old_sources VALUES (?1,?2,?3,?4,?5)",
+                "INSERT INTO old_sources VALUES (?1,?2,?3,?4,NULL)",
                 params![
                     row.get::<_, String>(0).unwrap(),
                     row.get::<_, String>(1).unwrap(),
                     value.to_string(),
-                    row.get::<_, i64>(3).unwrap(),
-                    row.get::<_, Option<String>>(4).unwrap()
+                    row.get::<_, i64>(3).unwrap()
                 ],
             )
             .unwrap();
@@ -119,14 +118,14 @@ fn storage_migration_preserves_deleted_history_identity_and_every_event_field() 
         .unwrap(),
         2
     );
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     assert_eq!(events_snapshot(&mut store.ledger().unwrap().db), expected);
     // 恢复副本及迟到的最终计量，仍走原有归并；恢复历史不会多计一次。
     write(
         &logs.join("restored.jsonl"),
         &[record("msg_shared", 10), record("msg_new", 30)],
     );
-    summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
     event_tests::assert_index_matches_full(&mut store, "claude");
     let page = events::page(&mut store.ledger().unwrap().db, Default::default(), &|| {
         false
@@ -199,7 +198,7 @@ fn cache_eviction_keeps_warm_stamps_and_replayed_usage_deduplicated() {
     let file = logs.join("a.jsonl");
     write(&file, &[record("msg_a", 10)]);
     let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     let db = Connection::open(&cache).unwrap();
     // 未证实已入账的旧缓存不参与淘汰，即使会使总量暂时超过预算。
     db.execute(
@@ -215,7 +214,7 @@ fn cache_eviction_keeps_warm_stamps_and_replayed_usage_deduplicated() {
         1
     );
     assert_eq!(
-        summary::sync_at("claude", &[logs.clone()], &mut store, &|| false)
+        ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false)
             .unwrap()
             .bytes_read,
         0
@@ -226,10 +225,10 @@ fn cache_eviction_keeps_warm_stamps_and_replayed_usage_deduplicated() {
         record("msg_b", 20)
     )
     .unwrap();
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     event_tests::assert_index_matches_full(&mut store, "claude");
     fs::remove_file(file).unwrap();
-    summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
     assert_eq!(
         db.query_row("SELECT count(*) FROM usage_file_stamps", [], |r| r
             .get::<_, i64>(0))
@@ -255,7 +254,7 @@ fn legacy_cache_import_keeps_unreadable_rows_even_when_upgrade_fails() {
         let ledger = dir.path().join("ledger.sqlite3");
         write(&logs.join("gone.jsonl"), &[record("msg_legacy", 10)]);
         let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-        summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+        ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
         drop(store);
         let db = Connection::open(&cache).unwrap();
         let (scope, path, data): (String, String, Value) = db
@@ -286,7 +285,7 @@ fn legacy_cache_import_keeps_unreadable_rows_even_when_upgrade_fails() {
         fs::remove_file(&ledger).unwrap();
         fs::remove_dir_all(&logs).unwrap();
         let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-        summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+        ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
         let page = events::page(&mut store.ledger().unwrap().db, Default::default(), &|| {
             false
         })
@@ -347,7 +346,7 @@ fn cache_reclaims_multiple_pages_without_rescanning_unchanged_logs() {
     let cache = dir.path().join("cache.sqlite3");
     write(&logs.join("a.jsonl"), &[record("msg_a", 10)]);
     let mut store = Store::open_with_ledger(Some(&cache), Some(&dir.path().join("ledger.sqlite3")));
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     let db = Connection::open(&cache).unwrap();
     // 用临时表制造已释放的数据库页，避免依赖压缩率或生成大量无关日志。
     db.execute_batch("CREATE TABLE scratch(data BLOB); INSERT INTO scratch VALUES (zeroblob(2097152)); DROP TABLE scratch;").unwrap();
@@ -357,7 +356,7 @@ fn cache_reclaims_multiple_pages_without_rescanning_unchanged_logs() {
     };
     let before = free();
     assert!(before > 256);
-    let sync = summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+    let sync = ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
     assert_eq!(sync.bytes_read, 0);
     assert!(
         before - free() >= 256,

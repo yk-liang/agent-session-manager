@@ -1,5 +1,6 @@
 use super::*;
 use events::{EventPage, EventQuery};
+use request_parse::RequestOutcome;
 use serde_json::{json, Value};
 use std::{io::Write, path::Path};
 
@@ -43,8 +44,9 @@ pub(super) fn assert_index_matches_full(store: &mut Store, agent: &str) {
             }
         }
     }
-    let (samples, _, _) = normalize::records(agent, &files);
+    let samples = normalize::records(agent, &files);
     let expected: BTreeMap<_, _> = normalize::unique(
+        agent,
         files
             .values()
             .flat_map(|f| f.failures.iter().cloned())
@@ -144,7 +146,7 @@ fn request_updates_do_not_decode_or_rewrite_unrelated_history_after_restart() {
             claude("new", t + 20000, 20, true)
         };
         append(&logs.join("active.jsonl"), line);
-        let result = summary::sync_at(agent, &[logs], &mut store, &|| false).unwrap();
+        let result = ingest::sync_at(agent, &[logs], &mut store, &|| false).unwrap();
         assert_eq!(result.changed_files, 1);
         assert_eq!(page(&mut store, EventQuery::default()).total, 3);
     }
@@ -165,13 +167,16 @@ fn request_events_append_refine_restart_and_delete_preserve_one_response() {
     let path = logs.join("a.jsonl");
     let ledger = dir.path().join("ledger.sqlite");
     let t = 1_790_000_000_000i64;
-    write(&path, &[start("a", t), claude("a", t + 1000, 10, false)]);
+    let mut first_chunk = claude("a", t + 1000, 10, false);
+    first_chunk["message"]["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":30});
+    write(&path, &[start("a", t), first_chunk]);
     let mut store = Store::open_with_ledger(None, Some(&ledger));
     scan("claude", &logs, &mut store);
     let first = page(&mut store, EventQuery::default());
     assert_eq!(first.total, 1);
     assert_eq!(first.events[0].output_tps, Some(10.0));
-    assert_eq!(first.events[0].status, "unknown");
+    assert_eq!(first.events[0].status, RequestOutcome::Success);
     let end = claude("a", t + 2000, 100, true).to_string();
     fs::OpenOptions::new()
         .append(true)
@@ -197,12 +202,12 @@ fn request_events_append_refine_restart_and_delete_preserve_one_response() {
     let e = &final_page.events[0];
     assert_eq!(final_page.total, 1);
     assert_eq!(e.id, first.events[0].id);
-    assert_eq!(e.status, "success");
+    assert_eq!(e.status, RequestOutcome::Success);
     assert_eq!(e.tokens.input_tokens, 550);
+    assert_eq!(e.tokens.cache_write_1h_tokens, 30);
     assert_eq!(e.output_tps, Some(50.0));
     assert_eq!(e.request.latency_ms, Some(2000));
     assert_eq!(e.request.timing.as_deref(), Some("observed"));
-    assert_eq!(e.request.cost_usd, None);
     let before = store.ledger().unwrap().db.total_changes();
     page(&mut store, EventQuery::default());
     assert_eq!(
@@ -278,6 +283,16 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
     let p = dir.path().join("rollout.jsonl");
     let t = 1_790_000_000_000i64;
     let mut lines = codex_lines(t);
+    lines[0]["payload"]["originator"] = json!("codex-tui");
+    lines[3]["payload"]["thread_settings"]["model"] = json!("gpt-from-settings");
+    lines.splice(
+        4..4,
+        [
+            codex(t + 300, "event_msg", json!({"type":"item_completed","item":{"type":"UserMessage"},"completed_at_ms":t+300})),
+            codex(t + 1800, "event_msg", json!({"type":"item_completed","item":{"type":"Reasoning"},"completed_at_ms":t+1800})),
+            codex(t + 1990, "event_msg", json!({"type":"item_completed","item":{"type":"FileChange"},"completed_at_ms":t+1990})),
+        ],
+    );
     let completed = lines.pop().unwrap();
     write(&p, &lines);
     let mut store = Store::open(None);
@@ -290,17 +305,24 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
     let result = page(&mut store, EventQuery::default());
     let e = &result.events[0];
     assert_eq!(e.id, first.events[0].id);
-    assert_eq!(e.output_tps, Some(50.0));
-    assert_eq!(e.request.timing.as_deref(), Some("estimated"));
-    assert_eq!(e.request.ttft_ms, Some(400));
-    assert_eq!(e.request.ttft_scope.as_deref(), Some("turn"));
+    assert_eq!(e.model, "gpt-from-settings");
+    assert_eq!(e.request.client.as_deref(), Some("codex-tui"));
+    assert_eq!(e.request.kind.as_deref(), Some("cli"));
+    assert_eq!(e.request.started_at, Some(t + 300));
+    assert_eq!(e.request.latency_ms, Some(1700));
+    assert_eq!(
+        e.request.timing.as_deref(),
+        Some(codex::BOUNDARY_ESTIMATE)
+    );
+    assert_eq!(e.request.ttft_ms, Some(100));
+    assert_eq!(e.request.ttft_scope.as_deref(), Some("request"));
     assert_eq!(e.request.tier.as_deref(), Some("priority"));
     append(
         &p,
         codex(
             t + 3000,
             "event_msg",
-            json!({"type":"error","message":"SECRET_RESPONSE_ERROR"}),
+            json!({"type":"error","message":"Connection closed before the response finished"}),
         ),
     );
     append(
@@ -320,6 +342,8 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
         .find(|e| e.request.scope.as_deref() == Some("usage_delta"))
         .unwrap();
     assert_eq!(aggregate.output_tps, None);
+    assert_eq!(aggregate.request.latency_ms, None);
+    assert_eq!(aggregate.status, RequestOutcome::Success);
     let failed = page(
         &mut store,
         EventQuery {
@@ -329,9 +353,162 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
     );
     assert_eq!(failed.total, 1);
     assert_eq!(failed.events[0].request.scope.as_deref(), Some("error"));
-    assert!(!serde_json::to_string(&failed)
-        .unwrap()
-        .contains("SECRET_RESPONSE_ERROR"));
+    assert_eq!(
+        failed.events[0].request.error.as_ref().unwrap().message.as_deref(),
+        Some("Connection closed before the response finished")
+    );
+
+    let ledger = store.ledger().unwrap();
+    let changed = ledger
+        .db
+        .execute(
+            "UPDATE usage_request_events SET data=json_set(data,'$.request.kind','vscode')
+         WHERE id=?1 AND json_extract(data,'$.request.kind')='cli'",
+            [&e.id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let old_page = page(&mut store, EventQuery::default());
+    let indexed = old_page
+        .events
+        .iter()
+        .find(|event| event.id == e.id)
+        .unwrap();
+    assert_eq!(indexed.request.kind.as_deref(), Some("cli"));
+    append(
+        &p,
+        codex(
+            t + 5000,
+            "compacted",
+            json!({"compaction_response_id":"response-one"}),
+        ),
+    );
+    scan("codex", dir.path(), &mut store);
+    let compacted = page(&mut store, EventQuery::default());
+    assert_eq!(compacted.total, result.total);
+    let response = compacted
+        .events
+        .iter()
+        .find(|event| event.id == e.id)
+        .unwrap();
+    assert_eq!(response.request.kind.as_deref(), Some("compaction"));
+    assert_eq!(response.request.latency_ms, None);
+    assert_eq!(response.request.ttft_ms, None);
+}
+
+#[test]
+fn request_events_codex_ignores_unchanged_counters_and_context_snapshots_for_timing() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = 1_790_000_000_000i64;
+    let counter = |time, input, output, total| {
+        let usage = json!({"input_tokens":input,"output_tokens":output,"total_tokens":total});
+        codex(time, "event_msg", json!({"type":"token_count","info":{
+            "total_token_usage":usage,"last_token_usage":usage
+        }}))
+    };
+    let path = dir.path().join("rollout.jsonl");
+    let mut baseline = counter(t - 1000, 600, 40, 640);
+    baseline["payload"]["info"]["last_token_usage"] =
+        json!({"input_tokens":0,"output_tokens":0,"total_tokens":16497});
+    write(&path, &[
+        codex(t - 10_000, "session_meta", json!({"id":"codex-session"})),
+        baseline,
+        counter(t - 300, 50, 10, 60),
+        codex(t, "event_msg", json!({"type":"task_started","turn_id":"new-turn"})),
+        counter(t + 1000, 50, 10, 60),
+        counter(t + 1200, 0, 0, 16497),
+        counter(t + 4000, 100, 25, 125),
+        codex(t + 5000, "event_msg", json!({"type":"task_complete","turn_id":"new-turn","time_to_first_token_ms":2000})),
+    ]);
+    let mut store = Store::open(None);
+    scan("codex", dir.path(), &mut store);
+    let page = page(&mut store, EventQuery::default());
+    assert_eq!(page.total, 2);
+    let latest = &page.events[0];
+    assert_eq!(latest.request.latency_ms, Some(4000));
+    assert_eq!(latest.request.ttft_ms, Some(2000));
+    assert_eq!(latest.request.ttft_scope.as_deref(), Some("request"));
+    assert_eq!(latest.tokens.unclassified_tokens, 0);
+}
+
+#[test]
+fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    let path = logs.join("rollout.jsonl");
+    let t = 1_790_000_000_000i64;
+    let usage = json!({"input_tokens":1000,"output_tokens":100});
+    let mut lines = codex_lines(t);
+    lines.pop();
+    lines.extend([
+        codex(t + 13_990, "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution"}})),
+        codex(t + 14_000, "token_usage_record", json!({"turn_id":"turn-one","response_id":"response-two","usage":usage})),
+        codex(t + 14_500, "event_msg", json!({"type":"task_complete","turn_id":"turn-one","time_to_first_token_ms":400})),
+    ]);
+    write(&path, &lines);
+    let ledger = dir.path().join("ledger.sqlite");
+    let cache_path = dir.path().join("cache.sqlite");
+    let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger));
+    let (mut old, _) = cache::read_file(&path, "codex", None, false, &|| false).unwrap();
+    old.parser_version -= 1;
+
+    let bad_timing = |request: &mut request_parse::RequestMeta| {
+        if let Some(end) = request.finished_at {
+            request.started_at = Some(end - 10);
+            request.latency_ms = Some(10);
+            request.timing = Some("estimated".into());
+        }
+    };
+    for sample in &mut old.samples {
+        bad_timing(&mut sample.request);
+        sample.request.tier = Some("stale-tier".into());
+    }
+    let mut archive = old.clone();
+    let archive_path = logs.join("removed-rollout.jsonl");
+    archive.origin_path = Some(archive_path.clone());
+    old.state.session = "copied-parent".into();
+    let old_store = store.ledger().unwrap();
+    old_store
+        .commit(
+            "codex",
+            &BTreeMap::from([(path.clone(), old), (archive_path.clone(), archive)]),
+            &BTreeSet::from([path, archive_path]),
+            t,
+        )
+        .unwrap();
+    events::refresh(&mut old_store.db, "codex", &|| false).unwrap();
+    old_store.db.execute(
+        "UPDATE usage_request_events SET data=json_set(data,'$.request.timing','estimated','$.request.latencyMs',10,'$.outputTps',10000)",
+        [],
+    ).unwrap();
+    let before = page(&mut store, EventQuery::default());
+    assert_eq!(before.total, 2);
+    assert!(before
+        .events
+        .iter()
+        .all(|e| e.request.latency_ms.is_none() && e.output_tps.is_none()));
+    let summary = summary::read_from(&mut store, Default::default(), &|| false).unwrap();
+    assert!(summary
+        .rows
+        .iter()
+        .all(|row| row.metrics.latency_count == 0 && row.metrics.tps_count == 0));
+    drop(store);
+
+    let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger));
+    scan("codex", &logs, &mut store);
+    let recalculated = page(&mut store, EventQuery::default());
+    assert_eq!(recalculated.total, 2);
+    assert_eq!(recalculated.events[0].request.latency_ms, Some(11_950));
+    for event in recalculated.events {
+        assert_eq!(event.request.tier.as_deref(), Some("priority"));
+        assert_eq!(event.session, "codex-session");
+        let previous = before
+            .events
+            .iter()
+            .find(|previous| previous.id == event.id)
+            .unwrap();
+        assert_eq!(event.tokens, previous.tokens);
+    }
 }
 
 #[test]
@@ -349,10 +526,15 @@ fn request_events_numbered_pages_filters_and_refresh_anchor() {
     scan("claude", dir.path(), &mut store);
     let first = page(&mut store, EventQuery::default());
     assert_eq!((first.total, first.events.len()), (105, 50));
-    store.ledger().unwrap().db.execute(
-        "UPDATE usage_request_events SET data=json_set(data,'$.modelName','Old display name')",
-        [],
-    ).unwrap();
+    store
+        .ledger()
+        .unwrap()
+        .db
+        .execute(
+            "UPDATE usage_request_events SET data=json_set(data,'$.modelName','Old display name')",
+            [],
+        )
+        .unwrap();
     let second = page(
         &mut store,
         EventQuery {
@@ -362,7 +544,10 @@ fn request_events_numbered_pages_filters_and_refresh_anchor() {
         },
     );
     assert_eq!(second.events.len(), 50);
-    assert!(second.events.iter().all(|event| event.model == "claude-sonnet"));
+    assert!(second
+        .events
+        .iter()
+        .all(|event| event.model == "claude-sonnet"));
     let third = page(
         &mut store,
         EventQuery {
@@ -501,6 +686,11 @@ fn request_events_unmetered_failures_and_replayed_blocks_do_not_duplicate() {
     let mut error = claude("failure", t + 4000, 0, true);
     error["isApiErrorMessage"] = json!(true);
     error["apiErrorStatus"] = json!(429);
+    error["error"] = json!("rate_limit");
+    error["message"]["content"] = json!([
+        {"type":"text","text":"Rate limit exceeded."},
+        {"type":"tool_use","input":{"text":"PRIVATE_TOOL_ARGUMENTS"}}
+    ]);
     error["message"]["usage"] = Value::Null;
     write(
         &p,
@@ -520,12 +710,20 @@ fn request_events_unmetered_failures_and_replayed_blocks_do_not_duplicate() {
     let success = result
         .events
         .iter()
-        .find(|e| e.status == "success")
+        .find(|e| e.status == RequestOutcome::Success)
         .unwrap();
     assert_eq!(success.session, "session-one");
     assert_eq!(success.output_tps, Some(100.0));
-    let failed = result.events.iter().find(|e| e.status == "failed").unwrap();
+    let failed = result
+        .events
+        .iter()
+        .find(|e| e.status == RequestOutcome::Failed)
+        .unwrap();
     assert_eq!(failed.request.http_status, Some(429));
+    let error = failed.request.error.as_ref().unwrap();
+    assert_eq!(error.kind.as_deref(), Some("rate_limit"));
+    assert_eq!(error.message.as_deref(), Some("Rate limit exceeded."));
+    assert!(success.request.error.is_none());
     assert!(!failed.details.output_recorded);
     assert_eq!(failed.output_tps, None);
 }
@@ -556,7 +754,7 @@ fn request_events_migrate_v1_ledger_even_when_source_is_gone() {
     assert_eq!(result.total, 1);
     assert_eq!(result.events[0].tokens.output_tokens, 80);
     assert_eq!(result.events[0].output_tps, None);
-    assert_eq!(result.events[0].status, "unknown");
+    assert_eq!(result.events[0].status, RequestOutcome::Success);
 }
 
 #[test]
@@ -602,14 +800,21 @@ fn export_request_events_fixture_if_requested() {
     let mut lines = Vec::new();
     for i in 0..108 {
         let time = t - i * 10_000;
-        lines.extend([
-            start(&i.to_string(), time),
-            claude(&i.to_string(), time + 2000, 100 + i as u64, true),
-        ]);
+        let id = i.to_string();
+        let mut response = claude(&id, time + 2000, 100 + i as u64, true);
+        if i == 107 {
+            response["message"]["model"] = json!("demo:free");
+            response["message"]["usage"]["service_tier"] = json!("priority");
+        }
+        lines.extend([start(&id, time), response]);
     }
     let mut failure = claude("failed", t + 3000, 0, true);
     failure["isApiErrorMessage"] = json!(true);
     failure["apiErrorStatus"] = json!(503);
+    failure["error"] = json!("overloaded");
+    failure["message"]["content"] = json!([
+        {"type":"text","text":"The provider is temporarily unavailable.\nTry again in a moment."}
+    ]);
     failure["message"]["usage"] = Value::Null;
     lines.push(failure);
     write(&dir.path().join("claude/a.jsonl"), &lines);
@@ -645,6 +850,25 @@ fn live_request_events_if_requested() {
     assert!(result.total > 0);
     assert!(result.events.iter().any(|e| e.output_tps.is_some()));
     assert!(result.events.iter().all(|e| e.request.source.is_some()));
+    if agent == "opencode" {
+        let projects = result
+            .events
+            .iter()
+            .filter(|event| event.request.project.is_some())
+            .count();
+        let efforts = result
+            .events
+            .iter()
+            .filter(|event| event.request.effort.is_some())
+            .count();
+        let tiers = result
+            .events
+            .iter()
+            .filter(|event| event.request.tier.is_some())
+            .count();
+        assert!(projects > 0 && efforts > 0);
+        println!("OpenCode page: {projects} with project, {efforts} with reasoning effort, {tiers} with service tier");
+    }
     println!(
         "actual {agent}: {} retained events, {} with timing, {} with TTFT",
         result.total,
@@ -694,7 +918,7 @@ fn request_events_ledger_copy_performance_if_requested() {
 }
 
 #[test]
-fn request_events_opencode_v2_keeps_timing_cost_and_error_without_body() {
+fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.db");
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -705,7 +929,7 @@ fn request_events_opencode_v2_keeps_timing_cost_and_error_without_body() {
     .unwrap();
     let t = 1_790_000_000_000i64;
     db.execute("INSERT INTO session_v2(id,directory,version,time_created,time_updated) VALUES ('ses_a','/fixture','2.2.0',?1,?1)",[t-1000]).unwrap();
-    let data = json!({"model":{"id":"live","providerID":"local"},"agent":"build","time":{"created":t,"completed":t+2000},"tokens":{"input":100,"output":100,"reasoning":20,"cache":{"read":50,"write":0}},"finish":"stop","cost":0.002,"content":[{"type":"text","text":"PRIVATE_V2_BODY"}]});
+    let data = json!({"model":{"id":"live","providerID":"local","variant":"high","serviceTier":"flex"},"agent":"build","time":{"created":t,"firstToken":t+450,"streamed":t+2000,"completed":t+6000},"tokens":{"input":100,"output":100,"reasoning":20,"cache":{"read":50,"write":0}},"finish":"stop","content":[{"type":"text","text":"PRIVATE_V2_BODY"}]});
     db.execute(
         "INSERT INTO session_message VALUES ('msg_a','ses_a','assistant',0,?1,?1,?2)",
         rusqlite::params![t, data.to_string()],
@@ -716,19 +940,29 @@ fn request_events_opencode_v2_keeps_timing_cost_and_error_without_body() {
     let result = page(&mut store, EventQuery::default());
     assert_eq!(result.total, 1);
     let e = &result.events[0];
-    assert_eq!(e.status, "success");
+    assert_eq!(e.status, RequestOutcome::Success);
+    assert_eq!(e.request.project.as_deref(), Some("/fixture"));
+    assert_eq!(e.request.effort.as_deref(), Some("high"));
+    assert_eq!(e.request.tier.as_deref(), Some("flex"));
+    assert_eq!(e.request.version.as_deref(), Some("2.2.0"));
     assert_eq!(e.output_tps, Some(60.0));
-    assert_eq!(e.request.cost_usd, Some(0.002));
+    assert_eq!(e.request.ttft_ms, Some(450));
+    assert!(result.has_service_tiers);
     assert_eq!(e.request.timing.as_deref(), Some("recorded"));
     assert!(!serde_json::to_string(&result)
         .unwrap()
         .contains("PRIVATE_V2_BODY"));
     let mut failure = data;
-    failure["error"] = json!({"name":"APIError","data":{"message":"PRIVATE_ERROR_BODY"}});
+    failure["error"] = json!({"name":"APIError","data":{
+        "message":"Provider unavailable",
+        "statusCode":503,
+        "responseBody":"PRIVATE_RESPONSE_BODY"
+    }});
+    failure["tokens"] = Value::Null;
     failure["time"]["created"] = json!(t + 3000);
     failure["time"]["completed"] = json!(t + 4000);
     db.execute(
-        "INSERT INTO session_message VALUES ('msg_b','ses_a','assistant',1,?1,?1,?2)",
+        "INSERT INTO session_message VALUES ('msg_b','ses_a','compaction',1,?1,?1,?2)",
         rusqlite::params![t + 3000, failure.to_string()],
     )
     .unwrap();
@@ -737,14 +971,63 @@ fn request_events_opencode_v2_keeps_timing_cost_and_error_without_body() {
         &mut store,
         EventQuery {
             status: Some("failed".into()),
+            project: Some("/fixture".into()),
+            include_filters: true,
             ..Default::default()
         },
     );
     assert_eq!(failed.total, 1);
+    let options = failed.filters.as_ref().unwrap();
+    assert_eq!(options.projects["/fixture"], 1);
+    assert_eq!(options.results["success"], 1);
+    assert_eq!(options.results["failed"], 1);
+    assert!(!failed.events[0].details.input_recorded);
     assert_eq!(failed.events[0].output_tps, None);
-    assert!(!serde_json::to_string(&failed)
-        .unwrap()
-        .contains("PRIVATE_ERROR_BODY"));
+    assert_eq!(failed.events[0].request.latency_ms, Some(1000));
+    assert_eq!(failed.events[0].request.ttft_ms, None);
+    assert_eq!(failed.events[0].request.http_status, Some(503));
+    assert_eq!(failed.events[0].request.kind.as_deref(), Some("compaction"));
+    let error = failed.events[0].request.error.as_ref().unwrap();
+    assert_eq!(error.kind.as_deref(), Some("APIError"));
+    assert_eq!(error.message.as_deref(), Some("Provider unavailable"));
+    let serialized = serde_json::to_string(&failed).unwrap();
+    assert!(!serialized.contains("PRIVATE_RESPONSE_BODY"));
+    assert!(!serialized.contains("PRIVATE_V2_BODY"));
+}
+
+#[test]
+fn usage_excludes_a_legacy_open_code_mirror_when_native_claude_usage_is_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = 1_790_000_000_000i64;
+    let file = dir.path().join("storage/message/open-code/msg_mirror.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, json!({
+        "id":"msg_mirror","role":"assistant","sessionID":"open-code",
+        "modelID":"claude-agent/claude","providerID":"claude-agent",
+        "time":{"created":t,"completed":t+1000},
+        "tokens":{"input":10,"output":10},
+        "content":[{"type":"native","native":{"sessionID":"native"}}]
+    }).to_string()).unwrap();
+    let mut store = Store::open(None);
+    scan("opencode", dir.path(), &mut store);
+    let before = page(&mut store, EventQuery::default());
+    assert_eq!(before.total, 1);
+    assert_eq!(before.events[0].model, "claude-agent/claude");
+
+    let mut native = claude("native-usage", t, 10, true);
+    native["sessionId"] = json!("native");
+    write(&dir.path().join("native.jsonl"), &[native]);
+    scan("claude", dir.path(), &mut store);
+    let result = page(&mut store, EventQuery {include_filters: true, ..Default::default()});
+    assert_eq!(result.total, 1);
+    assert_eq!(result.events[0].agent, "claude");
+    let report = summary::read_from(&mut store, Default::default(), &|| false).unwrap();
+    assert_eq!(report.rows.iter().map(|row| row.record_count).sum::<u64>(), 1);
+    let prices = super::pricing::Pricer::open(None, None)
+        .list_model_prices_from_db(&store.ledger().unwrap().db, None)
+        .unwrap();
+    assert_eq!(prices.models.len(), 1);
+    assert_eq!(prices.models[0].agents, ["claude"]);
 }
 
 #[test]
@@ -780,4 +1063,123 @@ fn request_events_codex_copied_response_preserves_original_session_and_timing() 
     assert_eq!(result.total, 1);
     assert_eq!(result.events[0].session, "codex-session");
     assert_eq!(result.events[0].output_tps, Some(50.0));
+}
+
+/// 时间分布覆盖整个筛选结果（不止当前页）：按状态计数、缺时间的记录单列，
+/// 且“某时段之后的记录数”正好是按时间倒序跳到该时段最新一条的分页偏移。
+#[test]
+fn request_timeline_counts_filtered_ledger_and_maps_buckets_to_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    let ledger = dir.path().join("ledger.sqlite");
+    let midnight = Local
+        .with_ymd_and_hms(2026, 3, 10, 0, 0, 0)
+        .earliest()
+        .unwrap()
+        .timestamp_millis();
+    let t = midnight + 10 * 3_600_000;
+    let mut line = claude("a", t, 10, true);
+    line["message"]["usage"]["service_tier"] = json!("priority");
+    line["message"]["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens": 20, "ephemeral_1h_input_tokens": 30});
+    write(&logs.join("a.jsonl"), &[line]);
+    let mut store = Store::open_with_ledger(None, Some(&ledger));
+    scan("claude", &logs, &mut store);
+    let first = page(&mut store, EventQuery::default());
+    assert_eq!(first.events[0].tokens.cache_write_tokens, 50);
+    assert_eq!(first.events[0].tokens.cache_write_1h_tokens, 30);
+    for (id, time, status) in [
+        ("b", t + 3_600_000, "failed"),
+        ("c", t + 7_200_000, "success"),
+        ("d", t + 7_260_000, "unknown"),
+        ("e", 0, "unknown"),
+    ] {
+        store
+            .ledger()
+            .unwrap()
+            .db
+            .execute(
+                "INSERT INTO usage_request_events(id,agent,time,model,status,data,source)
+                 SELECT ?1,agent,?2,model,?3,
+                    json_set(data,'$.id',?1,'$.time',?2,'$.status',?3,'$.cacheWriteTokens',0,'$.cacheWrite1hTokens',0,'$.request.tier',NULL),source
+                 FROM usage_request_events LIMIT 1",
+                rusqlite::params![id, time, status],
+            )
+            .unwrap();
+    }
+    let day = EventQuery {
+        from: Some(midnight),
+        to: Some(midnight + 86_400_000),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let bounded = page(&mut store, day.clone());
+    assert!(bounded.has_cache_writes);
+    assert!(bounded.has_service_tiers);
+    assert_eq!(bounded.events[0].request.tier, None);
+    assert_eq!(bounded.events[0].tokens.cache_write_tokens, 0);
+    let timeline = &bounded.timeline;
+    assert_eq!(
+        (timeline.start, timeline.step, timeline.success.len()),
+        (midnight, 15 * 60_000, 96)
+    );
+    assert_eq!(timeline.success.iter().sum::<u64>(), 3);
+    assert_eq!(
+        timeline.failed[44], 1,
+        "11:00 falls in the 45th quarter hour"
+    );
+    assert_eq!(
+        timeline.untimed.success, 0,
+        "a bounded range excludes untimed records"
+    );
+    assert_eq!(bounded.total, 4);
+    // 跳到 11:00 时段：之后的记录数即偏移，limit=1 时该页正是失败请求。
+    let offset: u64 = (45..96).map(|i| timeline.success[i] + timeline.failed[i]).sum();
+    let jumped = page(
+        &mut store,
+        EventQuery {
+            page: Some(offset + 1),
+            ..day
+        },
+    );
+    assert_eq!(jumped.events[0].status, RequestOutcome::Failed);
+
+    let all = page(&mut store, EventQuery::default());
+    assert_eq!(all.timeline.untimed.success, 1);
+    assert_eq!(all.total, 5);
+    let successful = page(
+        &mut store,
+        EventQuery {
+            status: Some("success".into()),
+            include_filters: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(successful.total, 4);
+    assert_eq!(
+        successful.filters.unwrap().results,
+        BTreeMap::from([("failed".into(), 1), ("success".into(), 4)])
+    );
+    assert!(successful.events.iter().all(|event| event.status == RequestOutcome::Success));
+    let summary = summary::read_from(&mut store, summary::SummaryQuery::default(), &|| false)
+        .unwrap();
+    assert_eq!(
+        summary.rows.iter().map(|row| row.metrics.success_count).sum::<u64>(),
+        4
+    );
+    assert_eq!(
+        summary.rows.iter().map(|row| row.metrics.failed_count).sum::<u64>(),
+        1
+    );
+    let failed = page(
+        &mut store,
+        EventQuery {
+            status: Some("failed".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(failed.timeline.success.iter().sum::<u64>(), 0);
+    assert_eq!(failed.timeline.failed.iter().sum::<u64>(), 1);
+    assert!(!failed.has_cache_writes);
+    assert!(!failed.has_service_tiers);
 }

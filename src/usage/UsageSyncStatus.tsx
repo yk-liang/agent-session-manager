@@ -1,0 +1,111 @@
+import { useEffect, useId, useRef, useState } from "react";
+import { CircleAlert, LoaderCircle } from "lucide-react";
+import type { AgentInfo } from "../types";
+import type { UsageSyncProgress, UsageSyncState } from "./types";
+import { useDelayedBusy } from "../useDelayedBusy";
+import { formatClock, formatCount, formatDateTime } from "./format";
+import UiIcon from "../components/UiIcon";
+
+const PHASES: Record<UsageSyncProgress["phase"], string> = {
+  waiting: "等待同步",
+  discovering: "查找用量记录",
+  reading: "读取用量记录",
+  indexing: "整理请求",
+  complete: "已完成",
+};
+
+export function formatSyncProgress(progress: UsageSyncProgress) {
+  const files = progress.totalFiles == null ? ""
+    : ` ${formatCount(progress.checkedFiles)} / ${formatCount(progress.totalFiles)} 个文件`;
+  return PHASES[progress.phase] + files;
+}
+
+export default function UsageSyncStatus({ agents, synced, status, unavailable, onRetry }: {
+  agents: AgentInfo[];
+  synced: ReadonlySet<string>;
+  status: UsageSyncState | null;
+  unavailable: boolean;
+  onRetry: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setOpen(false);
+      trigger.current?.focus();
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape, true);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape, true);
+    };
+  }, [open]);
+
+  const busy = !!status?.syncing.length;
+  const readingHistory = status?.syncing.some(id => !synced.has(id)) ?? false;
+  const showBusy = useDelayedBusy(!!status?.progress || readingHistory, 250, 0);
+  const updatedAt = status?.updatedAt;
+  const updatedTimeLabel = updatedAt == null ? null : formatDateTime(updatedAt);
+  const syncFailed = unavailable || !!status?.failedAgents.length;
+  const state = syncFailed ? "error" : showBusy || !status ? "busy" : "live";
+  const label = unavailable ? "同步暂不可用"
+    : syncFailed ? "同步失败"
+    : showBusy ? (readingHistory ? "同步历史用量…" : "正在更新…")
+    : !status ? "正在准备同步…"
+    : updatedAt == null ? "自动更新" : `${formatClock(updatedAt)} 更新`;
+  const agentSyncState = (id: string) => {
+    const progress = status?.progress;
+    if (progress?.agent === id) return { text: formatSyncProgress(progress), tone: "busy" };
+    if (status?.failedAgents.includes(id)) return { text: "读取失败，等待重试", tone: "error" };
+    if (status?.syncing.includes(id)) return { text: "等待同步", tone: "busy" };
+    return synced.has(id) ? { text: "已同步", tone: "ok" } : { text: "等待首次同步", tone: "busy" };
+  };
+  return (
+    <div className="usage-sync" ref={root}>
+      <button
+        ref={trigger}
+        type="button"
+        className="usage-sync-trigger"
+        data-state={state}
+        aria-expanded={open}
+        aria-controls={panelId}
+        aria-label={`同步状态，${label}`}
+        title={state === "live" && updatedTimeLabel ? `最近更新 ${updatedTimeLabel}` : undefined}
+        onClick={() => setOpen(!open)}
+      >
+        {state === "live" ? <span className="usage-sync-dot" aria-hidden="true" /> :
+          <UiIcon icon={state === "error" ? CircleAlert : LoaderCircle} className={state === "busy" ? "usage-spin" : undefined} />}
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div id={panelId} className="usage-sync-panel" role="dialog" aria-label="用量同步状态">
+          <div className="usage-sync-heading">
+            <strong>用量同步</strong>
+            <button type="button" disabled={busy} onClick={onRetry}>{syncFailed ? "重试同步" : "立即检查"}</button>
+          </div>
+          {updatedAt != null && <p>最近更新 <time dateTime={new Date(updatedAt).toISOString()}>{updatedTimeLabel}</time></p>}
+          <ul className="usage-sync-agents">
+            {agents.map(agent => {
+              const state = agentSyncState(agent.id);
+              return (
+                <li key={agent.id} className={state.tone}>
+                  <span>{agent.displayName}</span>
+                  <span>{state.text}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}

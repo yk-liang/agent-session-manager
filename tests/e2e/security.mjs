@@ -29,6 +29,10 @@ try {
       if (command === "catalog") return { projects: [{ dirName: meta.projectDir, displayPath: meta.cwd, sessionCount: 1, lastActivity: null }], sessions: [meta], warnings: [] };
       if (command === "read_session") return { meta, events: [{ type: "user", message: { content: "Read-only question" } }, { type: "assistant", message: { content: [{ type: "text", text: "# Local markdown\n\n**Bold content** and `code`.\n\n![External image](https://csp-test.invalid/markdown.png)" }] } }] };
       if (command === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
+      if (command === "usage_sync_status") return { sequence: 1, revision: 1, updatedAt: Date.now(), syncing: [], progress: null, failedAgents: [], unavailable: false };
+      if (command === "read_usage_summary") return { rows: [], projects: [], providers: [], syncedAgents: ["qoder"], revision: "1", pricingRevision: 1 };
+      if (command === "read_request_events") return { events: [], total: 0, page: 1, pageSize: 50, revision: "1" };
+      if (command === "get_model_prices") return { models: [], catalog: { revision: 1, sources: [{ id: "models.dev", name: "Models.dev", url: "https://models.dev/api.json", fetchedAt: null, modelCount: 0, pricedCount: 0, stale: true, error: null }, { id: "litellm", name: "LiteLLM", url: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", fetchedAt: null, modelCount: 0, pricedCount: 0, stale: true, error: null }], customCount: 0, exchangeRateCnyPerUsd: 7 } };
       return null;
     } };
   });
@@ -46,6 +50,11 @@ try {
   await file.locator("textarea").fill('{"model":"csp-fixture"}');
   await file.getByRole("button", { name: "保存", exact: true }).click();
   await page.getByText("csp-fixture", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "用量", exact: true }).click();
+  await page.getByRole("tab", { name: "统计分析", exact: true }).waitFor();
+  await page.getByRole("tab", { name: "请求记录", exact: true }).click();
+  await page.getByRole("tab", { name: "模型价格", exact: true }).click();
+  await page.locator(".prices-panel").waitFor();
   assert.deepEqual(errors, []);
   assert.deepEqual(await page.evaluate(() => window.__CSP_TEST__.violations), []);
   await page.evaluate(() => {

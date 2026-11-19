@@ -89,6 +89,14 @@ pub(super) fn is_v2_session(conn: &Connection, id: &str) -> bool {
             .unwrap_or(false)
 }
 
+pub(crate) const MESSAGE_ERROR_SQL: &str = "CASE json_type(data,'$.error')
+    WHEN 'object' THEN json_object(
+        'kind', coalesce(nullif(json_extract(data,'$.error.kind'),''),nullif(json_extract(data,'$.error.type'),''),json_extract(data,'$.error.name')),
+        'message', coalesce(nullif(json_extract(data,'$.error.message'),''),json_extract(data,'$.error.data.message')),
+        'status', coalesce(json_extract(data,'$.error.status'),json_extract(data,'$.error.data.statusCode')))
+    WHEN 'text' THEN json_object('message',json_extract(data,'$.error'))
+    END";
+
 pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Result<()> {
     if !exists(conn, "session_v2")? {
         return Ok(());
@@ -138,16 +146,21 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
     }
     // Keep only metadata in the message projection. Text/tools are projected lazily
     // from content below; usage queries never transfer conversation bodies to Rust.
-    let mut messages = String::from("SELECT id,session_id,time_created,seq AS sort_order,
+    let mut messages = format!("SELECT id,session_id,time_created,seq AS sort_order,
         CASE WHEN json_valid(data) AND json_type(data)='object' THEN json_object(
             'role',type,'system',json_extract(data,'$.system'),'model',json_extract(data,'$.model'),
             'modelID',json_extract(data,'$.model.id'),'providerID',json_extract(data,'$.model.providerID'),
             'time',json_extract(data,'$.time'),'tokens',json_extract(data,'$.tokens'),
-            'cost',json_extract(data,'$.cost'),'finish',json_extract(data,'$.finish'),
-            'error',json_extract(data,'$.error.message'),
+            'finish',json_extract(data,'$.finish'),
+            'variant',json_extract(data,'$.variant'),'serviceTier',coalesce(json_extract(data,'$.serviceTier'),json_extract(data,'$.service_tier'),json_extract(data,'$.tier')),
+            'httpStatus',json_extract(data,'$.httpStatus'),
+            'error',{MESSAGE_ERROR_SQL},
             '_asm_failed',json_type(data,'$.error') IS NOT NULL AND json_type(data,'$.error') != 'null',
+            '_asm_native_session',CASE WHEN json_extract(data,'$.model.providerID')='claude-agent'
+              THEN (SELECT json_extract(value,'$.native.sessionID') FROM json_each(data,'$.content')
+                    WHERE CASE WHEN type='object' THEN length(trim(json_extract(value,'$.native.sessionID')))>0 END LIMIT 1) END,
             'agent',json_extract(data,'$.agent'),'mode',json_extract(data,'$.mode'),'path',json_extract(data,'$.path'))
-        ELSE '{' END AS data
+        ELSE '{{' END AS data
         FROM temp._asm_v2_messages WHERE type IN ('user','assistant','compaction','synthetic','system')");
     let legacy_messages = exists(conn, "message")?;
     if legacy_messages {
@@ -156,8 +169,10 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
              SELECT m.* FROM main.message m WHERE {scope}
              AND NOT EXISTS (SELECT 1 FROM main.session_v2 v WHERE v.id=m.session_id)"
         ))?;
-        messages.push_str(" UNION ALL SELECT id,session_id,time_created,time_created AS sort_order,data
-            FROM temp._asm_legacy_messages");
+        messages.push_str(
+            " UNION ALL SELECT id,session_id,time_created,time_created AS sort_order,data
+            FROM temp._asm_legacy_messages",
+        );
     }
     // Array index is the stable part identity and ordering key. Do not sort tool
     // content by timestamp: v2 seq/content order is authoritative even after replay.

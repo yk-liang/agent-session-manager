@@ -1,25 +1,16 @@
-//! 用量视图只聚合已持久化的请求事件。同步源文件与查询时间分桶是两个独立操作。
-use super::{events, ingest, types::*, Store};
+//! 按时间范围、Agent 和模型等维度汇总已入账请求。
+use super::{codex::LEGACY_ESTIMATE, events, types::*, Store};
 use chrono::{Local, TimeZone};
 use rusqlite::{params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-};
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Health {
-    pub partial: bool,
-    pub warnings: Vec<String>,
-}
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SummaryQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
-    /// 来自界面本地日历的绝对时间边界，支持夏令时的 23/25 小时日及非整点时区。
+    /// 前端按本地日历换算的时间戳边界，保留夏令时和非整点时区。
     pub bounds: Vec<i64>,
 }
 
@@ -38,137 +29,62 @@ pub struct SummaryRow {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestMetrics {
-    /// 只计可确认的请求（含失败）；累计差额可能包含多次调用，只标记数量不完整。
+    /// 仅计可辨认的单次请求，含失败请求。累计差额不计入次数。
     pub request_count: u64,
     pub request_count_incomplete: bool,
-    /// 仅汇总日志明确记录的美元成本，None 不代表免费。
+    pub success_count: u64,
+    pub failed_count: u64,
+    /// 按模型价格估算的美元费用。无可用估算时为空。
     pub cost_usd: Option<f64>,
+    pub custom_cost_usd: Option<f64>,
+    pub reference_cost_usd: Option<f64>,
+    pub cost_unknown_count: u64,
+    /// 模型无可用定价的请求数。
+    pub unpriced_count: u64,
+    /// 计量字段缺失、只有下限或无法拆分，无法估算费用的请求数。
+    pub cost_usage_incomplete_count: u64,
+    /// 服务档位或计费分项（如 flex、1 小时缓存写入）没有对应价格的请求数。
+    pub cost_special_count: u64,
     pub cost_incomplete: bool,
     pub cache_read_incomplete: bool,
     /// 缺少输入/缓存字段或包含关系不明确时，不推算缓存率。
     pub cache_rate_unavailable: bool,
+    pub latency_sum_ms: i64,
+    pub latency_count: u64,
+    pub tps_sum: f64,
+    pub tps_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DimensionSummaryRow {
+    pub agent: String,
+    pub model: String,
+    pub key: String,
+    pub record_count: u64,
+    #[serde(flatten)]
+    pub tokens: Tokens,
+    #[serde(flatten)]
+    pub details: RecordedFields,
+    pub total_tokens: u64,
+    pub partial: bool,
+    #[serde(flatten)]
+    pub metrics: RequestMetrics,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
     pub rows: Vec<SummaryRow>,
-    pub health: BTreeMap<String, Health>,
+    pub projects: Vec<DimensionSummaryRow>,
+    pub providers: Vec<DimensionSummaryRow>,
     /// 此快照中已完成过完整目录同步的来源，包含已确认的空目录。
     /// 有请求记录不代表首次导入已结束；失败或仅同步指定文件不能建立此基线。
     pub synced_agents: Vec<String>,
+    /// 各来源缺少发生时间的记录数（与查询范围无关）；有时间范围的查询不包含它们。
+    pub untimed: BTreeMap<String, u64>,
     pub revision: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Synced {
-    pub updated_at: i64,
-    pub checked_files: usize,
-    pub changed_files: usize,
-    pub bytes_read: u64,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncProgress {
-    pub agent: String,
-    pub phase: &'static str,
-    /// 已检查的日志文件数；发现目录/等待其他同步时尚不知道总数。
-    pub checked_files: usize,
-    pub total_files: Option<usize>,
-}
-
-pub fn sync(agent: &str, cancel: &dyn Fn() -> bool) -> Result<Synced, String> {
-    sync_with_progress(agent, cancel, &|_| {})
-}
-
-pub fn sync_with_progress(
-    agent: &str,
-    cancel: &dyn Fn() -> bool,
-    progress: &dyn Fn(SyncProgress),
-) -> Result<Synced, String> {
-    let roots = super::roots(agent)?;
-    progress(SyncProgress {
-        agent: agent.into(),
-        phase: "waiting",
-        checked_files: 0,
-        total_files: None,
-    });
-    let _writer = super::ledger::SyncLock::acquire(&super::ledger::path()?, cancel)?;
-    let mut store = super::store(agent)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    sync_with_store(agent, &roots, &mut store, None, cancel, progress)
-}
-
-pub(crate) fn sync_at(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    cancel: &dyn Fn() -> bool,
-) -> Result<Synced, String> {
-    sync_paths(agent, roots, store, None, cancel)
-}
-
-pub(super) fn sync_paths(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    paths: Option<&BTreeSet<PathBuf>>,
-    cancel: &dyn Fn() -> bool,
-) -> Result<Synced, String> {
-    sync_with_store(agent, roots, store, paths, cancel, &|_| {})
-}
-
-fn sync_with_store(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    paths: Option<&BTreeSet<PathBuf>>,
-    cancel: &dyn Fn() -> bool,
-    progress: &dyn Fn(SyncProgress),
-) -> Result<Synced, String> {
-    let report = |phase, checked_files, total_files| {
-        progress(SyncProgress {
-            agent: agent.into(),
-            phase,
-            checked_files,
-            total_files,
-        })
-    };
-    report("discovering", 0, None);
-    // 即使稍后的文件不可读，也先把本轮已经入账的部分转成持久请求事件。
-    let collected =
-        ingest::collect_with_progress(agent, roots, store, paths, cancel, &|done, total| {
-            report("reading", done, Some(total))
-        });
-    if !cancel() {
-        report("indexing", 0, None);
-        events::refresh(&mut store.ledger()?.db, agent, cancel)?;
-    }
-    let result = collected?;
-    if cancel() {
-        return Err("采集已停止".into());
-    }
-    if paths.is_none() {
-        // 必须在目录遍历和请求索引全部成功后标记；部分文件入账不能冒充全量完成。
-        store
-            .ledger()?
-            .db
-            .execute(
-                "INSERT OR IGNORE INTO usage_sync_state(agent,completed_at) VALUES (?1,?2)",
-                rusqlite::params![agent, chrono::Utc::now().timestamp_millis()],
-            )
-            .map_err(|_| "无法保存用量同步状态")?;
-    }
-    report("complete", result.checked_files, Some(result.checked_files));
-    Ok(Synced {
-        updated_at: chrono::Utc::now().timestamp_millis(),
-        checked_files: result.checked_files,
-        changed_files: result.files,
-        bytes_read: result.bytes_read,
-    })
+    pub pricing_revision: u64,
 }
 
 pub fn read(query: SummaryQuery, cancel: &dyn Fn() -> bool) -> Result<Summary, String> {
@@ -191,6 +107,15 @@ pub(crate) fn read_from(
 pub(super) fn read_at(
     db: &mut Connection,
     query: SummaryQuery,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Summary, String> {
+    read_at_with_pricer(db, query, super::pricing::global(), cancel)
+}
+
+pub(super) fn read_at_with_pricer(
+    db: &mut Connection,
+    query: SummaryQuery,
+    pricer: &super::pricing::Pricer,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Summary, String> {
     match (query.from, query.to) {
@@ -228,26 +153,6 @@ pub(super) fn read_at(
     } else {
         Vec::new()
     };
-    let mut health = BTreeMap::<String, Health>::new();
-    {
-        let mut stmt = tx
-            .prepare("SELECT agent,health FROM usage_ledger_sources WHERE health IS NOT NULL")
-            .map_err(|_| "无法读取用量完整性")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|_| "无法读取用量完整性")?;
-        for row in rows {
-            let (agent, data) = row.map_err(|_| "无法读取用量完整性")?;
-            let value: Health = serde_json::from_str(&data).map_err(|_| "用量完整性记录损坏")?;
-            let entry = health.entry(agent).or_default();
-            entry.partial |= value.partial;
-            entry.warnings.extend(value.warnings);
-        }
-        for value in health.values_mut() {
-            value.warnings.sort();
-            value.warnings.dedup();
-        }
-    }
     let revision = {
         let mut stmt = tx
             .prepare("SELECT agent,indexed FROM usage_request_index ORDER BY agent")
@@ -265,16 +170,45 @@ pub(super) fn read_at(
             .map_err(|_| "无法读取用量版本")?
             .join("|")
     };
-    let mut sql = "SELECT agent,time,model,data FROM usage_request_events".to_owned();
+    let pricing_snapshot = pricer.snapshot();
+    let pricing_revision = pricing_snapshot.revision;
+    let mut sql = format!(
+        "SELECT agent,time,model,{},data FROM usage_request_events WHERE {}",
+        events::IS_FAILED,
+        events::DISTINCT_REQUESTS
+    );
     let mut values = Vec::<rusqlite::types::Value>::new();
     if let Some((from, to)) = query.from.zip(query.to) {
-        sql.push_str(" WHERE time>=? AND time<?");
+        sql.push_str(" AND time>=? AND time<?");
         values.extend([from.into(), to.into()]);
     }
     let mut stmt = tx.prepare(&sql).map_err(|_| "无法查询请求用量")?;
     let mut rows = stmt
         .query(params_from_iter(values))
         .map_err(|_| "无法查询请求用量")?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Measurement {
+        #[serde(flatten)]
+        tokens: Tokens,
+        #[serde(flatten)]
+        details: RecordedFields,
+        partial: bool,
+        #[serde(default)]
+        request: MeasurementRequest,
+        #[serde(default)]
+        output_tps: Option<f64>,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct MeasurementRequest {
+        provider: Option<String>,
+        project: Option<String>,
+        tier: Option<String>,
+        latency_ms: Option<i64>,
+        timing: Option<String>,
+        scope: Option<String>,
+    }
     #[derive(Default)]
     struct Group {
         record_count: u64,
@@ -283,24 +217,75 @@ pub(super) fn read_at(
         partial: bool,
         metrics: RequestMetrics,
     }
+    impl Group {
+        fn add(
+            &mut self,
+            m: &Measurement,
+            failed: bool,
+            measured: bool,
+            cache_rate_unavailable: bool,
+            evaluated: Result<&super::pricing::EventCost, super::pricing::PricingIssue>,
+        ) {
+            self.record_count += 1;
+            // 无 Token 计量的失败仍计入请求次数和缺失费用数。
+            if measured {
+                self.tokens.add(&m.tokens);
+                self.details.merge(&m.details);
+                self.metrics.cache_read_incomplete |= !m.details.cache_read_recorded;
+                self.metrics.cache_rate_unavailable |= cache_rate_unavailable;
+            }
+            self.partial |= m.partial;
+            if matches!(m.request.scope.as_deref(), Some("request" | "error")) {
+                self.metrics.request_count += 1;
+                if failed {
+                    self.metrics.failed_count += 1;
+                } else {
+                    self.metrics.success_count += 1;
+                }
+            } else {
+                self.metrics.request_count_incomplete = true;
+            }
+            if m.request.scope.as_deref() == Some("request")
+                && !failed
+                && m.request.timing.as_deref() != Some(LEGACY_ESTIMATE)
+            {
+                if let Some(ms) = m.request.latency_ms.filter(|ms| *ms > 0) {
+                    self.metrics.latency_sum_ms = self.metrics.latency_sum_ms.saturating_add(ms);
+                    self.metrics.latency_count += 1;
+                }
+                if let Some(tps) = m.output_tps.filter(|v| v.is_finite() && *v > 0.0) {
+                    self.metrics.tps_sum += tps;
+                    self.metrics.tps_count += 1;
+                }
+            }
+            if let Ok(cost) = evaluated {
+                *self.metrics.cost_usd.get_or_insert(0.0) += cost.total_usd;
+                match cost.source.as_str() {
+                    super::pricing::BUILTIN_SOURCE => {}
+                    "custom" => {
+                        *self.metrics.custom_cost_usd.get_or_insert(0.0) += cost.total_usd;
+                    }
+                    _ => {
+                        *self.metrics.reference_cost_usd.get_or_insert(0.0) += cost.total_usd;
+                    }
+                }
+            } else if let Err(issue) = evaluated {
+                use super::pricing::PricingIssue::*;
+                self.metrics.cost_incomplete = true;
+                self.metrics.cost_unknown_count += 1;
+                *match issue {
+                    Unpriced => &mut self.metrics.unpriced_count,
+                    UsageIncomplete | Unclassified => &mut self.metrics.cost_usage_incomplete_count,
+                    CacheAmbiguous | UnsupportedTier | UnsupportedComponent => {
+                        &mut self.metrics.cost_special_count
+                    }
+                } += 1;
+            }
+        }
+    }
     let mut grouped = BTreeMap::<(String, String, String, Option<i64>), Group>::new();
-    // SQL 先按事件时间范围筛选。只读账本中的小型计量记录，不读取或扫描会话正文。
-    #[derive(Deserialize)]
-    struct Measurement {
-        #[serde(flatten)]
-        tokens: Tokens,
-        #[serde(flatten)]
-        details: RecordedFields,
-        partial: bool,
-        #[serde(default)]
-        request: Request,
-    }
-    #[derive(Default, Deserialize)]
-    #[serde(default, rename_all = "camelCase")]
-    struct Request {
-        scope: Option<String>,
-        cost_usd: Option<f64>,
-    }
+    let mut projects_grouped = BTreeMap::<(String, String, String), Group>::new();
+    let mut providers_grouped = BTreeMap::<(String, String, String), Group>::new();
     while let Some(row) = rows.next().map_err(|_| "无法读取请求计量")? {
         if cancel() {
             return Err("用量查询已取消".into());
@@ -308,9 +293,11 @@ pub(super) fn read_at(
         let agent: String = row.get(0).map_err(|_| "请求来源无效")?;
         let time: i64 = row.get(1).map_err(|_| "请求时间无效")?;
         let model: String = row.get(2).map_err(|_| "请求模型无效")?;
-        let data: String = row.get(3).map_err(|_| "请求计量无效")?;
+        let failed: bool = row.get(3).map_err(|_| "请求状态无效")?;
+        let data: String = row.get(4).map_err(|_| "请求计量无效")?;
         let m: Measurement =
             serde_json::from_str(&data).map_err(|_| "请求计量损坏，已保留原数据")?;
+
         let measured =
             m.details.input_recorded || m.details.output_recorded || m.tokens.total() > 0;
         let bucket_start = if query.bounds.is_empty() {
@@ -328,44 +315,64 @@ pub(super) fn read_at(
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_default()
         };
-        if time <= 0 {
-            let h = health.entry(agent.clone()).or_default();
-            h.partial = true;
-            h.warnings
-                .push("部分请求缺少发生时间，只计入全部范围，不放入趋势".into());
-        }
         let cache_rate_unavailable = agent == "qoder"
             || !m.details.input_recorded
             || m.details.input_incomplete
             || !m.details.cache_read_recorded
             || m.tokens.cache_read_tokens > m.tokens.input_tokens;
-        let entry = grouped
-            .entry((agent, model, date, bucket_start))
-            .or_default();
-        entry.record_count += 1;
-        // 无计量的失败请求参与次数/成本统计，不把缺失 usage 当作实测的 0。
-        if measured {
-            entry.tokens.add(&m.tokens);
-            entry.details.merge(&m.details);
-            entry.metrics.cache_read_incomplete |= !m.details.cache_read_recorded;
-            entry.metrics.cache_rate_unavailable |= cache_rate_unavailable;
+
+        let billable = super::pricing::BillableEvent {
+            agent: &agent,
+            time,
+            model: &model,
+            tokens: &m.tokens,
+            details: &m.details,
+            provider: m.request.provider.as_deref(),
+            tier: m.request.tier.as_deref(),
+        };
+        let evaluated = pricing_snapshot.price(billable);
+        let project_key = m.request.project.clone().unwrap_or_default();
+        let provider_key = m.request.provider.clone().unwrap_or_default();
+        for group in [
+            grouped
+                .entry((agent.clone(), model.clone(), date, bucket_start))
+                .or_default(),
+            projects_grouped
+                .entry((agent.clone(), model.clone(), project_key))
+                .or_default(),
+        ] {
+            group.add(
+                &m,
+                failed,
+                measured,
+                cache_rate_unavailable,
+                evaluated.as_ref().map_err(|e| *e),
+            );
         }
-        entry.partial |= m.partial;
-        if matches!(m.request.scope.as_deref(), Some("request" | "error")) {
-            entry.metrics.request_count += 1;
-        } else {
-            entry.metrics.request_count_incomplete = true;
-        }
-        if let Some(cost) = m.request.cost_usd.filter(|c| c.is_finite() && *c >= 0.0) {
-            *entry.metrics.cost_usd.get_or_insert(0.0) += cost;
-        } else {
-            entry.metrics.cost_incomplete = true;
-        }
+        providers_grouped
+            .entry((agent, model, provider_key))
+            .or_default()
+            .add(
+                &m,
+                failed,
+                measured,
+                cache_rate_unavailable,
+                evaluated.as_ref().map_err(|e| *e),
+            );
     }
-    for h in health.values_mut() {
-        h.warnings.sort();
-        h.warnings.dedup();
-    }
+    drop(rows);
+    drop(stmt);
+    let untimed = {
+        let mut stmt = tx
+            .prepare("SELECT agent,count(*) FROM usage_request_events WHERE time<=0 GROUP BY agent")
+            .map_err(|_| "无法统计缺少时间的请求")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|_| "无法统计缺少时间的请求")?;
+        rows.map(|row| row.map(|(agent, n)| (agent, n.max(0) as u64)))
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|_| "无法统计缺少时间的请求")?
+    };
     let rows = grouped
         .into_iter()
         .map(|((agent, model, date, bucket_start), group)| SummaryRow {
@@ -383,10 +390,29 @@ pub(super) fn read_at(
             metrics: group.metrics,
         })
         .collect();
+    let to_dimension =
+        |map: BTreeMap<(String, String, String), Group>| -> Vec<DimensionSummaryRow> {
+            map.into_iter()
+                .map(|((agent, model, key), group)| DimensionSummaryRow {
+                    agent,
+                    model,
+                    key,
+                    record_count: group.record_count,
+                    total_tokens: group.tokens.total(),
+                    tokens: group.tokens,
+                    details: group.details,
+                    partial: group.partial,
+                    metrics: group.metrics,
+                })
+                .collect()
+        };
     Ok(Summary {
         synced_agents,
+        untimed,
         rows,
-        health,
+        projects: to_dimension(projects_grouped),
+        providers: to_dimension(providers_grouped),
         revision,
+        pricing_revision,
     })
 }

@@ -1,12 +1,5 @@
-//! Pi 数据源：$PI_CODING_AGENT_DIR（默认 ~/.pi/agent）/sessions/--<cwd>--/<started>_<id>.jsonl
-//!
-//! 格式要点（参考 agent-session-cleaner）：
-//! - 首行是 header：{type:"session", version, id, timestamp, cwd}
-//! - 其余行是树形 entry（version>=2）：/fork 会留下废弃分支，
-//!   真正的对话 = 从最后一行（叶节点）沿 parentId 回溯
-//! - version 1 是线性顺序
-//! - 标题来自 session_info entry 的 name（最后一个生效），回退首条用户消息
-//! - 无官方删除命令，直接移文件进废纸篓（校验必须在本目录树内）
+//! Pi 会话读取。v1 日志按行排列，从 v2 起沿最后一个节点的 parentId 读取当前分支。
+//! 数据目录由 PI_CODING_AGENT_DIR 指定，默认使用 ~/.pi/agent/sessions 下的会话。
 
 mod context;
 #[cfg(test)]
@@ -97,7 +90,7 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
     let file = match super::open_jsonl(path) {
         Ok(f) => f,
         Err(e) => {
-            return super::ParseOutcome::Failed(format!("无法读取 Pi 会话文件 {:?}: {e}", path))
+            return super::ParseOutcome::Failed(format!("无法读取 Pi 会话文件 {:?}： {e}", path))
         }
     };
     let metadata = file.metadata().ok();
@@ -111,7 +104,6 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
-    // 首行 header
     let mut parsed = ParsedPi {
         id: String::new(),
         project_dir: path
@@ -139,7 +131,7 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
     let header: Value = match serde_json::from_str(header_line.trim()) {
         Ok(v) => v,
         Err(_) => {
-            return super::ParseOutcome::Failed(format!("Pi 会话 header 不是合法 JSON: {:?}", path))
+            return super::ParseOutcome::Failed(format!("Pi 会话头部不是有效 JSON： {:?}", path))
         }
     };
     if header.get("type").and_then(Value::as_str) != Some("session") {
@@ -157,7 +149,7 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
         .map(String::from);
     let version = header.get("version").and_then(Value::as_i64).unwrap_or(1);
 
-    // All records participate in ancestry; only the active branch supplies dialogue/context.
+    // 所有消息参与分支解析，正文和上下文取自当前分支。
     let mut parents: HashMap<String, String> = HashMap::new();
     let mut spoken: HashMap<String, Vec<Value>> = HashMap::new();
     let mut leaf = String::new();
@@ -226,7 +218,7 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
         }
     }
     if parsed.id.is_empty() {
-        return super::ParseOutcome::Failed(format!("无法解析 Pi 会话 ID: {:?}", path));
+        return super::ParseOutcome::Failed(format!("无法解析 Pi 会话 ID： {:?}", path));
     }
     if bad_lines > 0 {
         return super::ParseOutcome::Degraded(parsed, super::degraded_message(path, bad_lines));
@@ -279,7 +271,7 @@ fn matching_sessions(
         || project_dir == ".."
         || project_dir.contains(['/', '\\'])
     {
-        return Err("非法项目目录名".to_string());
+        return Err("项目目录名无效".to_string());
     }
     let project = root.join(project_dir);
     let mut warnings = Vec::new();
@@ -310,13 +302,9 @@ fn matching_sessions(
     })
 }
 
-/// 破坏性路径专用的身份验证：只信任文件头内嵌的 id，
-/// 绝不做文件名兜底——否则缺少内嵌 id 的文件改个名就能匹配删除请求。
-/// 同时逐行扫描后续内容：任何读取失败或无法解析的行都说明文件
-/// 部分损坏，拒绝删除——破坏性路径要求完整解析成功，
-/// 不能只凭 header 身份正确就放行
+/// 删除要求文件可完整解析，且头部的会话 ID 匹配。文件名不足以确认身份。
 fn strict_session_id(path: &Path) -> Result<String, String> {
-    let file = super::open_jsonl(path).map_err(|e| format!("无法读取 {:?}: {e}", path))?;
+    let file = super::open_jsonl(path).map_err(|e| format!("无法读取 {:?}： {e}", path))?;
     let mut lines = BufReader::new(file).lines();
     let header_line = match lines.next() {
         Some(Ok(l)) => l,
@@ -325,7 +313,7 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
     };
     let header: Value = match serde_json::from_str(header_line.trim()) {
         Ok(v) => v,
-        Err(_) => return Err(format!("Pi 会话 header 不是合法 JSON: {:?}", path)),
+        Err(_) => return Err(format!("Pi 会话头部不是有效 JSON： {:?}", path)),
     };
     if header.get("type").and_then(Value::as_str) != Some("session") {
         return Err(format!("Pi 会话文件头类型无效：{:?}", path));
@@ -341,7 +329,6 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
             path
         ));
     }
-    // 全量复核：任一坏行/读取失败即视为部分损坏，中止删除
     for line in lines {
         let line = line.map_err(|e| format!("读取 {:?} 失败，无法完成身份复核：{e}", path))?;
         let line = line.trim();
@@ -358,15 +345,11 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
     Ok(id)
 }
 
-/// 生产环境的移除方式：移入系统废纸篓
 fn trash_remove(target: PathBuf) -> Result<(), String> {
     trash::delete_all([target]).map_err(|e| format!("移入废纸篓失败：{e}"))
 }
 
-/// Pi 没有删除命令；流程：
-/// 解析匹配（项目 + 会话 ID 都要一致）→ 严格身份复核（只认 header 内嵌 id）
-/// → 根目录/类型校验 → 移除。project_dir 参与匹配，避免不同项目下
-/// 同名 ID 的会话被误删。
+/// 删除时同时校验项目目录和会话 ID，避免匹配到其他项目的同 ID 会话。
 fn delete_session_with(
     root: &Path,
     project_dir: &str,
@@ -374,7 +357,7 @@ fn delete_session_with(
     remove: impl Fn(PathBuf) -> Result<(), String>,
 ) -> Result<(), String> {
     if !is_valid_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let mut matches =
         matching_sessions(root, project_dir, session_id, false)?.require_complete(project_dir)?;
@@ -389,7 +372,7 @@ fn delete_session_with(
     // 解析用的文件名兜底 id 不得作为删除依据
     let strict = strict_session_id(&path)?;
     if strict != session_id {
-        return Err(format!("{:?} 内嵌 id 与待删会话不一致，已中止", path));
+        return Err(format!("{:?} 中的会话 ID 与删除目标不一致", path));
     }
     let target = super::verify_within_root(root, &path, super::TargetKind::File)?;
     let mut confirmed =
@@ -420,7 +403,7 @@ fn read_session_in(
     session_id: &str,
 ) -> Result<SessionDetail, String> {
     if !is_valid_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     // 只读详情沿用目录的容错策略，允许浏览已解析的正文；扫描告警由目录展示。
     // Degraded 仍参与 ID 匹配，因此已识别出的重复会话必须继续拒绝读取。
@@ -479,7 +462,7 @@ impl AgentSource for PiSource {
     fn data_dir(&self) -> Option<PathBuf> {
         Some(pi_home())
     }
-    fn watch_paths(&self, _usage: bool) -> super::AgentWatchPaths {
+    fn watch_paths(&self) -> super::AgentWatchPaths {
         super::AgentWatchPaths::transcripts("sessions", None)
     }
     fn scan_catalog(
