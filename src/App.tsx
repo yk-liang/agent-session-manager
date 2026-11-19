@@ -117,7 +117,8 @@ export default function App() {
       .catch((e) => showToast(String(e), true));
   }, [showToast]);
 
-  const currentAgent = agents.find((a) => a.id === selectedAgent);
+  const availableAgents = agents.filter((agent) => agent.installed);
+  const currentAgent = availableAgents.find((agent) => agent.id === selectedAgent);
   const supportsModelNames = currentAgent?.supportsModelNames ?? false;
   const supportsFastCatalog = currentAgent?.supportsFastCatalog ?? false;
 
@@ -240,11 +241,11 @@ export default function App() {
 
   const selectAgent = (id: string) => {
     if (deleting || batchRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
-    if (tab !== "usage" && !agents.some(agent => agent.id === id && agent.installed)) return;
+    const available = availableAgents.some(agent => agent.id === id);
+    if (!available && !(tab === "usage" && id === "all")) return;
     protectConfig(() => {
       setUsageAgent(id);
-      // 历史用量可能来自已卸载的 Agent，不能把它设为配置写入目标。
-      if (agents.some(agent => agent.id === id && agent.installed)) selectAgentNow(id);
+      if (available) selectAgentNow(id);
     }, "切换 Agent");
   };
 
@@ -390,13 +391,13 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <AgentSwitcher agents={agents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
+        <AgentSwitcher agents={availableAgents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
           disabled={deleting || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
           <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={deleting}>
             会话
           </button>
-          {agents.some((a) => a.installed) && (
+          {availableAgents.length > 0 && (
             <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={deleting}>
               配置
             </button>

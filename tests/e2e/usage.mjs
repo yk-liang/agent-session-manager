@@ -1,3 +1,4 @@
+import { chooseOption } from '../helpers/dropdown.mjs';
 import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from 'playwright';
@@ -98,9 +99,9 @@ try {
  await page.waitForFunction(() => document.querySelectorAll('.request-table tbody tr').length === 3);
  await selectAgent('Claude Code'); await waitTotal('330');
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['2','300','30','0','0.00%','—']);
- await page.getByLabel('统计模型').selectOption('claude-fixture'); await waitTotal('330');
+ await chooseOption(page, '统计模型', 'claude-fixture'); await waitTotal('330');
  await selectAgent('Claude Code');
- assert.equal(await page.getByLabel('统计模型').inputValue(), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
+ assert.equal(await page.getByLabel('统计模型').getAttribute('value'), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
  await selectAgent('全部 Agent');
  for (const [label, count] of [['近 7 天', 7], ['近 30 天', 30]]) {
@@ -207,7 +208,7 @@ try {
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models-large.png') });
- await page.getByLabel('统计模型').selectOption('provider/model-1-with-a-long-name-for-layout-check');
+ await chooseOption(page, '统计模型', 'provider/model-1-with-a-long-name-for-layout-check');
  await waitTotal('100010000');
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['100','100M','10K','90M','90.00%','$0.000001']);
  await page.getByRole('button', { name: '会话', exact: true }).click();

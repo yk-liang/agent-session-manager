@@ -10,6 +10,7 @@ import { shortPath } from "../utils";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 import { ModelLabel } from "./SessionModel";
+import Dropdown from "./Dropdown";
 
 interface Props {
   agents: AgentInfo[];
@@ -23,6 +24,8 @@ interface Props {
   onModels: (models: UsageModelRef[]) => void;
 }
 const resultNames = { success: "成功", failed: "失败", unknown: "未记录" };
+const resultOptions = [{ id: "all", name: "全部结果" }, ...Object.entries(resultNames).map(([id, name]) => ({ id, name }))];
+const pageSizeOptions = [50, 100, 200].map(size => ({ id: String(size), name: `${size} 条/页` }));
 const duration = (ms: number | null) => ms == null ? "—" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 const timingNames = { recorded: "日志记录耗时", observed: "请求与响应日志的时间差", estimated: "按相邻事件估算，可能包含调度、重试及工具等待" };
 interface ViewAnchor { id: string; detail: boolean; offset: number; scrollTop: number }
@@ -136,7 +139,7 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
         <p>“≈”为估算，“—”为未记录；展开行可看详情。</p>
       </HelpTip><span className="request-count">{syncing && !page?.total ? "同步中" : `${page ? formatTokens(page.total) : "—"} 条`}</span></div>
       <div className="request-filters">
-        <span className="usage-select"><select aria-label="请求结果" value={status} onChange={e => setStatus(e.target.value)}><option value="all">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="unknown">未记录</option></select><UiIcon icon={ChevronDown} /></span>
+        <Dropdown className="usage-select" label="请求结果" value={status} options={resultOptions} onChange={setStatus} />
         {status !== "all" && <button className="request-clear" onClick={() => setStatus("all")}>清除结果筛选</button>}
       </div>
     </div>
@@ -181,7 +184,8 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
     <div className="request-footer">
       <span className="request-range" role="status">{showLoading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && (!syncing || page.total > 0) && (page.total ? `第 ${formatTokens((page.page - 1) * page.pageSize + 1)}–${formatTokens((page.page - 1) * page.pageSize + page.events.length)} 条，共 ${formatTokens(page.total)} 条` : "共 0 条")}</span>
       {page && <nav className="request-pagination" aria-label="请求事件分页">
-        <span className="usage-select"><select aria-label="每页请求数" value={pageSize} disabled={navigating} onChange={e => setPageSize(Number(e.target.value))}>{[50, 100, 200].map(size => <option key={size} value={size}>{size} 条/页</option>)}</select><UiIcon icon={ChevronDown} /></span>
+        <Dropdown className="usage-select" label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
+          disabled={navigating} onChange={id => setPageSize(Number(id))} />
         <button aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => goTo(1)}><UiIcon icon={ChevronsLeft} /></button>
         <button aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => goTo(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>
         <span className="request-page-number">第 {formatTokens(page.page)} / {formatTokens(pageCount)} 页</span>

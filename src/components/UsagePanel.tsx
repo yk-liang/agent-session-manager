@@ -13,6 +13,7 @@ import RequestEvents from "./RequestEvents";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
 import { ModelLabel } from "./SessionModel";
+import Dropdown from "./Dropdown";
 import ReadDiagnostics from "./ReadDiagnostics";
 
 const snapshots = new Map<string, UsageSummary>();
@@ -136,8 +137,14 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
   const scopedHealth = Object.entries(summary?.health ?? {}).filter(([id]) => agent === "all" || id === agent).map(([, h]) => h);
   const partial = scopedHealth.some(h => h.partial) || rows.some(r => r.partial) || !!queryError ||
     agents.some(a => (agent === "all" || a.id === agent) && errors.has(a.id));
-  const options = modelTotals(scopedRows);
-  const models = modelTotals(rows);
+  const allModels = modelTotals(scopedRows);
+  const options = [{ id: "all", name: "全部模型" },
+    ...allModels.map(({ model: id, modelName: name }) => ({ id, name })),
+  ];
+  if (model !== "all" && !allModels.some(row => row.model === model)) {
+    options.splice(1, 0, { id: model, name: model });
+  }
+  const models = model === "all" ? allModels : modelTotals(rows);
   const series = usageSeries(rows, period, now);
   const value = (number: number) => available ? formatTokens(number) : "—";
   // 有部分记录时不能收起导入提示；完整的持久快照仍可在后续增量同步时安静展示。
@@ -170,9 +177,8 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
         <div className="usage-periods" role="group" aria-label="统计时间">
           {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} className={period === id ? "active" : ""} onClick={() => setPeriod(id)}>{label}</button>)}
         </div>
-        <div className="usage-selects">
-          <span className="usage-select"><select aria-label="统计模型" value={model} onChange={e => { setModel(e.target.value); setExpanded(false); }}><option value="all">全部模型</option>{model !== "all" && !options.some(m => m.model === model) && <option value={model}>{model}</option>}{options.map(m => <option key={m.model} value={m.model}>{m.modelName}</option>)}</select><UiIcon icon={ChevronDown} /></span>
-        </div>
+        <Dropdown className="usage-select usage-model-select" label="统计模型" searchLabel="搜索模型" value={model}
+          options={options} onChange={id => { setModel(id); setExpanded(false); }} />
       </div>
       {incomplete && (available || showImportProgress || (!importing && summary !== null)) && <div className="usage-sync-status usage-coverage" role="status">
         <span>{showImportProgress && <UiIcon icon={LoaderCircle} className="usage-spin" />}<strong>{coverageTitle}</strong>

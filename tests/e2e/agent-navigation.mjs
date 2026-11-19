@@ -27,11 +27,15 @@ try {
   await page.goto(baseURL);
   const switcher = page.getByRole('combobox', { name: '当前 Agent', exact: true });
   const tab = name => page.getByRole('button', { name, exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.agent-switcher-trigger')?.value === 'qoder');
+  await page.waitForFunction(() => document.querySelector('.agent-switcher .dropdown-trigger')?.value === 'qoder');
+  const menu = page.getByRole('listbox', { name: '当前 Agent', exact: true });
   await switcher.click();
   assert.equal(await page.locator('[role="option"][value="all"]').count(), 0);
-  assert.ok(await page.locator('[role="option"][value="pi"]').isDisabled());
-  await page.keyboard.press('Escape');
+  assert.equal(await menu.locator('[value="pi"]').count(), 0);
+  assert.equal(await menu.locator('[value="qoder"]').textContent(), 'Qoder');
+  await switcher.click();
+  assert.equal(await switcher.getAttribute('aria-expanded'), 'false', 'the same trigger click must close the menu');
+  assert.equal(await menu.count(), 0);
   await chooseAgent(page, 'claude');
   await tab('配置');
   await page.getByText('claude-demo', { exact: true }).waitFor();
@@ -65,14 +69,13 @@ try {
   console.log(`PASS: one Agent selection follows all three pages; all-Agent usage retains the local context; cancelled navigation preserves drafts (${engine})`);
 
   await tab('用量');
-  await chooseAgent(page, 'pi');
-  await page.waitForFunction(() => window.__NAVIGATION__.some(call => call.command === 'read_request_events' && call.args.query.agent === 'pi'));
+  await switcher.click();
+  assert.equal(await menu.locator('[value="pi"]').count(), 0);
+  assert.equal(await menu.locator('[value="all"]').count(), 1);
+  await page.keyboard.press('Escape');
   await tab('配置');
   await page.getByText('codex-demo', { exact: true }).waitFor();
-  assert.equal(await switcher.getAttribute("value"), 'codex', 'historical-only sources cannot become configuration targets');
-  await switcher.click();
-  assert.ok(await page.locator('[role="option"][value="pi"]').isDisabled());
-  await page.keyboard.press('Escape');
+  assert.equal(await switcher.getAttribute("value"), 'codex');
   assert.equal(await page.locator('.sidebar,.pane-divider').count(), 0);
 
   for (const width of [960, 1280, 1600]) {
@@ -91,36 +94,35 @@ try {
     }
   }
 
-  const menu = page.getByRole('listbox', { name: 'Agent', exact: true });
   await tab('用量');
   for (const viewport of [{ width: 960, height: 600 }, { width: 1280, height: 800 }]) {
     await page.setViewportSize(viewport);
-    for (const id of ['codex', 'opencode', 'pi']) {
+    for (const id of ['codex', 'opencode']) {
       await chooseAgent(page, id);
       await switcher.click();
       const buttonBox = await switcher.boundingBox(), menuBox = await menu.boundingBox();
       assert.ok(menuBox.y >= buttonBox.y + buttonBox.height + 4, `menu must open below ${id}`);
       assert.ok(menuBox.x >= 0 && menuBox.x + menuBox.width <= viewport.width);
       assert.ok(menuBox.y + menuBox.height <= viewport.height);
-      assert.equal(await menu.getByRole('option').count(), 6);
+      assert.equal(await menu.getByRole('option').count(), 5);
       assert.equal(await menu.locator(`[value="${id}"]`).getAttribute('aria-selected'), 'true');
       for (const option of await menu.getByRole('option').all()) {
         const box = await option.boundingBox();
         assert.ok(box.y >= menuBox.y && box.y + box.height <= menuBox.y + menuBox.height, 'every option must be visible, including earlier Agents');
       }
-      if (id === 'pi') await page.screenshot({ path: path.join(artifactDir, `agent-switcher-open-pi-${viewport.width}.png`) });
+      if (id === 'opencode') await page.screenshot({ path: path.join(artifactDir, `agent-switcher-open-opencode-${viewport.width}.png`) });
       await page.keyboard.press('Escape');
       assert.equal(await switcher.getAttribute('aria-expanded'), 'false');
     }
   }
-  console.log(`PASS: reopening Codex, OpenCode and Pi shows the complete menu below its trigger at 960x600 and 1280x800 (${engine})`);
+  console.log(`PASS: reopening Codex and OpenCode shows the complete menu below its trigger at 960x600 and 1280x800 (${engine})`);
 
   await chooseAgent(page, 'codex');
   await switcher.press('ArrowDown');
   assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-codex'));
   assert.ok(await switcher.evaluate(el => el === document.activeElement));
   await switcher.press('End');
-  assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-pi'));
+  assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-opencode'));
   assert.equal(await switcher.getAttribute('value'), 'codex', 'keyboard preview must not switch the Agent');
   await switcher.press('Escape');
   assert.equal(await switcher.getAttribute('value'), 'codex');
@@ -132,11 +134,11 @@ try {
   await switcher.press('Space');
   await switcher.press('End');
   await switcher.press('Space');
-  assert.equal(await switcher.getAttribute('value'), 'pi');
+  assert.equal(await switcher.getAttribute('value'), 'opencode');
   await switcher.press('Home');
   await switcher.press('Tab');
   assert.equal(await menu.count(), 0);
-  assert.equal(await switcher.getAttribute('value'), 'pi', 'Tab leaves the picker without an accidental Agent switch');
+  assert.equal(await switcher.getAttribute('value'), 'opencode', 'Tab leaves the picker without an accidental Agent switch');
   assert.ok(!await switcher.evaluate(el => el === document.activeElement));
   await switcher.press('c');
   assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-claude'));
@@ -158,9 +160,9 @@ try {
   assert.equal(await menu.count(), 0);
   await tab('配置');
   await switcher.press('End');
-  assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-opencode'), 'keyboard navigation skips an unavailable Agent');
+  assert.ok((await switcher.getAttribute('aria-activedescendant')).endsWith('-opencode'));
   await switcher.press('Escape');
-  console.log(`PASS: keyboard preview/commit, typeahead, disabled options, Escape, Tab, outside click and window blur preserve focus and selection (${engine})`);
+  console.log(`PASS: keyboard preview/commit, typeahead, Escape, Tab, outside click and window blur preserve focus and selection (${engine})`);
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await chooseAgent(page, 'claude');
@@ -170,13 +172,14 @@ try {
     await page.screenshot({ path: path.join(artifactDir, `agent-navigation-${file}.png`) });
   }
   await page.goto(`${baseURL}?empty=1`);
-  await page.waitForFunction(() => document.querySelector('.agent-switcher-trigger')?.value === '');
+  await page.waitForFunction(() => document.querySelector('.agent-switcher .dropdown-trigger')?.value === '');
   assert.ok(await switcher.isDisabled());
   assert.equal(await page.getByRole('button', { name: '配置', exact: true }).count(), 0);
   await tab('用量');
-  await chooseAgent(page, 'pi');
+  await switcher.click();
+  assert.deepEqual(await menu.getByRole('option').allTextContents(), ['全部 Agent']);
   await tab('会话');
   assert.equal(await switcher.getAttribute("value"), '');
   assert.deepEqual(errors, []);
-  console.log(`PASS: historical-only and empty installs remain safe; the control stays fixed and fits 960/1280/1600 layouts (${engine})`);
+  console.log(`PASS: missing data sources stay hidden and the control fits 960/1280/1600 layouts (${engine})`);
 } finally { await browser.close(); }
