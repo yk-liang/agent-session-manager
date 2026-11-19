@@ -4,8 +4,10 @@ import { CheckboxField } from "./Checkbox";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
+import { useSessionOutline } from "./SessionOutline";
+import { useConversationScroll } from "../useConversationScroll";
 import { DetailState, EventView, RowKey } from "./SessionEvent";
-import { DEFAULT_VISIBILITY, sessionContent, visibleSessionRows } from "../sessionContent";
+import { DEFAULT_VISIBILITY, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
 import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
@@ -26,18 +28,24 @@ interface Props {
 
 export default function SessionDetailView({ detail, agent, onRequestDelete, onToggleArchive, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
+  const key = sessionKey(meta);
+  const reportCopyError = useCallback((error: unknown) => toast(`复制消息失败：${String(error)}`, true), [toast]);
   const [showTools, setShowTools] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
   const [showContext, setShowContext] = useState(false);
   const [renderMarkdown, setRenderMarkdown] = useState(readMarkdownPreference);
 
-  const content = sessionContent(detail.events);
+  // 同一会话的正文刷新沿用展开状态和已读取的工具正文；切换会话才重新开始。
+  const reading = useRef<{ key: string; state: SessionReading } | null>(null);
+  const content = sessionContent(detail.events, reading.current?.key === key ? reading.current.state : undefined);
+  useEffect(() => { reading.current = { key, state: content.reading }; }, [key, content]);
   const { rows, toc, hasContext } = content;
   const visibility = useMemo(() => showTools && showThinking && !showContext ? DEFAULT_VISIBILITY
     : { tool: showTools, thinking: showThinking, context: showContext }, [showTools, showThinking, showContext]);
 
   const models = useMemo(() => agent.id === "opencode" ? historicalModels(detail.events) : [], [agent.id, detail.events]);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const hitIndex = useMemo(() => {
     if (!searchTarget) return -1;
     const matches = (index: number) => index >= 0 && !!detail.events[index] && eventMatches(detail.events[index], searchTarget.query);
@@ -56,7 +64,9 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
     : visibleSessionRows(content.rows, visibility), [content, visibility]);
   const itemKey = useCallback((index: number) => visible[index], [visible]);
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
-    estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 10 });
+    estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 10, useAnimationFrameWithResizeObserver: true });
+  const { position, jumpTo } = useConversationScroll(key, toc, visible, virtual, bodyRef, contentRef);
+  const outline = useSessionOutline(toc, key, position, jumpTo);
   const markdownAnchor = useRef<number | null>(null);
   const changeMarkdown = (enabled: boolean) => {
     const offset = virtual.scrollOffset ?? 0;
@@ -80,48 +90,23 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
       if (position >= 0) virtual.scrollToIndex(position, { align: "start" });
     }
   }, [renderMarkdown, virtual, visible, searchTarget]);
-  const navigation = useRef(0);
-  const [jumpTarget, setJumpTarget] = useState(-1);
-  const jumpTo = useCallback((idx: number) => {
-    const position = visible.indexOf(idx);
-    if (position < 0) return;
-    const generation = ++navigation.current;
-    setJumpTarget(idx);
-    virtual.scrollToIndex(position, { align: "start" });
-    // 等虚拟行和 Markdown 挂载后，再滚到实际匹配位置。
-    let frames = 0;
-    const settle = () => {
-      if (navigation.current !== generation) return;
-      const row = bodyRef.current?.querySelector<HTMLElement>(`#ev-${idx}`);
-      if (row && frames >= 2) {
-        if (row.querySelector("[data-markdown-pending]") && frames++ < 120) { requestAnimationFrame(settle); return; }
-        const mark = row.querySelector("mark.search-highlight");
-        (mark ?? row).scrollIntoView({ behavior: "auto", block: mark ? "center" : "start" });
-        row.classList.add("flash");
-        return;
-      }
-      if (frames++ < 20) { virtual.scrollToIndex(position, { align: "start" }); requestAnimationFrame(settle); }
-    };
-    requestAnimationFrame(settle);
-  }, [visible, virtual]);
-  useEffect(() => {
-    bodyRef.current?.scrollTo(0, 0);
-    setJumpTarget(-1);
-    return () => { navigation.current++; };
-  }, [meta.sessionId, meta.projectDir]);
+  // 只在打开搜索结果或切换 Markdown 时定位；同一会话的正文刷新会更新命中位置和跳转函数，但不能把读者拉回命中处。
+  const latestHit = useRef({ hitIndex, jumpTo });
+  useLayoutEffect(() => { latestHit.current = { hitIndex, jumpTo }; }, [hitIndex, jumpTo]);
   useEffect(() => {
     if (!searchTarget) return;
+    const { hitIndex, jumpTo } = latestHit.current;
     if (hitIndex < 0) { toast("找不到原来的匹配内容，请重新搜索。", true); return; }
-    jumpTo(hitIndex);
-  }, [hitIndex, searchTarget, jumpTo, toast, renderMarkdown]);
+    jumpTo(hitIndex, { match: true });
+  }, [searchTarget, toast, renderMarkdown]);
 
   return (
-    <DetailState.Provider value={state}><div className="detail">
+    <DetailState.Provider value={state}><div className="detail" onKeyDown={outline.onKeyDown}>
       <div className="detail-header">
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
           {meta.archived && <span className="status-tag muted">已归档</span>}
-          <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
+          <CopyButton key={`copy:${key}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
@@ -129,7 +114,8 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
             {fullTime(meta.lastTs)}
           </time>}
           <div className="detail-meta-actions">
-            <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
+            {outline.trigger}
+            <SessionInfo key={`info:${key}`} meta={meta} models={models} />
           </div>
         </div>
         <div className="detail-toolbar">
@@ -150,16 +136,17 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
       {detail.warnings?.length ? <ReadDiagnostics className="detail-warnings" title="部分会话内容无法读取" errors={detail.warnings} retry={onRetryRead} /> : null}
       <div className="detail-content">
         <div className="detail-body" ref={bodyRef}>
-          <div className="virtual-events" style={{ height: virtual.getTotalSize() }}>
+          <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
           {virtual.getVirtualItems().map((row) => {
             const i = visible[row.index];
-            return <div data-index={row.index} title={agent.id === "opencode" ? eventModelTitle(detail.events[i]) : undefined} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
-              className={`event-group${i === hitIndex ? " search-target" : ""}${i === jumpTarget ? " jump-target" : ""}`} id={`ev-${i}`} key={row.key}>
+            return <div data-index={row.index} tabIndex={-1} title={agent.id === "opencode" ? eventModelTitle(detail.events[i]) : undefined} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
+              className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
               <RowKey.Provider value={String(i)}><EventView
                 row={rows[i]}
                 visibility={visibility}
                 renderMarkdown={renderMarkdown}
                 highlightQuery={i === hitIndex ? searchTarget?.query : undefined}
+                onCopyError={reportCopyError}
               /></RowKey.Provider>
             </div>;
           })}
@@ -173,17 +160,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
             </div>
           )}
         </div>
-        {toc.length > 1 && (
-          <nav className="toc">
-            <div className="toc-title">对话导览 · {toc.length} 条用户消息</div>
-            {toc.map((t, n) => (
-              <button key={t.idx} className="toc-item" onClick={() => jumpTo(t.idx)} title={t.text}>
-                <span className="toc-num">{n + 1}</span>
-                <span className="toc-text">{t.text}</span>
-              </button>
-            ))}
-          </nav>
-        )}
+        {outline.navigation}
       </div>
     </div></DetailState.Provider>
   );

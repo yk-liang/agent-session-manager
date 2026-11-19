@@ -1,14 +1,12 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, memo, useContext, useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Layers, type LucideIcon } from "lucide-react";
 import * as api from "../api";
 import type { ContentBlock } from "../types";
-import { hasActivity, isAttachment, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
+import { attachmentLabel, hasActivity, isAttachment, messageBlockText, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
+import { absoluteTime } from "../utils";
+import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
 import UiIcon from "./UiIcon";
-
-function attachmentLabel(block: ContentBlock) {
-  return block.filename?.trim() || (block.type === "image" || block.type === "input_image" ? "图片" : "附件");
-}
 
 function attachmentUrl(block: ContentBlock) {
   const source = block.source && typeof block.source === "object" ? block.source as Record<string, unknown> : {};
@@ -206,28 +204,51 @@ function ResponseGroup({ parts, visibility, markdown }: {
     error={failureCount > 0} icon={Layers}>{rows}</Collapsible>;
 }
 
-export function EventView({ row, visibility, renderMarkdown, highlightQuery = "" }: {
+function MessageBubble({ role, timestamp, blocks, copyText, markdown, query, onCopyError }: {
+  role: "user" | "assistant";
+  timestamp?: string;
+  blocks: SessionBlock[];
+  copyText: string;
+  markdown: boolean;
+  query: string;
+  onCopyError: (error: unknown) => void;
+}) {
+  const time = timestamp && absoluteTime(timestamp);
+  return <div className={`message ${role}`}>
+    <div className={`msg ${role}`}>{blocks.map(({ index, content }) => content.type === "text"
+      ? <div key={index} className="msg-text"><LongText text={content.text?.trim() ?? ""} query={query} markdown={markdown} /></div>
+      : <Attachment key={index} block={content} />)}</div>
+    <div className="message-actions">
+      {time && <time dateTime={timestamp}>{time}</time>}
+      <CopyButton className="message-copy" value={copyText} label="复制消息" onError={onCopyError} />
+    </div>
+  </div>;
+}
+
+export const EventView = memo(function EventView({ row, visibility, renderMarkdown, highlightQuery = "", onCopyError }: {
   row: SessionRow;
   visibility: Visibility;
   renderMarkdown: boolean;
   highlightQuery?: string;
+  onCopyError: (error: unknown) => void;
 }) {
   const { event, blocks } = row;
-  if (event.type === "context") {
+  const { type, timestamp } = event;
+  if (type === "context") {
     const text = event.message?.content;
     if (typeof text !== "string" || !text.trim()) return null;
     return <Collapsible kind="context" persistKey="context" label={event.context?.label ?? "运行上下文"}
       summary={event.context?.summary}><LongText text={text} code /></Collapsible>;
   }
-  if (event.type === "system") {
+  if (type === "system") {
     const text = String(event.content ?? event.subtype ?? "").trim();
     return text ? <div className="system-line">{text}</div> : null;
   }
 
   const parts: ReactNode[] = [];
   let activity: SessionBlock[] = [];
-  let message: ReactNode[] = [];
-  let messageStart = 0;
+  let message: SessionBlock[] = [];
+  const copyText = blocks.flatMap(({ content }) => messageBlockText(content) ?? []).join("\n\n");
   const flushActivity = () => {
     if (!activity.length) return;
     parts.push(<ResponseGroup key={activity[0].index} parts={activity} visibility={visibility} markdown={renderMarkdown} />);
@@ -235,27 +256,22 @@ export function EventView({ row, visibility, renderMarkdown, highlightQuery = ""
   };
   const flushMessage = () => {
     if (!message.length) return;
-    parts.push(<div key={messageStart} className={`msg ${event.type}`}>{message}</div>);
+    parts.push(<MessageBubble key={message[0].index} role={type} timestamp={timestamp} blocks={message}
+      copyText={copyText} markdown={renderMarkdown} query={highlightQuery} onCopyError={onCopyError} />);
     message = [];
   };
 
   for (const part of blocks) {
-    const { index, content } = part;
     if (hasActivity(part)) {
       flushMessage();
       activity.push(part);
       continue;
     }
-    const text = content.type === "text" && content.text?.trim();
-    const attachment = isAttachment(content);
-    if (!text && !attachment) continue;
+    if (!messageBlockText(part.content)?.trim()) continue;
     flushActivity();
-    if (!message.length) messageStart = index;
-    message.push(text
-      ? <div key={index} className="msg-text"><LongText text={text} query={highlightQuery} markdown={renderMarkdown} /></div>
-      : <Attachment key={index} block={content} />);
+    message.push(part);
   }
   flushActivity();
   flushMessage();
   return <>{parts}</>;
-}
+});

@@ -23,6 +23,13 @@ import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget
 
 const NO_SESSIONS: SessionMeta[] = [];
 
+/** 目录对正文内容的变化标记；只比较已落定的统计，预览阶段的文件时间不可与之比较。 */
+const sessionContentStamp = (session: SessionMeta) => `${session.sizeBytes ?? ""}|${session.lastTs ?? ""}`;
+
+const sameSearchTarget = (a: ConversationSearchTarget | null, b: ConversationSearchTarget | null) =>
+  a === b || !!a && !!b && a.query === b.query && a.eventIndex === b.eventIndex
+    && a.eventId === b.eventId && a.snippet === b.snippet && a.role === b.role;
+
 type Tab = "sessions" | "config" | "usage";
 
 type SessionOperation =
@@ -223,29 +230,81 @@ export default function App() {
     void loadSession(selectedAgent, s);
   };
 
-  const loadSession = async (agentId: string, s: SessionMeta) => {
+  // 已读入正文对应的目录内容标记；null 表示读取时目录统计未落定，下次落定后直接采用而不重读。
+  // reading 是正在后台重读的目标标记，避免同一变化重复发起读取。
+  const contentStamp = useRef<{ key: string; stamp: string | null; reading?: string } | null>(null);
+  const catalogRow = ({ projectDir, sessionId }: SessionMeta) =>
+    catalog.sessions.find(s => s.sessionId === sessionId && s.projectDir === projectDir);
+
+  /**
+   * 打开其他会话时清空详情并显示加载状态；重新读取正在显示的同一会话（再次点击、重试、归档后刷新）
+   * 则保留最后一份正文，读取完成后原地替换，阅读位置和展开状态由详情视图按会话保留。
+   * 传入 refreshStamp 表示文件变化触发的后台重读：不改动加载状态和搜索定位，失败时静默保留旧正文，下次目录变化再试。
+   */
+  const loadSession = async (agentId: string, s: SessionMeta, refreshStamp?: string) => {
     const generation = ++detailRequestGeneration.current;
-    const hit = contentSearch.hits.get(sessionKey(s));
+    const key = sessionKey(s);
+    const keep = !!detail && sessionKey(detail.meta) === key;
+    const refresh = refreshStamp !== undefined;
+    const hit = refresh ? undefined : contentSearch.hits.get(key);
     const target = hit ? { ...hit, query: search.trim() } : null;
-    setDetail(null);
-    setReadRequest(current => ({
-      session: s, pending: true,
-      error: current && sessionKey(current.session) === sessionKey(s) ? current.error : null,
-    }));
+    if (!refresh) {
+      const row = catalogRow(s);
+      contentStamp.current = { key, stamp: row && !row.statsPending ? sessionContentStamp(row) : null };
+      if (!keep) setDetail(null);
+      setReadRequest(current => ({
+        session: s, pending: true,
+        error: current && sessionKey(current.session) === key ? current.error : null,
+      }));
+    }
     try {
       const d = await api.readSession(agentId, s.projectDir, s.sessionId);
       if (generation !== detailRequestGeneration.current) return;
       catalogCache.setReadError(agentId, s, null);
-      setReadRequest(null);
-      setSearchTarget(target);
+      if (refresh) {
+        contentStamp.current = { key, stamp: refreshStamp };
+      } else {
+        setReadRequest(null);
+        // 同一会话、同一命中重新读取时沿用原定位对象，避免把读者拉回命中处。
+        setSearchTarget(current => keep && sameSearchTarget(current, target) ? current : target);
+      }
       setDetail(d);
     } catch (e) {
       if (generation !== detailRequestGeneration.current) return;
       const error = String(e);
+      if (refresh) {
+        const known = contentStamp.current;
+        if (known?.key === key) contentStamp.current = { key, stamp: known.stamp };
+        return;
+      }
+      if (keep) {
+        setReadRequest(null);
+        showToast(`无法重新读取会话正文，已保留上次内容：${error.split("\n")[0]}`, true);
+        return;
+      }
       catalogCache.setReadError(agentId, s, error);
       setReadRequest({ session: s, pending: false, error });
     }
   };
+
+  // 当前详情的内容更新复用目录的文件监听与节流：只有目录确认这条会话的大小或时间变了才重读一次正文。
+  // 预览阶段统计未落定时先不读，等后台统计完成，避免和目录精算同时读取大历史。
+  useEffect(() => {
+    if (tab !== "sessions" || !detail || !selectedAgent || readRequest || sessionActionsBusy) return;
+    const row = catalogRow(detail.meta);
+    if (!row || row.statsPending) return;
+    const key = sessionKey(row);
+    const stamp = sessionContentStamp(row);
+    const known = contentStamp.current;
+    if (known?.key !== key || known.stamp === null) {
+      contentStamp.current = { key, stamp };
+      return;
+    }
+    if (known.stamp === stamp || known.reading === stamp) return;
+    contentStamp.current = { ...known, reading: stamp };
+    void loadSession(selectedAgent, row, stamp);
+    // loadSession、catalogRow 每次渲染重建；这里只在目录或当前详情变化时检查。
+  }, [catalog, detail, readRequest, selectedAgent, sessionActionsBusy, tab]);
 
   const toggleBatch = () => {
     if (sessionActionsBusy || batchBusy || mutationRunning.current) return;

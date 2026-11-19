@@ -27,7 +27,7 @@ const compact=async()=>{
 const alignedActivity=async()=>{
   const { count, misaligned }=await page.evaluate(()=>{
     const cards=[...document.querySelectorAll('.event-group > .collapsible')];
-    const assistant=document.querySelector('.event-group > .msg.assistant');
+    const assistant=document.querySelector('.event-group > .message.assistant');
     const width=assistant && getComputedStyle(assistant).maxWidth;
     return { count:cards.length, misaligned:cards.flatMap(card=>{
       const bounds=card.getBoundingClientRect(), row=card.parentElement.getBoundingClientRect();

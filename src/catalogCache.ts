@@ -138,6 +138,37 @@ export class AgentCatalogCache {
       ? meta : { ...meta, title, model, archived };
   }
 
+  /**
+   * 预览只读文件头，标题、模型和消息数暂缺；后台统计完成前沿用同一来源会话上次确认的值，
+   * 避免卡片在“有值 → 空 → 有值”之间跳动。预览带来的新值（如重命名、时间、大小、归档）照常生效。
+   */
+  private retainKnownStats(scope: CatalogScope, catalog: Catalog): Catalog {
+    if (!catalog.sessions.some(session => session.statsPending)) return catalog;
+    const previous = this.visible(scope.agent, scope.filter);
+    if (!previous?.sessions.length) return catalog;
+    const known = new Map<string, SessionMeta>();
+    for (const session of previous.sessions) {
+      if (!session.statsPending || session.statsRetained) known.set(sessionKey(session), session);
+    }
+    let changed = false;
+    const sessions = catalog.sessions.map(session => {
+      const last = session.statsPending ? known.get(sessionKey(session)) : undefined;
+      if (!last) return session;
+      changed = true;
+      return {
+        ...session,
+        title: session.title ?? last.title,
+        model: session.model ?? last.model,
+        userCount: last.userCount,
+        assistantCount: last.assistantCount,
+        realUserCount: last.realUserCount,
+        assistantTextCount: last.assistantTextCount,
+        statsRetained: true,
+      };
+    });
+    return changed ? { ...catalog, sessions } : catalog;
+  }
+
   private decorate({ agent, filter, snapshot }: CatalogScope, catalog: Catalog): Catalog {
     const failures = this.readFailures.get(agent);
     const sessionKeys = catalog.warnings.length && failures?.size ? new Set(catalog.sessions.map(sessionKey)) : null;
@@ -178,7 +209,7 @@ export class AgentCatalogCache {
     if (scope.pending && scope.pending.generation === generation) return scope.pending.request;
     const sequence = ++scope.sequence;
     const request = this.loader(agent, filter, generation, scope.snapshot?.revision).then(catalog => {
-      if (catalog && sequence === scope.sequence) return this.publish(scope, this.decorate(scope, catalog));
+      if (catalog && sequence === scope.sequence) return this.publish(scope, this.settle(scope, catalog));
       return scope.snapshot ?? EMPTY_CATALOG;
     }).finally(() => {
       if (scope.pending?.request === request) scope.pending = undefined;
@@ -191,7 +222,11 @@ export class AgentCatalogCache {
     const scope = this.scope(agent, filter);
     const sequence = scope.sequence;
     const catalog = await load(scope.snapshot?.revision);
-    if (catalog && sequence === scope.sequence) return this.publish(scope, this.decorate(scope, catalog));
+    if (catalog && sequence === scope.sequence) return this.publish(scope, this.settle(scope, catalog));
+  }
+
+  private settle(scope: CatalogScope, catalog: Catalog) {
+    return this.decorate(scope, this.retainKnownStats(scope, catalog));
   }
 
   remove(agent: string, removed: SessionMeta[]) {

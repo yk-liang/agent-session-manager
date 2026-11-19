@@ -15,7 +15,15 @@ try {
       firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1,
       sizeBytes: 100, hasTranscript: true });
     const state = { rows: { qoder: [row("q1", "Existing Qoder session")], codex: [row("c1", "Existing Codex session")] },
-      calls: [], catalogs: [], watch: { agent: null, generation: 0 }, callbacks: {}, listeners: {}, next: 0 };
+      calls: [], catalogs: [], watch: { agent: null, generation: 0 }, callbacks: {}, listeners: {}, next: 0,
+      // Codex 式两阶段目录：preview 中的会话只有文件头，refine_catalog 返回完整统计。
+      preview: new Set(), events: {}, refining: false, releaseRefine: null };
+    const headerOnly = session => ({ ...session, title: null, model: null, userCount: 0, assistantCount: 0,
+      realUserCount: 0, assistantTextCount: 0, statsPending: true });
+    const listing = (agent, preview) => {
+      const sessions = structuredClone(state.rows[agent]).map(s => preview && state.preview.has(s.sessionId) ? headerOnly(s) : s);
+      return { sessions, projects: [{ dirName: "real-source", displayPath: "/tmp/real-source", sessionCount: sessions.length, lastActivity: null }], warnings: [] };
+    };
     state.emit = (event, payload) => {
       for (const [id, listener] of Object.entries(state.listeners)) if (listener.event === event) {
         state.callbacks[listener.handler]?.({ event, id: Number(id), payload });
@@ -41,14 +49,21 @@ try {
         }
         if (command === "catalog") {
           state.catalogs.push({ agent: args.agent, at: performance.now() });
-          const sessions = structuredClone(state.rows[args.agent]);
-          return { sessions, projects: [{ dirName: "real-source", displayPath: "/tmp/real-source", sessionCount: sessions.length, lastActivity: null }], warnings: [] };
+          return listing(args.agent, true);
         }
+        if (command === "refine_catalog") {
+          state.refining = true;
+          await new Promise(resolve => { state.releaseRefine = resolve; });
+          state.refining = false; state.preview.clear();
+          return listing(args.agent, false);
+        }
+        if (command === "read_tool_payload") return { type: "tool_result", tool_use_id: "call-mid", content: `payload ${args.token}` };
         if (command === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
         if (command === "get_config_workspace") return { agent: args.agent, revision: "fixture", files: [], profiles: [],
           matchingProfiles: [], overview: { model: null, provider: null, endpoint: null, mcpServers: [] }, backups: [], warnings: [] };
-        if (command === "read_session") return { meta: state.rows[args.agent].find(s => s.sessionId === args.sessionId),
-          events: [{ type: "assistant", uuid: "stable", message: { content: "Keep the open conversation stable" } }] };
+        if (command === "read_session") return { meta: structuredClone(state.rows[args.agent].find(s => s.sessionId === args.sessionId)),
+          events: structuredClone(state.events[args.sessionId]
+            ?? [{ type: "assistant", uuid: "stable", message: { content: "Keep the open conversation stable" } }]) };
         return null;
       } };
   });
@@ -118,6 +133,122 @@ try {
   await page.locator(".session-card", { hasText: "Created on configuration tab" }).waitFor();
   assert.deepEqual(errors, []);
   pass("old Agent events are ignored, the configuration tab does not scan sessions, and returning to sessions loads the new data");
+
+  // 正在写入的 Codex 会话：目录先发布只有文件头的预览，再在后台补齐统计；打开的正文随文件变化重读。
+  await page.evaluate(() => {
+    const s = window.__AUTO_TEST__;
+    const confirmed = (id, title) => ({ sessionId: id, title, projectDir: "real-source", cwd: "/tmp/real-source", model: "logged-model",
+      firstTs: null, lastTs: "2026-10-01T00:00:00Z", userCount: 3, assistantCount: 4, realUserCount: 3, assistantTextCount: 4,
+      sizeBytes: 1000, hasTranscript: true });
+    s.rows.codex = [confirmed("live", "Live session"), ...Array.from({ length: 40 }, (_, i) => confirmed(`f${i}`, `Filler ${i}`))];
+    s.events.live = Array.from({ length: 200 }, (_, i) => i === 100
+      ? { type: "assistant", uuid: "tool", message: { content: [{ type: "tool_use", id: "call-mid", name: "shell", input: { cmd: "ls" } }] } }
+      : i === 101 ? { type: "user", uuid: "result", message: { content: [{ type: "tool_result", tool_use_id: "call-mid", deferred: "tok-mid" }] } }
+      : { type: i % 20 ? "assistant" : "user", uuid: `e${i}`, message: { content: `Message ${i}\n` + "body line\n".repeat(4) } });
+    s.changed();
+  });
+  await page.locator(".session-card", { hasText: "Live session" }).waitFor({ timeout: 15000 });
+  const reads = () => page.evaluate(() => window.__AUTO_TEST__.calls.filter(call => call.command === "read_session").length);
+  const payloads = () => page.evaluate(() => window.__AUTO_TEST__.calls.filter(call => call.command === "read_tool_payload").length);
+  const stable = async read => {
+    let last = await read();
+    for (let i = 0; i < 40; i++) {
+      await page.waitForTimeout(80);
+      const next = await read();
+      if (JSON.stringify(next) === JSON.stringify(last)) return next;
+      last = next;
+    }
+    throw new Error(`layout did not settle: ${JSON.stringify(last)}`);
+  };
+  const detailPosition = () => stable(() => page.evaluate(() => {
+    const body = document.querySelector(".detail-body"); const head = document.querySelector("#ev-100 .collapsible-head");
+    return { top: body.scrollTop, head: head ? Math.round(head.getBoundingClientRect().top - body.getBoundingClientRect().top) : null,
+      expanded: head?.getAttribute("aria-expanded") ?? null };
+  }));
+  const listAnchor = () => stable(() => page.evaluate(() => {
+    const list = document.querySelector(".session-cards"); const top = list.getBoundingClientRect().top;
+    const card = [...list.querySelectorAll(".session-card-row")].map(row => ({ row, rect: row.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.bottom > top).sort((a, b) => a.rect.top - b.rect.top)[0];
+    return { title: card.row.querySelector(".session-card-title").textContent, offset: Math.round(card.rect.top - top) };
+  }));
+
+  await page.locator(".session-card", { hasText: "Live session" }).locator(".session-card-open").click();
+  await page.locator(".detail-title", { hasText: "Live session" }).waitFor();
+  await page.waitForFunction(() => {
+    const body = document.querySelector(".detail-body"); body.scrollTop += 400; return !!document.querySelector("#ev-100");
+  }, undefined, { polling: 50, timeout: 8000 });
+  await page.evaluate(() => document.querySelector("#ev-100").scrollIntoView({ block: "center" }));
+  await page.locator("#ev-100 .collapsible-head").click();
+  await page.getByText("payload tok-mid", { exact: true }).waitFor();
+  const reading = await detailPosition();
+  assert.ok(reading.top > 1000 && reading.expanded === "true", JSON.stringify(reading));
+  const payloadCalls = await payloads();
+  await page.evaluate(() => {
+    document.querySelector(".detail").dataset.mounted = "original";
+    const jitter = window.__JITTER__ = [];
+    new MutationObserver(() => {
+      if (!document.querySelector('.detail[data-mounted="original"]')) jitter.push("detail replaced or cleared");
+      for (const title of document.querySelectorAll(".session-card-title")) {
+        const card = title.closest(".session-card");
+        if (title.textContent === "无标题") jitter.push("card lost its title");
+        else if (!card.textContent.includes("条消息") || !card.querySelector(".model-label")) jitter.push(`${title.textContent} lost count or model`);
+      }
+    }).observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
+
+  before = await reads();
+  await page.locator(".session-card", { hasText: "Live session" }).locator(".session-card-open").click();
+  await page.waitForFunction(count => window.__AUTO_TEST__.calls.filter(call => call.command === "read_session").length > count, before);
+  assert.deepEqual(await detailPosition(), reading);
+  assert.deepEqual(await page.evaluate(() => window.__JITTER__), []);
+  pass("reopening the same conversation keeps its body, reading position and expanded tool in place");
+
+  await page.locator(".session-cards").evaluate(list => { list.scrollTop = 1000; });
+  const anchor = await listAnchor();
+  before = await reads();
+  await page.evaluate(() => {
+    const s = window.__AUTO_TEST__; const rows = s.rows.codex;
+    const live = rows.find(row => row.sessionId === "live"); const touched = rows.find(row => row.sessionId === "f13");
+    Object.assign(live, { sizeBytes: 3000, lastTs: "2026-10-02T00:00:00Z", realUserCount: 4, assistantTextCount: 5 });
+    Object.assign(touched, { sizeBytes: 2000, lastTs: "2026-10-02T00:00:00Z", realUserCount: 6 });
+    rows.unshift({ ...touched, sessionId: "inserted", title: "Inserted above" });
+    s.events.live.push({ type: "user", uuid: "appended-user", message: { content: "Appended question" } },
+      { type: "assistant", uuid: "appended", message: { content: "Appended after refresh" } });
+    s.preview = new Set(["live", "f13", "inserted"]);
+    s.changed();
+  });
+  await page.waitForFunction(() => window.__AUTO_TEST__.refining, undefined, { timeout: 15000 });
+  assert.deepEqual(await page.evaluate(() => window.__JITTER__), [], "header-only preview must not blank known card details");
+  assert.deepEqual(await listAnchor(), anchor, "rows inserted above must not move the card being read");
+  const f13 = page.locator(".session-card", { hasText: "Filler 13" });
+  assert.match(await f13.textContent(), /7 条消息/);
+  assert.equal(await f13.locator(".model-label").count(), 1);
+  assert.equal(await page.locator(".detail-title").textContent(), "Live session");
+  assert.equal(await reads(), before, "the open body waits for settled statistics before re-reading a large history");
+  await page.evaluate(() => window.__AUTO_TEST__.releaseRefine());
+  await f13.filter({ hasText: "10 条消息" }).waitFor();
+  await page.waitForFunction(count => window.__AUTO_TEST__.calls.filter(call => call.command === "read_session").length === count + 1, before);
+  await page.waitForFunction(() => document.querySelector(".toc-title")?.textContent.includes("10 条提问"), undefined, { timeout: 8000 });
+  assert.deepEqual(await detailPosition(), reading, "content updates keep the reading position and expanded tool");
+  assert.deepEqual(await listAnchor(), anchor);
+  assert.equal(await payloads(), payloadCalls, "already loaded tool payloads are reused after the body is re-read");
+  assert.deepEqual(await page.evaluate(() => window.__JITTER__), []);
+  await page.locator(".detail-body").evaluate(body => { body.scrollTop = body.scrollHeight; });
+  await page.getByText("Appended after refresh", { exact: true }).waitFor();
+  pass("preview then refined statistics keep card title, model and count; the open body updates once in place without jumping");
+
+  await page.locator(".session-cards").evaluate(list => { list.scrollTop = 0; });
+  before = await reads();
+  await page.evaluate(() => {
+    const s = window.__AUTO_TEST__; const rows = s.rows.codex;
+    rows.unshift({ ...rows.find(row => row.sessionId === "f0"), sessionId: "newest", title: "Newest on top" });
+    s.changed();
+  });
+  await page.waitForFunction(() => document.querySelector(".session-card-title")?.textContent === "Newest on top", undefined, { timeout: 30000 });
+  assert.equal(await reads(), before, "an unchanged open session is not re-read");
+  assert.deepEqual(await page.evaluate(() => window.__JITTER__), []);
+  assert.deepEqual(errors, []);
+  pass("at the top the list still shows the newest order, and catalog changes elsewhere do not re-read the open body");
   console.log(`PASS: ${checks} automatic refresh checks (${engine})`);
 } catch (error) {
   const artifacts = artifactDir; mkdirSync(artifacts, { recursive: true });

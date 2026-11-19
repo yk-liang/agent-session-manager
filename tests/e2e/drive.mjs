@@ -318,11 +318,15 @@ assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model
 assert.ok((await page.getByRole('group',{name:'会话信息'}).textContent()).includes('/tmp/demo'));
 await page.keyboard.press('Escape');
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);
-// 再次选择会话：旧详情及其操作按钮必须立即不可操作（新请求 1.2s 后才返回）
+// 再次选择同一会话：重读期间保留原正文，直到新响应返回（新请求 1.2s 后才返回）
+const detailBeforeReopen = (await page.locator(".detail-body").textContent()) ?? "";
 await page.click(".session-card");
 const detailWhileLoading = await page.locator(".detail-body").count();
-console.log("STEP1a old detail cleared on re-open:", detailWhileLoading === 0 ? "OK" : "FAILED");
-if (detailWhileLoading !== 0) process.exit(1);
+const textWhileLoading = detailWhileLoading === 1 ? ((await page.locator(".detail-body").textContent()) ?? "") : "";
+const sessionIdWhileLoading = await page.locator(".session-id code").textContent();
+const keptOnReopen = detailWhileLoading === 1 && detailBeforeReopen.length > 0 && textWhileLoading === detailBeforeReopen && sessionIdWhileLoading === SESSION_DETAIL.meta.sessionId;
+console.log("STEP1a same-session re-read keeps detail:", keptOnReopen ? "OK" : "FAILED");
+if (!keptOnReopen) process.exit(1);
 await chooseAgent(page, { label: "Codex" });
 if (process.env.CATALOG_FAIL === "1") {
   // catalog 失败时不得残留旧 agent 的列表

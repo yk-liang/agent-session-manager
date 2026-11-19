@@ -1,4 +1,3 @@
-import { eventTextParts } from "./conversationText.ts";
 import type { ContentBlock, SessionEvent } from "./types";
 
 export type Activity = "thinking" | "tool";
@@ -61,38 +60,51 @@ export function isAttachment(block: ContentBlock) {
   return ["image", "input_image", "input_file", "file", "document"].includes(block.type);
 }
 
+export function attachmentLabel(block: ContentBlock) {
+  return block.filename?.trim() || (block.type === "image" || block.type === "input_image" ? "图片" : "附件");
+}
+
+export function messageBlockText(block: ContentBlock) {
+  if (block.type === "text") return block.text;
+  if (isAttachment(block)) return attachmentLabel(block);
+}
+
 export function rowVisible({ event, blocks }: SessionRow, visibility: Visibility) {
   if (event.type === "context") return visibility.context && typeof event.message?.content === "string" && !!event.message.content.trim();
   if (event.type === "system") return !!String(event.content ?? event.subtype ?? "").trim();
   return blocks.some(part => {
     const activity = hasActivity(part);
-    return activity ? visibility[activity] : isAttachment(part.content) || part.content.type === "text" && !!part.content.text?.trim();
+    return activity ? visibility[activity] : !!messageBlockText(part.content)?.trim();
   });
 }
 
-function createSessionContent(events: SessionEvent[]) {
+/** 展开状态和已读取的工具正文；虚拟行卸载后仍保留，同一会话的正文刷新也沿用。 */
+export type SessionReading = { expanded: Set<string>; payloads: Map<string, Promise<ContentBlock>> };
+
+function createSessionContent(events: SessionEvent[], reading?: SessionReading) {
   const rows = sessionRows(events);
   const toc: { idx: number; text: string }[] = [];
   let hasContext = false;
-  events.forEach((event, idx) => {
+  rows.forEach(({ event, blocks }, idx) => {
     if (event.type === "context") hasContext = true;
     if (event.type !== "user" || event.isMeta) return;
-    const text = eventTextParts(event).join("\n");
+    const text = blocks.flatMap(({ content }) => messageBlockText(content)?.trim() || []).join("\n");
     if (text) toc.push({ idx, text });
   });
   return {
     rows, toc, hasContext,
     visible: visibleSessionRows(rows, DEFAULT_VISIBILITY),
-    reading: { expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>() },
+    reading: reading ?? { expanded: new Set<string>(), payloads: new Map<string, Promise<ContentBlock>>() },
   };
 }
 
 const sessionContents = new WeakMap<SessionEvent[], ReturnType<typeof createSessionContent>>();
 
-export function sessionContent(events: SessionEvent[]) {
+/** `reading` 只在首次为这份正文建立视图时采用，用于同一会话重读后接续阅读状态。 */
+export function sessionContent(events: SessionEvent[], reading?: SessionReading) {
   let content = sessionContents.get(events);
   if (!content) {
-    content = createSessionContent(events);
+    content = createSessionContent(events, reading);
     sessionContents.set(events, content);
   }
   return content;

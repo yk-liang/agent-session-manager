@@ -28,6 +28,8 @@ export interface SessionMeta {
   hasTranscript: boolean;
   archived?: boolean;
   statsPending?: boolean;
+  /** 仅前端：统计仍在后台计算，消息数沿用同一会话上次确认的值；未知统计不会带此标记。 */
+  statsRetained?: boolean;
   /** 本次应用运行中实际打开正文失败的诊断；摘要刷新不能视为正文恢复。 */
   readError?: string;
 }

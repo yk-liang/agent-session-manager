@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 
 const browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ channel: 'chrome', headless: true });
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, timezoneId: 'UTC' });
 const errors = []; page.on('pageerror', error => errors.push(error.message));
 try {
   await page.clock.install({ time: new Date('2026-10-28T12:00:00Z') });
@@ -30,7 +30,13 @@ try {
         if (state.failCatalog) throw Error('Catalog unavailable');
         return { sessions: structuredClone(rows), projects: [{ dirName: 'project', displayPath: '/tmp/project', sessionCount: 2, lastActivity: null }], warnings: [] };
       }
-      if (command === 'read_session') return { meta: rows.find(row => row.sessionId === args.sessionId), events: [] };
+      if (command === 'read_session') return { meta: rows.find(row => row.sessionId === args.sessionId), events: [
+        { type: 'user', timestamp: '2026-10-28T09:07:05Z', message: { content: '用户的提问' } },
+        { type: 'assistant', timestamp: '2026-10-28T09:08:06Z', message: {
+          content: [{ type: 'text', text: '# 回答\n' + '原文'.repeat(1800) },
+            { type: 'thinking', thinking: '不属于回复正文' }, { type: 'text', text: '第二段' }],
+        } },
+      ] };
       if (command === 'plugin:clipboard-manager|write_text') {
         if (state.copyMode === 'failure') throw Error('Clipboard unavailable');
         if (state.copyMode === 'pending') await new Promise(resolve => state.releaseCopy = resolve);
@@ -93,6 +99,28 @@ try {
   await page.clock.runFor(100);
   assert.equal(await copy.getAttribute('data-copied'), 'false', 'late results must not mark another session as copied');
   console.log(`PASS: inline copy feedback, stable dimensions, expiry/repeat, failure, and late clipboard results (${engine})`);
+
+  await page.evaluate(() => { window.__FEEDBACK__.copyMode = 'success'; });
+  const userMessage = page.locator('.message.user');
+  const agentMessage = page.locator('.message.assistant').last();
+  const footer = (message) => message.locator('.message-actions');
+  const reservedHeight = await footer(userMessage).evaluate(el => el.offsetHeight);
+  assert.ok(reservedHeight >= 24);
+  assert.equal(await footer(userMessage).evaluate(el => getComputedStyle(el).opacity), '0');
+  await userMessage.locator('.msg').hover();
+  assert.equal(await footer(userMessage).evaluate(el => getComputedStyle(el).opacity), '1');
+  assert.equal(await footer(userMessage).locator('time').textContent(), '2026-10-28 09:07:05');
+  await userMessage.getByRole('button', { name: '复制消息', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '用户的提问');
+  const copyMessage = agentMessage.getByRole('button', { name: '复制消息', exact: true });
+  await copyMessage.focus();
+  await copyMessage.press('Enter');
+  await copyMessage.locator('.lucide-check').waitFor();
+  assert.equal(await footer(agentMessage).locator('time').textContent(), '2026-10-28 09:08:06');
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '# 回答\n' + '原文'.repeat(1800) + '\n\n第二段');
+  await page.clock.runFor(2100);
+  await copyMessage.locator('.lucide-copy').waitFor();
+  assert.equal(await footer(userMessage).evaluate(el => el.offsetHeight), reservedHeight);
 
   assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 0);
   await page.evaluate(() => { const s = window.__FEEDBACK__; s.holdCatalog = true; s.changed(); });

@@ -33,6 +33,44 @@ test("desktop rename and model selection update an open detail without replacing
   assert.equal(cache.withCurrentMetadata("qoder", active,unrelated).title,"Continue");
 });
 
+test("a header-only preview keeps the last confirmed card details until background statistics settle", async () => {
+  const settled = { ...meta("live", "logged-model"), title: "Confirmed title", lastTs: "2026-10-01T00:00:00Z", sizeBytes: 100,
+    userCount: 3, assistantCount: 5, realUserCount: 3, assistantTextCount: 4 };
+  const preview = row => ({ ...row, title: null, model: null, userCount: 0, assistantCount: 0, realUserCount: 0,
+    assistantTextCount: 0, statsPending: true });
+  let rows = [settled];
+  const cache = new AgentCatalogCache(async () => catalog(...rows));
+  await cache.load("codex", active, generation);
+  await cache.load("claude", active, generation);
+
+  rows = [preview({ ...settled, lastTs: "2026-10-02T00:00:00Z", sizeBytes: 300 }), preview(meta("brand-new"))];
+  await cache.load("codex", active, generation);
+  let [live, fresh] = cache.peek("codex", active).sessions;
+  assert.deepEqual([live.title, live.model, live.realUserCount, live.assistantTextCount, live.userCount, live.statsPending, live.statsRetained],
+    ["Confirmed title", "logged-model", 3, 4, 3, true, true]);
+  assert.deepEqual([live.lastTs, live.sizeBytes], ["2026-10-02T00:00:00Z", 300], "new file time and size still arrive during the preview");
+  assert.equal(fresh.statsRetained, undefined, "a session never confirmed before stays unknown instead of becoming zero");
+  assert.equal(cache.withCurrentMetadata("codex", active, { ...settled, title: "Detail title" }).title, "Confirmed title");
+
+  rows = [{ ...preview(settled), title: "Renamed on desktop" }];
+  await cache.load("codex", active, generation);
+  live = cache.peek("codex", active).sessions[0];
+  assert.deepEqual([live.title, live.model, live.realUserCount], ["Renamed on desktop", "logged-model", 3], "a second preview chains the confirmed values and keeps a rename");
+
+  await cache.refine("codex", active, async () => catalog({ ...settled, title: "Renamed on desktop", realUserCount: 0, assistantTextCount: 0 }));
+  live = cache.peek("codex", active).sessions[0];
+  assert.deepEqual([live.realUserCount, live.statsPending, live.statsRetained], [0, undefined, undefined], "accurate zero replaces the retained count");
+
+  rows = [];
+  await cache.load("codex", active, generation);
+  assert.equal(cache.peek("codex", active).sessions.length, 0, "a deleted session disappears without waiting for statistics");
+  rows = [preview(settled)];
+  await cache.load("claude", active, generation);
+  assert.equal(cache.peek("claude", active).sessions[0].statsRetained, true);
+  await cache.load("codex", active, generation);
+  assert.equal(cache.peek("codex", active).sessions[0].statsRetained, undefined, "another Agent's cached row is never reused");
+});
+
 test("cached metadata never clears a body read failure; only a successful body retry does", async () => {
   const row = {...meta("same", "mode-id"), realUserCount:1};
   const refresh = deferred(); let pending = false;

@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight, Search, X } from "lucide-react";
 import UiIcon from "./UiIcon";
@@ -90,8 +90,29 @@ export default function SessionList({
   const scroll = useRef<HTMLDivElement>(null);
   const getItemKey = useCallback((index: number) => `${agent?.id}:${sessionKey(sessions[index])}`, [agent?.id, sessions]);
   const list = useVirtualizer({ count: sessions.length, getScrollElement: () => scroll.current,
-    getItemKey, estimateSize: () => 76, gap: 6, paddingStart: 8, paddingEnd: 8, overscan: 5 });
+    getItemKey, estimateSize: () => 76, gap: 6, paddingStart: 8, paddingEnd: 8, overscan: 5,
+    useAnimationFrameWithResizeObserver: true });
   useLayoutEffect(() => { scroll.current?.scrollTo(0, 0); }, [scopeKey, search]);
+  // 目录刷新可能在视口上方插入或重排卡片。已向下浏览时，让原来位于视口顶部的会话留在原处；
+  // 位于顶部时不锚定，仍直接显示最新排序。只在列表数据变化时查找锚点，平时只记录可见行。
+  const layout = useRef<{ scope: string; sessions: SessionMeta[]; items: Pick<VirtualItem, "key" | "start" | "end">[] } | null>(null);
+  const layoutScope = `${scopeKey}\n${search}`;
+  useLayoutEffect(() => {
+    const previous = layout.current;
+    const element = scroll.current;
+    const top = element?.scrollTop ?? 0;
+    if (previous && previous.scope === layoutScope && previous.sessions !== sessions && top > 0) {
+      for (const item of previous.items) {
+        if (item.end <= top) continue;
+        const index = sessions.findIndex((_, i) => getItemKey(i) === item.key);
+        if (index < 0) continue;
+        const start = list.measurementsCache[index]?.start;
+        if (start !== undefined && start !== item.start) list.scrollBy(start - item.start);
+        break;
+      }
+    }
+    layout.current = { scope: layoutScope, sessions, items: list.getVirtualItems().map(({ key, start, end }) => ({ key, start, end })) };
+  });
   const emptyHint = loading ? "正在读取会话…"
     : loadError || warnings.length > 0 ? "会话列表读取不完整。请重试。"
     : "没有匹配的会话";
@@ -171,7 +192,7 @@ export default function SessionList({
         <div className="session-card-list" style={{ height: sessions.length ? list.getTotalSize() : undefined }}>
           {list.getVirtualItems().map(item => {
             const s = sessions[item.index];
-            const statsKnown = !s.statsPending;
+            const statsKnown = !s.statsPending || s.statsRetained;
             const isEmpty = statsKnown && s.realUserCount === 0;
             const key = sessionKey(s);
             const hit = searchHits.get(key);

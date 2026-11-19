@@ -25,6 +25,14 @@ export function fullTime(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("zh-CN");
 }
 
+export function absoluteTime(timestamp: string): string | undefined {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const year = String(date.getFullYear()).padStart(4, "0");
+  return `${year}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
