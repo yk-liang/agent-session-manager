@@ -1,4 +1,3 @@
-// A neutral installer canvas; the two draggable icons and their names are drawn by Finder.
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -30,8 +29,8 @@ canvas.strokePath()
 let url = URL(fileURLWithPath: CommandLine.arguments[1])
 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
-// 144 DPI gives Finder a 600 × 300 point background with a sharp Retina arrow.
+// Finder uses the DPI to size the 2× image in points.
 CGImageDestinationAddImage(destination, canvas.makeImage()!, [kCGImagePropertyDPIWidth: 144,
     kCGImagePropertyDPIHeight: 144] as CFDictionary)
-guard CGImageDestinationFinalize(destination) else { fatalError("Failed to write DMG artwork") }
+guard CGImageDestinationFinalize(destination) else { fatalError("Could not write the DMG background") }
 print("Generated Retina DMG background: \(url.path)")

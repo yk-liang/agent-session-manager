@@ -1,4 +1,3 @@
-// Repackage an already verified app; do not rebuild or re-sign its contents.
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -10,14 +9,14 @@ const [appArgument, outputArgument] = process.argv.slice(2);
 if (!appArgument || !outputArgument || process.argv.length !== 4) {
   throw new Error('Usage: npm run package:dmg -- <verified.app> <new-output.dmg>');
 }
-if (process.platform !== 'darwin') throw new Error('DMG packaging requires macOS and a logged-in Finder session');
+if (process.platform !== 'darwin') throw new Error('DMG packaging requires an active macOS desktop session');
 const app = path.resolve(appArgument), output = path.resolve(outputArgument);
-if (!app.endsWith('.app') || !existsSync(app)) throw new Error('Input must be an existing .app bundle');
-if (!output.endsWith('.dmg') || existsSync(output)) throw new Error('Choose a new .dmg path');
+if (!app.endsWith('.app') || !existsSync(app)) throw new Error('Provide the path to an existing .app bundle');
+if (!output.endsWith('.dmg') || existsSync(output)) throw new Error('Choose an unused output path ending in .dmg');
 const config = JSON.parse(readFileSync(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
 const dmg = config.bundle.macOS.dmg;
 const builder = path.join(root, 'src-tauri/target/universal-apple-darwin/release/bundle/dmg/bundle_dmg.sh');
-if (!existsSync(builder)) throw new Error('Build a universal Tauri DMG to install the create-dmg script');
+if (!existsSync(builder)) throw new Error('Run the universal Tauri build with DMG bundling to generate the packaging script');
 const run = (command, args) => execFileSync(command, args, { cwd: root, stdio: 'inherit' });
 const plist = path.join(app, 'Contents/Info.plist');
 const version = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', plist], { encoding: 'utf8' }).trim();
@@ -29,8 +28,7 @@ const staging = mkdtempSync(path.join(tmpdir(), 'asm-dmg-'));
 try {
   const appName = path.basename(app);
   run('ditto', [app, path.join(staging, appName)]);
-  // Deliberately omit --skip-jenkins: Finder writes the layout into the image.
-  // Use the upstream off-canvas positions; Finder normalizes negative positions on remount.
+  // Finder saves the layout during packaging and repositions icons with negative coordinates on remount.
   run('bash', [builder, '--volname', config.productName,
     '--volicon', path.join(root, 'src-tauri/icons/icon.icns'), '--background', background,
     '--window-pos', '200', '160', '--window-size', String(dmg.windowSize.width), String(dmg.windowSize.height),
