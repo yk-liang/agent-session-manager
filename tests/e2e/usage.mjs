@@ -67,7 +67,7 @@ try {
  assert.equal(await page.locator('.usage-details,.usage-agent-tabs').count(), 0);
  const modelCells = selector => page.locator(selector).locator('td').allTextContents();
  const modelRow = name => `.usage-models tbody tr:has(.model-label:text-is("${name}"))`;
- assert.deepEqual(await page.locator('.usage-models thead th').allTextContents(), ['模型','请求','输入','输出','缓存读','缓存率','成本 (USD)']);
+ assert.deepEqual(await page.locator('.usage-models thead th').allTextContents(), ['模型','请求','输入','输出','缓存读取','缓存率','成本 (USD)']);
  assert.deepEqual(await modelCells(modelRow('gpt-fixture')), ['2','700','70','450','64.29%','—']);
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['4','1K','100','450','45.00%','—']);
  assert.equal(await page.getByRole('combobox', { name: '请求 Agent', exact: true }).count(), 0);
@@ -99,9 +99,9 @@ try {
  await page.waitForFunction(() => document.querySelectorAll('.request-table tbody tr').length === 3);
  await selectAgent('Claude Code'); await waitTotal('330');
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['2','300','30','0','0.00%','—']);
- await chooseOption(page, '统计模型', 'claude-fixture'); await waitTotal('330');
+ await chooseOption(page, '模型', 'claude-fixture'); await waitTotal('330');
  await selectAgent('Claude Code');
- assert.equal(await page.getByLabel('统计模型').getAttribute('value'), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
+ assert.equal(await page.getByLabel('模型').getAttribute('value'), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
  await selectAgent('全部 Agent');
  for (const [label, count] of [['近 7 天', 7], ['近 30 天', 30]]) {
@@ -141,11 +141,11 @@ try {
  console.log(`PASS: source/query errors preserve saved results; retry recovers; late queries cannot replace the selected range (${engine})`);
 
  await page.getByRole('button', { name: '开启后台采集', exact: true }).click();
- await page.getByText('后台保留已开启', { exact: true }).waitFor();
+ await page.getByText('后台采集已开启', { exact: true }).waitFor();
  await page.getByRole('button', { name: '暂停后台采集', exact: true }).click();
  await page.getByText('按需同步', { exact: true }).waitFor();
- await page.getByRole('button', { name: '同步与保留说明', exact: true }).click();
- assert.ok((await page.getByRole('tooltip').textContent()).includes('开启后台保留后，退出应用也会继续记录'));
+ await page.getByRole('button', { name: '用量同步说明', exact: true }).click();
+ assert.ok((await page.getByRole('tooltip').textContent()).includes('开启后台采集后，退出应用仍会记录用量'));
  await page.keyboard.press('Escape');
  await page.getByRole('button', { name: '今日', exact: true }).click(); await waitTotal('660');
  let labelSizes;
@@ -208,7 +208,7 @@ try {
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models-large.png') });
- await chooseOption(page, '统计模型', 'provider/model-1-with-a-long-name-for-layout-check');
+ await chooseOption(page, '模型', 'provider/model-1-with-a-long-name-for-layout-check');
  await waitTotal('100010000');
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['100','100M','10K','90M','90.00%','$0.000001']);
  await page.getByRole('button', { name: '会话', exact: true }).click();

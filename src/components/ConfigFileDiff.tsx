@@ -46,10 +46,10 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
         <span className="diff-path">{file.path}</span>
       </summary>
       {file.action === "remove" && (
-        <p className="diff-removal">此文件将移入回收站。</p>
+        <p className="diff-removal">此文件将移入废纸篓。</p>
       )}
       {file.action === "unchanged" ? (
-        <p className="hint diff-empty">文件内容与目标一致。</p>
+        <p className="hint diff-empty">内容一致。</p>
       ) : (
         <>
           <div
@@ -86,7 +86,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
             ))}
             {visible.length > 0 &&
               visible[visible.length - 1].index < rows.length - 1 && (
-                <div className="diff-gap">… 其余内容未变化</div>
+                <div className="diff-gap">… 其余内容未改动</div>
               )}
           </div>
           {rows.length >= 24 && (
@@ -94,7 +94,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
               className="text-button diff-expand"
               onClick={() => setShowAll(!showAll)}
             >
-              {showAll ? "仅看变更附近" : "展开完整差异"}
+              {showAll ? "收起未改动的行" : "展开完整差异"}
             </button>
           )}
         </>

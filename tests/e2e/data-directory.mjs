@@ -41,7 +41,7 @@ try {
   assert.equal(await page.locator('.toast.error').count(), 0);
   await page.evaluate(() => { window.__DIRECTORY__.failure = '数据目录不存在：/Volumes/Workspace/Claude 数据'; });
   await page.getByRole('button', { name: '打开数据目录', exact: true }).click();
-  await page.getByText('打开数据目录失败: 数据目录不存在：/Volumes/Workspace/Claude 数据', { exact: true }).waitFor();
+  await page.getByText('无法打开数据目录：数据目录不存在：/Volumes/Workspace/Claude 数据', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   console.log(`PASS: all Agent directory buttons route by identity, accept hidden/custom display paths, and report failures (${engine})`);
 } finally { await browser.close(); }

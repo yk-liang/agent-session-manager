@@ -42,7 +42,7 @@ export default function ConfigPanel({
   const [fileSaveCount, setFileSaveCount] = useState(0);
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
   const [editorEpoch, setEditorEpoch] = useState(0);
-  const [name, setName] = useState("");
+  const [profileName, setProfileName] = useState("");
   const [saveOpen, setSaveOpen] = useState(false);
   const [allBackups, setAllBackups] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -53,9 +53,9 @@ export default function ConfigPanel({
     text: string;
     error?: boolean;
   } | null>(null);
-  const reloadGen = useRef(0);
+  const workspaceRequestGeneration = useRef(0);
   const working = busy || loading || fileSaveCount > 0;
-  // 读取可以取消或切页；仅写入事务和正在确认的操作需要阻止离开。
+  // 读取可以取消或切页；写入期间需要阻止离开。
   const navigationBusy = busy || fileSaveCount > 0;
   const dirty = dirtyKeys.size > 0;
   const disabled = working || loadFailed;
@@ -85,11 +85,11 @@ export default function ConfigPanel({
 
   const reload = useCallback(
     async (resetEditors = false) => {
-      const gen = ++reloadGen.current;
+      const gen = ++workspaceRequestGeneration.current;
       setLoading(true);
       try {
         const result = await api.getConfigWorkspace(agent);
-        if (gen !== reloadGen.current) return false;
+        if (gen !== workspaceRequestGeneration.current) return false;
         setWorkspace(result);
         setLoadFailed(false);
         if (resetEditors) {
@@ -98,13 +98,13 @@ export default function ConfigPanel({
         }
         return true;
       } catch (e) {
-        if (gen === reloadGen.current) {
+        if (gen === workspaceRequestGeneration.current) {
           setLoadFailed(true);
           setNotice({ text: `无法读取配置：${String(e)}`, error: true });
         }
         return false;
       } finally {
-        if (gen === reloadGen.current) setLoading(false);
+        if (gen === workspaceRequestGeneration.current) setLoading(false);
       }
     },
     [agent],
@@ -113,13 +113,13 @@ export default function ConfigPanel({
   useEffect(() => {
     void reload(true).then(loaded => { if (loaded) setNotice(null); });
     return () => {
-      reloadGen.current++;
+      workspaceRequestGeneration.current++;
     };
   }, [reload, refreshKey]);
 
   const onFileSaved = useCallback(
     async (key: string, content: string) => {
-      // 写入已确认，刷新失败也展示已保存内容；进一步修改需先成功重新读取版本。
+      // 写入成功后先显示已保存内容，以便在重新读取失败时仍可查看。
       setWorkspace(
         (current) =>
           current && {
@@ -150,14 +150,14 @@ export default function ConfigPanel({
     [reload, toast],
   );
 
-  const save = async () => {
-    if (!workspace || !name.trim() || disabled || dirty) return;
+  const saveProfile = async () => {
+    if (!workspace || !profileName.trim() || disabled || dirty) return;
     setBusy(true);
     try {
-      await api.saveProfile(agent, name.trim(), workspace.revision);
+      await api.saveProfile(agent, profileName.trim(), workspace.revision);
       setNotice(null);
-      toast(`方案「${name.trim()}」已保存`);
-      setName("");
+      toast(`方案「${profileName.trim()}」已保存`);
+      setProfileName("");
       setSaveOpen(false);
       await reload();
     } catch (e) {
@@ -181,7 +181,7 @@ export default function ConfigPanel({
     }
   };
 
-  const apply = async () => {
+  const applyPreview = async () => {
     if (!preview || working || dirty || previewError) return;
     setBusy(true);
     try {
@@ -241,7 +241,7 @@ export default function ConfigPanel({
           </div>
         )}
         <p className="hint">
-          {loading ? "加载中…" : <button onClick={onRetry}>重试读取</button>}
+          {loading ? "正在读取配置…" : <button onClick={onRetry}>重试</button>}
         </p>
       </div>
     );
@@ -272,7 +272,7 @@ export default function ConfigPanel({
                 title={
                   matching.length
                     ? "当前文件与这些方案一致"
-                    : "当前文件未匹配已保存的方案"
+                    : "当前文件与已保存的方案均不同"
                 }
               >
                 {matching.length ? matching.join("、") : "自定义"}
@@ -343,7 +343,7 @@ export default function ConfigPanel({
           role={notice.error ? "alert" : "status"}
         >
           {notice.text}
-          {loadFailed && <button onClick={onRetry} disabled={working}>重试读取</button>}
+          {loadFailed && <button onClick={onRetry} disabled={working}>重试</button>}
           {!loadFailed && <button
             className="notice-dismiss"
             aria-label="关闭提示"
@@ -367,7 +367,7 @@ export default function ConfigPanel({
           <div className="config-heading-label">
             <h2 id="profiles-title">配置方案</h2>
             <HelpTip label="配置方案">
-              保存和切换用户配置。项目设置或启动参数可能覆盖它；切换后可能需重启 Agent。
+              项目设置或启动参数可能覆盖用户配置。应用方案后，可能需要重启 Agent。
             </HelpTip>
           </div>
           {workspace.profiles.length === 0 && !saveOpen && (
@@ -379,21 +379,21 @@ export default function ConfigPanel({
             className="config-save-form"
             onSubmit={(e) => {
               e.preventDefault();
-              void save();
+              void saveProfile();
             }}
           >
             <input
               autoFocus
-              placeholder="方案名称，如：工作 / 个人 / 测试供应商"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              placeholder="例如：工作"
+              value={profileName}
+              onChange={(e) => setProfileName(e.target.value)}
               disabled={disabled}
               aria-label="方案名称"
             />
             <button
               className="primary"
               type="submit"
-              disabled={disabled || dirty || !validFiles || !name.trim()}
+              disabled={disabled || dirty || !validFiles || !profileName.trim()}
             >
               保存方案
             </button>
@@ -499,7 +499,7 @@ export default function ConfigPanel({
               </button>
             </h2>
             <HelpTip label="备份" above>
-              修改前自动备份，可恢复单个文件或整次操作。
+              保存文件或应用方案前会自动备份。可恢复单个文件或整份备份。
             </HelpTip>
           </div>
           {workspace.backups.length === 0 && (
@@ -534,8 +534,8 @@ export default function ConfigPanel({
             onClick={() => setAllBackups(!allBackups)}
           >
             {allBackups
-              ? "收起历史记录"
-              : `查看其余 ${workspace.backups.length - 5} 条记录`}
+              ? "收起备份"
+              : `查看其余 ${workspace.backups.length - 5} 份备份`}
           </button>
         )}
       </section>
@@ -545,8 +545,7 @@ export default function ConfigPanel({
           title="删除配置方案"
           message={
             <>
-              删除方案「{deleteTarget.name}
-              」？已写入磁盘的文件和备份会保留，方案记录删除后不可恢复。
+              「{deleteTarget.name}」删除后无法恢复。当前配置文件和备份会保留。
             </>
           }
           confirmLabel="删除方案"
@@ -597,7 +596,7 @@ export default function ConfigPanel({
                     void startPreview(preview.kind, preview.target)
                   }
                 >
-                  重新读取差异
+                  重新预览
                 </button>
               </div>
             )}
@@ -615,13 +614,13 @@ export default function ConfigPanel({
                 disabled={
                   working || !!previewError || changedFiles.length === 0
                 }
-                onClick={() => void apply()}
+                onClick={() => void applyPreview()}
               >
                 {busy
                   ? "处理中…"
                   : preview.kind === "profile"
-                    ? "确认应用"
-                    : "确认恢复"}
+                    ? "应用方案"
+                    : "恢复备份"}
               </button>
             </div>
           </div>

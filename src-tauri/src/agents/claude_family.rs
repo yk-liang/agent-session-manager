@@ -96,7 +96,7 @@ fn parse_meta_with(
         )),
     };
     let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
-        return super::ParseOutcome::Failed(format!("会话文件名非法: {:?}", path));
+        return super::ParseOutcome::Failed(format!("会话文件名非法：{:?}", path));
     };
 
     let mut meta = SessionMeta {
@@ -485,10 +485,10 @@ pub fn read_session(
     })
 }
 
-/// 删除会话：jsonl 与同名状态目录一起移入回收站
+/// 删除会话：jsonl 与同名状态目录一起移入废纸篓
 pub fn delete_session(base: &Path, project_dir: &str, session_id: &str) -> Result<(), String> {
     delete_session_with(base, project_dir, session_id, |targets| {
-        trash::delete_all(targets).map_err(|e| format!("移入回收站失败: {e}"))
+        trash::delete_all(targets).map_err(|e| format!("移入废纸篓失败：{e}"))
     })
 }
 
@@ -559,7 +559,7 @@ fn verify_jsonl_session_id(path: &Path, session_id: &str) -> Result<(), String> 
     let mut found = false;
     let mut has_message = false;
     for line in BufReader::new(file).lines() {
-        let line = line.map_err(|e| format!("读取 {:?} 失败: {e}", path))?;
+        let line = line.map_err(|e| format!("读取 {:?} 失败：{e}", path))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -876,7 +876,7 @@ mod tests {
         assert_eq!(meta.real_user_count, 1, "斜杠命令消息应计为真实用户输入");
         assert!(
             meta.title.as_deref().unwrap().contains("调研"),
-            "标题应提取 command-args 内的用户文本: {:?}",
+            "标题应提取 command-args 内的用户文本：{:?}",
             meta.title
         );
     }
@@ -886,9 +886,9 @@ mod tests {
         let input = "<command-message>kit</command-message><command-name>/kit</command-name><command-args>用户问题</command-args>";
         let cleaned = strip_noise_tags(input);
         // command-name 和 command-args 内文保留，command-message 删除
-        assert!(cleaned.contains("/kit"), "斜杠命令名应保留: {cleaned}");
-        assert!(cleaned.contains("用户问题"), "用户输入应保留: {cleaned}");
-        assert!(!cleaned.contains("command-"), "标签本身应被剥离: {cleaned}");
+        assert!(cleaned.contains("/kit"), "斜杠命令名应保留：{cleaned}");
+        assert!(cleaned.contains("用户问题"), "用户输入应保留：{cleaned}");
+        assert!(!cleaned.contains("command-"), "标签本身应被剥离：{cleaned}");
     }
 
     #[test]

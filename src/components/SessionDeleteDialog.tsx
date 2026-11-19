@@ -18,7 +18,7 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
   const { agent, sessions } = deletion;
   const batch = deletion.mode === "batch";
   const toTrash = agent.deletePolicy === "trash";
-  const confirmLabel = toTrash ? "移入回收站" : "永久删除";
+  const confirmLabel = toTrash ? "移入废纸篓" : "永久删除";
   const session = sessions[0];
 
   return (
@@ -27,10 +27,10 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
       message={
         <>
           <p>{batch
-            ? `确定删除 ${agent.displayName} 的 ${sessions.length} 个会话吗？`
-            : `确定删除会话「${session.title || session.sessionId.slice(0, 8) + "…"}」吗？`}</p>
-          <p>{toTrash ? "会话文件将移入系统回收站，可以手动还原。" : "会话将永久删除，无法恢复。"}</p>
-          {agent.id === "opencode" && <p>OpenCode CLI 也会删除关联的子会话。</p>}
+            ? `${agent.displayName} · ${sessions.length} 个会话`
+            : `「${session.title || session.sessionId.slice(0, 8) + "…"}」`}</p>
+          <p>{toTrash ? "会话文件将移入废纸篓，可在访达中还原。" : "会话将永久删除，无法恢复。"}</p>
+          {agent.id === "opencode" && <p>关联的 OpenCode 子会话也会被删除。</p>}
           {batch && (
             <>
               <ul className="batch-targets">
@@ -41,7 +41,7 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
                   </li>
                 ))}
               </ul>
-              <p>逐条执行。失败项会列出，已完成的删除不会自动回滚。</p>
+              <p>应用会列出删除失败的会话，供你重试。</p>
             </>
           )}
         </>

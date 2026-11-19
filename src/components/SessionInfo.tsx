@@ -66,7 +66,7 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
             </div>}
             {meta.cwd && (
               <div>
-                <dt>路径</dt>
+                <dt>工作目录</dt>
                 <dd>{meta.cwd}</dd>
               </div>
             )}
@@ -78,7 +78,7 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
             )}
             {meta.gitBranch && (
               <div>
-                <dt>分支</dt>
+                <dt>Git 分支</dt>
                 <dd>{meta.gitBranch}</dd>
               </div>
             )}

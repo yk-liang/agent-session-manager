@@ -70,10 +70,10 @@ fn open_db_scoped(path: &Path, session: Option<&str>) -> Result<Connection, Stri
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| format!("打开 OpenCode 会话库失败: {e}"))?;
+    .map_err(|e| format!("打开 OpenCode 会话库失败：{e}"))?;
     conn.busy_timeout(std::time::Duration::from_millis(300))
         .map_err(|e| e.to_string())?;
-    storage::prepare(&conn, session).map_err(|e| format!("读取 OpenCode 数据结构失败: {e}"))?;
+    storage::prepare(&conn, session).map_err(|e| format!("读取 OpenCode 数据结构失败：{e}"))?;
     Ok(conn)
 }
 
@@ -152,7 +152,7 @@ fn batch_message_counts(
     );
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
-        Err(e) => return super::ParseOutcome::Failed(format!("消息计数查询准备失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法准备消息计数查询：{e}")),
     };
     let rows = match stmt.query_map([], |r| {
         Ok((
@@ -162,7 +162,7 @@ fn batch_message_counts(
         ))
     }) {
         Ok(r) => r,
-        Err(e) => return super::ParseOutcome::Failed(format!("消息计数查询失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法查询消息数：{e}")),
     };
     let mut bad_rows = 0u32;
     for row in rows {
@@ -265,7 +265,7 @@ fn first_user_text(
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(e) => {
-            warnings.push(format!("查询会话 {session_id} 标题失败: {e}"));
+            warnings.push(format!("查询会话 {session_id} 标题失败：{e}"));
             return None;
         }
     };
@@ -274,7 +274,7 @@ fn first_user_text(
     }) {
         Ok(r) => r,
         Err(e) => {
-            warnings.push(format!("查询会话 {session_id} 标题失败: {e}"));
+            warnings.push(format!("查询会话 {session_id} 标题失败：{e}"));
             return None;
         }
     };
@@ -356,7 +356,7 @@ fn query_session_rows(
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
-            return super::ParseOutcome::Failed(format!("OpenCode session 表查询准备失败: {e}"))
+            return super::ParseOutcome::Failed(format!("无法准备 OpenCode 会话查询：{e}"))
         }
     };
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -420,7 +420,7 @@ fn query_session_rows(
         })
     }) {
         Ok(r) => r,
-        Err(e) => return super::ParseOutcome::Failed(format!("OpenCode session 表查询失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法查询 OpenCode 会话：{e}")),
     };
     let mut out = Vec::new();
     let mut bad_rows = 0u32;
@@ -442,7 +442,6 @@ fn query_session_rows(
     super::ParseOutcome::Ok(out)
 }
 
-/// catalog 实现，数据库路径可注入（测试用 fixture 库）。
 /// 批量计数/会话表读取均三态化：部分失败降级为告警 + 已有数据，
 /// 不再让整个 catalog 因局部问题直接失败。
 fn catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
@@ -532,7 +531,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
                     // 绝不能把未知当空会话过滤（未知 ≠ 空）
                     let reason = match corrupt.as_ref().and_then(|c| c.get(&row.id)) {
                         Some(n) => format!("有 {n} 条消息记录不是合法 JSON"),
-                        None => "消息计数查询失败或字段类型异常".to_string(),
+                        None => "无法查询消息数或字段类型异常".to_string(),
                     };
                     warnings.push(format!(
                         "会话 {} {reason}，已按可见处理，计数可能不准",
@@ -681,7 +680,7 @@ impl AgentSource for OpenCodeSource {
         true
     }
     fn delete_policy(&self) -> super::DeletePolicy {
-        // 委托官方 CLI 删除，直接改库，无法进回收站
+        // 委托官方 CLI 删除，直接改库，无法进废纸篓
         super::DeletePolicy::Permanent
     }
     fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
@@ -738,7 +737,7 @@ impl AgentSource for OpenCodeSource {
             .map_err(|e| format!("调用 opencode 失败（{}）: {e}", bin.display()))?;
         if !output.status.success() {
             return Err(format!(
-                "opencode session delete 失败: {}",
+                "opencode session delete 失败：{}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
@@ -942,7 +941,7 @@ mod tests {
         assert_eq!(
             warnings.len(),
             1,
-            "标题命中后的坏行告警不得丢失: {warnings:?}"
+            "标题命中后的坏行告警不得丢失：{warnings:?}"
         );
         assert!(warnings[0].contains("1 条"), "{}", warnings[0]);
     }
@@ -1027,7 +1026,7 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_good"),
-            "健康会话不得被损坏会话连坐隐藏: {ids:?}"
+            "健康会话不得被损坏会话连坐隐藏：{ids:?}"
         );
         assert!(
             ids.iter().any(|id| id == "ses_bad"),
@@ -1035,7 +1034,7 @@ mod tests {
         );
         assert!(
             catalog.warnings.iter().any(|w| w.contains("不是合法 JSON")),
-            "损坏记录必须产生告警: {:?}",
+            "损坏记录必须产生告警：{:?}",
             catalog.warnings
         );
     }
@@ -1081,11 +1080,11 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_ws"),
-            "合法 JSON 不得被误删: {ids:?}"
+            "合法 JSON 不得被误删：{ids:?}"
         );
         assert!(
             catalog.warnings.is_empty(),
-            "不得误报损坏: {:?}",
+            "不得误报损坏：{:?}",
             catalog.warnings
         );
         let meta = catalog
@@ -1176,11 +1175,11 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_p"),
-            "部分计数条目不得被当空会话隐藏: {ids:?}"
+            "部分计数条目不得被当空会话隐藏：{ids:?}"
         );
         assert!(
             catalog.warnings.iter().any(|w| w.contains("ses_p")),
-            "计数未知必须告警: {:?}",
+            "计数未知必须告警：{:?}",
             catalog.warnings
         );
     }
@@ -1260,7 +1259,7 @@ mod tests {
 
         let conn = open_db(&path).unwrap();
         let (rows, ws) = load_session_rows(&conn).split();
-        assert!(ws.is_empty(), "正常库不应产生降级告警: {ws:?}");
+        assert!(ws.is_empty(), "正常库不应产生降级告警：{ws:?}");
         let rows = rows.expect("fixture 库应可读");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];

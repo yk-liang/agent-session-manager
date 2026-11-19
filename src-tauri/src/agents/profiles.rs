@@ -195,7 +195,7 @@ fn store_dir() -> Result<PathBuf, String> {
     if !super::present(&new_dir)? && super::present(&old_dir)? {
         fs::rename(&old_dir, &new_dir).map_err(|e| {
             format!(
-                "迁移配置目录 {:?} → {:?} 失败: {e}；请人工处理，历史配置仍在旧目录中",
+                "迁移配置目录 {:?} → {:?} 失败：{e}；请人工处理，历史配置仍在旧目录中",
                 old_dir, new_dir
             )
         })?;
@@ -214,7 +214,7 @@ fn ensure_store_dir() -> Result<PathBuf, String> {
     builder.recursive(true).mode(0o700);
     builder
         .create(&dir)
-        .map_err(|e| format!("创建配置目录 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("创建配置目录 {:?} 失败：{e}", dir))?;
     let meta = dir
         .symlink_metadata()
         .map_err(|e| format!("无法读取配置目录 {:?}: {e}", dir))?;
@@ -225,14 +225,14 @@ fn ensure_store_dir() -> Result<PathBuf, String> {
         ));
     }
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("设置配置目录权限 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("设置配置目录权限 {:?} 失败：{e}", dir))?;
     fs::File::open(&dir)
         .and_then(|f| f.sync_all())
-        .map_err(|e| format!("持久化配置目录 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("持久化配置目录 {:?} 失败：{e}", dir))?;
     if let Some(parent) = dir.parent() {
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化配置父目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化配置父目录 {:?} 失败：{e}", parent))?;
     }
     Ok(dir)
 }
@@ -247,7 +247,7 @@ struct StoreLockGuard {
     _file: fs::File,
 }
 
-/// 在给定目录上获取配置库事务排他锁（可注入，测试用 tempdir）。
+/// 配置事务共用排他锁，防止多个进程同时写入。
 /// tauri-plugin-single-instance 在 macOS 上先探测 socket 再异步建监听，
 /// 双进程同时启动可能都通过探测（监听建立失败者仅记日志继续启动），
 /// 无法保证互斥；因此这里用 flock 同步阻塞获取排他锁，
@@ -271,13 +271,13 @@ fn lock_store_in(dir: &Path) -> Result<StoreLockGuard, String> {
             opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
             let f = opts
                 .open(&lock_path)
-                .map_err(|e| format!("打开配置库锁文件 {:?} 失败: {e}", lock_path))?;
+                .map_err(|e| format!("打开配置库锁文件 {:?} 失败：{e}", lock_path))?;
             // fd 元数据即实际打开对象的身份：必须是普通文件，
             // FIFO/目录等特殊文件一律拒绝，绝不带着它进入 flock
             //（O_NONBLOCK 不影响后续 flock 的阻塞语义）
             let meta = f
                 .metadata()
-                .map_err(|e| format!("读取配置库锁文件 {:?} 元数据失败: {e}", lock_path))?;
+                .map_err(|e| format!("读取配置库锁文件 {:?} 元数据失败：{e}", lock_path))?;
             if !meta.is_file() {
                 return Err(format!(
                     "配置库锁文件 {:?} 不是普通文件（FIFO/目录等），请先人工处理",
@@ -286,13 +286,12 @@ fn lock_store_in(dir: &Path) -> Result<StoreLockGuard, String> {
             }
             f
         }
-        Err(e) => return Err(format!("创建配置库锁文件 {:?} 失败: {e}", lock_path)),
+        Err(e) => return Err(format!("创建配置库锁文件 {:?} 失败：{e}", lock_path)),
     };
-    // 同步阻塞获取排他锁：覆盖 list/save/delete/apply 整个事务
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
         return Err(format!(
-            "获取配置库排他锁 {:?} 失败: {}",
+            "获取配置库排他锁 {:?} 失败：{}",
             lock_path,
             std::io::Error::last_os_error()
         ));
@@ -340,7 +339,7 @@ fn tighten_store_permissions(path: &Path) -> Result<(), String> {
                     ));
                 }
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                    .map_err(|e| format!("收紧配置目录权限 {:?} 失败: {e}", dir))?;
+                    .map_err(|e| format!("收紧配置目录权限 {:?} 失败：{e}", dir))?;
             }
         }
     }
@@ -361,7 +360,7 @@ fn tighten_store_permissions(path: &Path) -> Result<(), String> {
                 ));
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("收紧配置库权限 {:?} 失败: {e}", path))?;
+                .map_err(|e| format!("收紧配置库权限 {:?} 失败：{e}", path))?;
         }
     }
     Ok(())
@@ -389,7 +388,7 @@ fn read_store_file(path: &Path) -> Result<Option<String>, String> {
     }
     let mut raw = String::new();
     file.read_to_string(&mut raw)
-        .map_err(|e| format!("读取配置库 {:?} 失败: {e}", path))?;
+        .map_err(|e| format!("读取配置库 {:?} 失败：{e}", path))?;
     Ok(Some(raw))
 }
 
@@ -440,29 +439,26 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .mode(0o600)
         .open(&tmp)
-        .map_err(|e| format!("写入临时文件 {:?} 失败: {e}", tmp))?;
+        .map_err(|e| format!("写入临时文件 {:?} 失败：{e}", tmp))?;
     if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
         let _ = fs::remove_file(&tmp);
-        return Err(format!("写入临时文件 {:?} 失败: {e}", tmp));
+        return Err(format!("写入临时文件 {:?} 失败：{e}", tmp));
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("替换 {:?} 失败: {e}", path)
+        format!("替换 {:?} 失败：{e}", path)
     })?;
     if let Some(parent) = path.parent() {
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化目录 {:?} 失败：{e}", parent))?;
     }
     Ok(())
 }
 
-/// 读取配置文件原始字节：不存在 = Ok(None)；读取失败 = Err。
-/// 不做格式解析（TOML/JSONC/JSON 通吃）；O_NONBLOCK + fd 普通文件复核
-/// 挡住 FIFO/目录等特殊文件（FIFO 会永久阻塞）。这里不加 O_NOFOLLOW：
-/// agent 自己的配置可能是 dotfiles 管理的符号链接，跟随到普通文件读取是正常预期
-///（写入事务仍会显式拒绝符号链接，避免悄悄替换）。
-/// 有字节即 present、忠实快照：旧“损坏 JSON 不得当不存在”的隐患自然消解。
+/// 按字节读取配置。只有文件不存在时返回 `None`。
+/// 非阻塞打开后检查文件类型，避免读取 FIFO 时卡住。
+/// 读取允许指向普通文件的符号链接，写入事务会拒绝链接。
 fn read_config_raw(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let mut opts = fs::OpenOptions::new();
     opts.read(true);
@@ -480,7 +476,7 @@ fn read_config_raw(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
-        .map_err(|e| format!("读取配置文件 {:?} 失败: {e}", path))?;
+        .map_err(|e| format!("读取配置文件 {:?} 失败：{e}", path))?;
     Ok(Some(buf))
 }
 
@@ -646,7 +642,7 @@ fn backup_from_staged(staged: &Path, path: &Path) -> Result<PathBuf, String> {
     loop {
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let backup = parent.join(format!("{file_name}.bak-{}-{seq}", now_millis()));
-        let mut src = fs::File::open(staged).map_err(|e| format!("备份 {:?} 失败: {e}", path))?;
+        let mut src = fs::File::open(staged).map_err(|e| format!("备份 {:?} 失败：{e}", path))?;
         let mut dst = match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -656,27 +652,27 @@ fn backup_from_staged(staged: &Path, path: &Path) -> Result<PathBuf, String> {
             Ok(f) => f,
             // 极端碰撞：换个名字再来
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("备份 {:?} 失败: {e}", path)),
+            Err(e) => return Err(format!("备份 {:?} 失败：{e}", path)),
         };
         std::io::copy(&mut src, &mut dst).map_err(|e| {
             let _ = fs::remove_file(&backup);
-            format!("备份 {:?} 失败: {e}", path)
+            format!("备份 {:?} 失败：{e}", path)
         })?;
         dst.sync_all()
-            .map_err(|e| format!("持久化备份 {:?} 失败: {e}", backup))?;
+            .map_err(|e| format!("持久化备份 {:?} 失败：{e}", backup))?;
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化备份目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化备份目录 {:?} 失败：{e}", parent))?;
         return Ok(backup);
     }
 }
 
 /// 写入新配置文件：先在同目录写满并 fsync 临时文件，再原子 rename 到目标。
 /// 写入原始字节：TOML/JSONC/JSON 逐字节还原，保留注释与手写格式，
-/// 不做解析/美化（旧版“重新美化输出”行为已弃用）。
+/// 按原始字节写入，保留格式及注释。
 fn write_config_file(path: &Path, content: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建目录 {:?} 失败: {e}", parent))?;
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录 {:?} 失败：{e}", parent))?;
     }
     atomic_write(path, content)
 }
@@ -692,9 +688,9 @@ fn apply_snapshot_in(
         #[cfg(not(test))]
         {
             trash::delete_all([path.to_path_buf()])
-                .map_err(|e| format!("移入回收站 {:?} 失败: {e}", path))
+                .map_err(|e| format!("移入废纸篓 {:?} 失败：{e}", path))
         }
-        // 测试二进制中的配置事务永远不用系统回收站。
+        // 测试二进制中的配置事务永远不用系统废纸篓。
         #[cfg(test)]
         {
             fs::remove_file(path).map_err(|e| e.to_string())
@@ -964,7 +960,7 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap_err();
-        assert!(err.contains("回滚"), "错误信息应说明已回滚: {err}");
+        assert!(err.contains("回滚"), "错误信息应说明已回滚：{err}");
         assert_eq!(
             fs::read_to_string(&a).unwrap(),
             r#"{"keep":"me"}"#,
@@ -1026,7 +1022,7 @@ mod tests {
             (bad, Some(br#"{}"#.to_vec())),
         ])
         .unwrap_err();
-        assert!(err.contains("无法读取"), "捕获失败必须显性化: {err}");
+        assert!(err.contains("无法读取"), "捕获失败必须显性化：{err}");
         assert_eq!(
             fs::read_to_string(&a).unwrap(),
             r#"{"keep":"me"}"#,
@@ -1097,7 +1093,6 @@ mod tests {
     #[test]
     fn read_store_file_no_follow_and_type_check() {
         let dir = tempfile::tempdir().unwrap();
-        // 普通文件正常读取
         let ok = dir.path().join("ok.json");
         fs::write(&ok, r#"{"a":1}"#).unwrap();
         assert_eq!(read_store_file(&ok).unwrap().as_deref(), Some(r#"{"a":1}"#));
@@ -1125,7 +1120,7 @@ mod tests {
         let b = dir.path().join("mcp.json");
         fs::write(&a, r#"{"orig":"a"}"#).unwrap();
         fs::write(&b, r#"{"orig":"b"}"#).unwrap();
-        // b 的回收站操作失败时，a 的暂存必须仍完整，不能降级为 .bak 恢复。
+        // b 的废纸篓操作失败时，a 的暂存必须仍完整，不能降级为 .bak 恢复。
         let err = apply_snapshot_with(
             &[
                 (a.clone(), Some(br#"{"new":true}"#.to_vec())),
@@ -1154,7 +1149,7 @@ mod tests {
         fs::write(&path, r#"{"keep":"me"}"#).unwrap();
 
         let err = apply_snapshot_with(&[(path.clone(), None)], write_config_file, |_| {
-            Err("注入的回收站失败".to_string())
+            Err("注入的废纸篓失败".to_string())
         })
         .unwrap_err();
         assert!(err.contains("回滚"), "{err}");
@@ -1168,7 +1163,7 @@ mod tests {
         let b = dir.path().join("mcp.json");
         fs::write(&a, r#"{"orig":"a"}"#).unwrap();
         fs::write(&b, r#"{"orig":"b"}"#).unwrap();
-        // a 用非常规权限 0400：它先发布，随后 b 的回收站操作失败，
+        // a 用非常规权限 0400：它先发布，随后 b 的废纸篓操作失败，
         // a 必须从完整暂存恢复，不能依赖只保字节的 .bak。
         fs::set_permissions(&a, fs::Permissions::from_mode(0o400)).unwrap();
         let err = apply_snapshot_with(
@@ -1312,7 +1307,7 @@ mod tests {
                 .into_profile();
             assert!(
                 profile_slots(&profile, &spec).is_err(),
-                "未采集过 Pi settings 的快照不得获得删除权限: {raw}"
+                "未采集过 Pi settings 的快照不得获得删除权限：{raw}"
             );
         }
     }

@@ -1,6 +1,8 @@
 # 开发与测试
 
-开发需要 Node.js 22+、Rust 和 macOS Command Line Tools。以下命令在仓库根目录执行；首次构建需下载依赖，已缓存依赖后可使用 `--offline`。
+需要 Node.js 22 或更高版本、Rust 和 macOS Command Line Tools。以下命令从仓库根目录运行。下载 Rust 依赖后可使用 `--offline`。
+
+## 构建
 
 ```bash
 npm ci
@@ -8,11 +10,15 @@ npm run tauri dev     # 开发模式
 npm run tauri build   # 打包（产物在 src-tauri/target/release/bundle/）
 ```
 
-应用图标的主源文件是 `src/assets/brand/app-icon.svg`。修改后运行 `npm run icons`，会生成深色 SVG 和 `src-tauri/icons/` 下的桌面图标。深色版只改变底座配色，与默认版共用同一套路径；不要手动修改生成文件。
+### 应用图标
 
-应用目前使用深色界面，浏览器标签图标随系统配色选择。macOS Dock/Finder 使用兼容 macOS 13+ 的默认 `.icns`。系统级 Default/Dark/Mono 图标切换需要单独编译并打包 [Icon Composer](https://developer.apple.com/icon-composer/) 资源，当前未启用；两份 SVG 不会让 `.icns` 自动切换。
+应用图标的源文件为 `src/assets/brand/app-icon.svg`。修改后运行 `npm run icons`，会生成深色 SVG 和 `src-tauri/icons/` 下的桌面图标。
 
-分发给其他 Mac 用户时，构建 macOS 13+ 的通用包（M 系列与 Intel）：
+浏览器标签页按系统配色选择 SVG，macOS 程序坞和访达使用默认 `.icns`。系统级图标切换需要单独编译和打包 [Icon Composer](https://developer.apple.com/icon-composer/) 资源。
+
+## 打包与发布
+
+构建适用于 Apple 芯片和 Intel 芯片的 macOS 13+ 通用包。
 
 ```bash
 CI=true npm run tauri -- build --ci --target universal-apple-darwin --bundles app,dmg -- --offline --locked
@@ -37,7 +43,9 @@ npm run package:dmg -- \
 
 发布前只读挂载成品，确认窗口尺寸、箭头与图标对齐、文件名可读、Applications 指向 `/Applications`，并在当前显示隐藏文件的设置下检查资源不会挤占安装区。背景素材预览不能替代实际 Finder 窗口截图。重新核验 DMG、包内应用签名与文件清单后，更新 DMG 及 `SHA256SUMS.txt`；若应用文件未变化，保留原 ZIP 和发布标签。替换 Release 附件前在 `release/` 中保留旧附件，上传后对比 GitHub 返回的 SHA-256 与本地文件。
 
-测试统一放在 `tests/`：`unit/` 为 Node 单元测试，`e2e/` 为使用模拟 Tauri 接口和合成数据的浏览器回归，`integration/` 为后台进程集成测试，`manual/` 为依赖本机日志或已安装 CLI 的显式检查，`fixtures/` 为共用数据，`helpers/` 为浏览器配置。测试源码提交 Git；截图等产物写入已忽略的 `test-results/<浏览器>/`。
+## 测试
+
+`tests/` 下的 `unit/`、`e2e/`、`integration/` 和 `manual/` 分别存放 Node 单元测试、模拟 Tauri 的浏览器回归、后台采集进程集成测试和依赖本机日志或 CLI 的手动检查。共用数据放在 `fixtures/`，浏览器辅助代码放在 `helpers/`。截图等产物写入已忽略的 `test-results/<浏览器>/`。
 
 ```bash
 npm test                           # 全部前端单元测试，Node 22+
@@ -61,7 +69,7 @@ npm run test:manual -- codex-history    # 本机真实 Codex 分页历史，只�
 
 Qoder/Claude 系 JSONL 读取失败会区分打开、元数据检查、读取、UTF-8 解码与 JSON 解析阶段；用量同步同时保留来源文件、同步锁和账本打开阶段的原始错误。界面的“复制诊断详情”包含 `operation`、`stage`、`error_kind`、`os_code`、`cause`、路径、时间，以及产生错误的进程角色、PID、应用/系统版本、架构、UID/EUID 和文件描述符上限。SQLite 错误另列 `sqlite_code`，不会把 SQLite 扩展码冒充系统 errno。没有系统错误码时记为 `none`，不能据此推断权限正常或异常。诊断不复制原始日志行，但会包含本机路径，外发前按需脱敏。
 
-列表摘要缓存命中只代表文件版本相同，不证明当前 GUI 能打开正文。打开失败的卡片保留“正文读取失败”标记；摘要刷新与模型名称补全不会清除此状态，成功重读同一正文才清除。标记只保留在当前应用进程内。扫描告警条数不代表全部不可读会话；正文失败、扫描告警及用量同步失败都有持续可见的诊断和重试入口。部分 JSON 坏行允许继续显示合法内容，同时保留首条坏行的诊断；系统读取或 UTF-8 解码失败不再伪装成 JSON 坏行。
+列表摘要缓存命中只代表文件版本相同，不证明当前 GUI 能打开正文。会话正文打开失败时，卡片会显示“正文不可读”标记；摘要刷新与模型名称补全不会清除此状态，成功重读同一正文才清除。标记只保留在当前应用进程内。读取提示只统计扫描期间遇到的问题。正文读取、目录扫描和用量同步的失败信息都附有诊断和重试入口。部分 JSON 坏行允许继续显示合法内容，同时保留首条坏行的诊断；系统读取或 UTF-8 解码失败不再伪装成 JSON 坏行。
 
 排查远程反馈时，让用户在**发生故障的 GUI** 中打开原会话或重试用量同步，复制该次诊断。终端读取成功不能替代 GUI 的失败证据；在看到阶段和原始错误前，不推定权限、`O_NONBLOCK` 或文件内容是根因。保留会话、缓存和 FIFO 非阻塞保护。
 
@@ -88,9 +96,9 @@ OpenCode 同时支持 v1 的 `session/message/part` 和 v2 的 `session_v2/sessi
 
 OpenCode 本机只读复测：`cd src-tauri && cargo run --release --offline --locked --example opencode_perf`。
 
-用量本机复测：`cd src-tauri && cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`；输出首次同步、重启后热同步及请求表查询的数字与耗时。加 `--cold` 时要求空目录，不清除既有数据。统计语义与 ccusage 来源见 `src-tauri/src/usage/README.md`。
+### 用量与后台采集
 
-用量复测要求传 `-- --storage <临时目录>`，使用该目录下的 `cache.sqlite3` 和 `ledger.sqlite3` 验证迁移，不修改应用的累计账本。源日志仍只读。
+在 `src-tauri/` 中运行 `cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`，测量首次同步、重启后的增量同步和请求查询。该命令以只读方式访问日志，在指定目录下使用 `cache.sqlite3` 和 `ledger.sqlite3`。加 `--cold` 时需提供空目录。
 
 存储版本对照使用 `scripts/usage-storage-fixture.py` 和显式忽略的 `usage::storage_bench::storage_comparison`。先在仓库根目录生成固定合成日志，再到 `src-tauri/` 编译、运行 release 测试；以下目录必须与实际应用数据隔离：
 
@@ -111,7 +119,9 @@ cargo test --release --offline --locked --lib usage::storage_bench::storage_comp
 
 后台进程验证：先完成 release 构建，再执行 `npm run test:integration -- collector`。它只在自清理的临时目录创建五类 Agent 日志，验证无窗口采集、迟建目录、单实例、重启/删除保留、暂停及真实进程 CPU/内存；不注册机器的登录服务。可用 `ASM_COLLECTOR_BIN` 指定待测可执行文件。
 
-Codex 首屏及长会话复测：`cd src-tauri && cargo run --release --offline --locked --example session_perf`（`-- --quick-only` 可验证重启后摘要命中）。
+### Codex 会话
+
+首屏及长会话复测命令为 `cd src-tauri && cargo run --release --offline --locked --example session_perf`（`-- --quick-only` 可验证重启后摘要命中）。
 
 指定本机某条分页会话做只读完整性检查：在 `src-tauri/` 中运行 `ASM_TEST_CODEX_SESSION='<会话ID>' cargo test --release --offline --locked --lib agents::codex::history_tests::real_paginated_history_is_unique_and_complete_if_present -- --exact --nocapture --test-threads=1`（将占位内容替换为实际 ID）。会话未列出或存在历史告警时测试失败，避免指定目标未命中却被当作验证通过；默认只输出文件数、消息数、事件数和告警数，不导出正文。压缩首段与两段普通续页的独立回归为 `compressed_first_page_is_restored_before_two_plain_continuations`。
 
@@ -120,26 +130,32 @@ Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib 
 本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
 输出各 Agent 三轮目录耗时与 Qoder 后台名称补全耗时，不输出会话正文。
 
-Qoder 展示元数据：只读 `com.qoder.app.stable/main.sqlite` 的 `chat_sessions`，按精确会话 ID 补充标题，跳过已删除与空标题记录，不替换日志定位键或正文。每次会话刷新均读取最新 WAL，沿用切回窗口时的刷新机制获取桌面改名，不新增后台轮询；库缺失时正常兜底，库损坏/锁定时保留日志标题并告警。模型配置取日志最后一次有效运行配置，当前官方模型目录优先于历史名称；后台补全按 5 分钟 TTL 刷新，也重查已有历史名称的 ID。离线时保留已确认名称，原始模型 ID 和计量记录不改写。
+### Qoder 元数据
+
+会话列表以只读方式访问 `com.qoder.app.stable/main.sqlite` 的 `chat_sessions`，按精确会话 ID 补充标题，跳过已删除与空标题记录，不替换日志定位键或正文。每次会话刷新均读取最新 WAL，沿用切回窗口时的刷新机制获取桌面改名，不新增后台轮询；库缺失时正常兜底，库损坏/锁定时保留日志标题并告警。模型配置取日志最后一次有效运行配置，当前官方模型目录优先于历史名称；后台补全按 5 分钟 TTL 刷新，也重查已有历史名称的 ID。离线时保留已确认名称，原始模型 ID 和计量记录不改写。
 
 真实会话只读核验：在 `src-tauri/` 运行 `cargo run --release --offline --locked --example qoder_metadata -- '<会话ID>' '<预期会话名>' '<预期模型名>'`。只输出所选会话的标题、模型标识/名称和告警数；同时检查列表与详情一致。后两个参数可省略，指定的会话不存在、重复或与预期不符时必须失败。
 
 删除前用量保存的回归：在 `src-tauri/` 运行 `cargo test --release --offline --locked --lib usage::deletion -- --test-threads=1`。覆盖主日志与嵌套子会话、最后一轮增量、重启后持久化、无关来源隔离、缓存保留、读取/账本失败和同步期间日志变化。
 
-真实数据性能复测使用 `usage::deletion::tests::real_qoder_deletion_preservation_benchmark`，必须显式加 `--ignored --exact --nocapture --test-threads=1`，并提供 `ASM_DELETE_PROBE_SESSION`（真实会话 ID）、`ASM_DELETE_PROBE_PROJECT`（源项目目录键）和 `ASM_DELETE_PROBE_STORE`。后者必须是独立目录，包含用 SQLite backup API 从应用数据库生成的 `cache.sqlite3` 与 `ledger.sqlite3`，不要直接复制运行中数据库的主文件。测试分别复制这份已关闭的备份，交替测量全量与局部保存，输出耗时和日志数量；实际日志只读，删除回调为空操作。目标缺失或检查失败必须报错，不能静默跳过。此测量不包含 GUI 调度、共享账本锁等待或 Finder 移入回收站耗时。
+真实数据性能复测使用 `usage::deletion::tests::real_qoder_deletion_preservation_benchmark`，必须显式加 `--ignored --exact --nocapture --test-threads=1`，并提供 `ASM_DELETE_PROBE_SESSION`（真实会话 ID）、`ASM_DELETE_PROBE_PROJECT`（源项目目录键）和 `ASM_DELETE_PROBE_STORE`。后者必须是独立目录，包含用 SQLite backup API 从应用数据库生成的 `cache.sqlite3` 与 `ledger.sqlite3`，不要直接复制运行中数据库的主文件。测试分别复制这份已关闭的备份，交替测量全量与局部保存，输出耗时和日志数量；实际日志只读，删除回调为空操作。目标缺失或检查失败必须报错，不能静默跳过。此测量不包含 GUI 调度、共享账本锁等待或 Finder 移入废纸篓耗时。
 
-本机只读归组审计：`cd src-tauri && cargo run --release --offline --locked --example grouping_audit`，可追加 `-- qoder` 限定数据源。输出会话总数、展示分组数、未归属数量及 pytest 临时目录漏归组数量，不输出正文、标题或完整路径。真实 Git 项目中的 pytest 目录应保留项目归属，因此漏归组计数需结合样本判断。
+### 项目分组与文件监听
 
-五类适配器共用 `agents/workspace_groups.rs`：系统临时根下的 `pytest-of-*/pytest-<数字或current>/...`，以及以 `sessions/<源会话ID>` 结尾的临时运行目录，可判定为自动工作区。规则支持 macOS `/private` 路径别名和已清理的历史目录；不将任意临时路径都视为无项目。实际 Git 仓库（包括 worktree、符号链接指向的仓库）优先，生成的 `AGENTS.md` 不作为这些自动目录的项目证据，权限异常时保留原分组。Codex 原生项目归属优先于公共推断；状态损坏时告警并保留目录分组。所有提示以 `(project_dir, session_id)` 定位，只影响展示，读取和删除仍使用原始来源身份。
+本机只读分组审计命令为 `cd src-tauri && cargo run --release --offline --locked --example grouping_audit`，可追加 `-- qoder` 限定数据源。输出会话总数、展示分组数、未归属数量及 pytest 临时目录漏归组数量，不输出正文、标题或完整路径。真实 Git 项目中的 pytest 目录应保留项目归属，因此漏归组计数需结合样本判断。
+
+适配器通过 `agents/workspace_groups.rs` 识别自动生成的工作区，包括系统临时目录下的 `pytest-of-*/pytest-<数字或current>/...` 和以 `sessions/<源会话 ID>` 结尾的临时运行目录。规则支持 macOS `/private` 路径别名和已清理的历史目录；不将任意临时路径都视为无项目。实际 Git 仓库（包括 worktree、符号链接指向的仓库）优先，生成的 `AGENTS.md` 不作为这些自动目录的项目证据，权限异常时保留原分组。Codex 原生项目归属优先于公共推断；状态损坏时告警并保留目录分组。所有提示以 `(project_dir, session_id)` 定位，只影响展示，读取和删除仍使用原始来源身份。
 
 监听资源复测：`cd src-tauri && cargo run --release --offline --locked --example watch_bench`。
 仅写入自清理的临时目录，统计 10 秒空闲、100 次连续写入与后台暂停时的 CPU、峰值内存增量和通知数量。
 
-配置校验检查语法和根节点结构，不限制各 CLI 版本的自定义字段。已写入文件并不代表运行中的 CLI 已重新加载。
+### 配置
+
+配置校验检查语法和根节点结构，并允许 CLI 自定义字段。保存后，正在运行的 CLI 可能需要重启。
 
 用量解析、历史保留和兼容规则见 [用量模块说明](../src-tauri/src/usage/README.md)。
 
-## README 与公开截图
+## README 截图
 
 英文首页为 `README.md`，中文版为 `README.zh-CN.md`，两版通过顶部链接互相切换，功能和安装说明应同步更新。
 

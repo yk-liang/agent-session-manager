@@ -194,7 +194,7 @@ export default function Dropdown({ label, options, value, onChange, disabled = f
           {option.id === value && <UiIcon icon={Check} className="dropdown-check" />}
         </button>)}
       </div>
-      {!visible.length && <p className="dropdown-empty" role="status">未找到匹配项</p>}
+      {!visible.length && <p className="dropdown-empty" role="status">没有匹配项</p>}
     </div>}
   </div>;
 }

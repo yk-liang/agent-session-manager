@@ -155,7 +155,7 @@ try {
   await page.waitForFunction(() => window.__CACHE_TEST__.calls.some(({ command, args }) =>
     command === "resume_in_terminal" && args.agent === "qoder" && args.sessionId === "q1" && args.cwd === "/tmp/source" && !args.fork));
   await shortcuts.getByRole("button", { name: "删除（Qoder question）" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "移入回收站", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "移入废纸篓", exact: true }).click();
   await page.waitForFunction(() => window.__CACHE_TEST__.deleted.length === 1);
   assert.equal(await cards.count(), 1);
   assert.equal(await page.locator(".detail-title").textContent(), "New Qoder question");

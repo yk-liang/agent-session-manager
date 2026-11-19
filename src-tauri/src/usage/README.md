@@ -1,6 +1,8 @@
-# 内置 token 统计
+# 用量统计
 
-`parse` 将五类原始计量映射为完整输入、完整输出和不重复计入的缓存/思考细分；`normalize` 负责响应去重、累计增量及继承历史；`cache` 保存可重建索引和 JSONL 读取偏移，`ledger` 独立持久化已经观察的计量，`events` 保存归并后的请求表，`summary` 只从该表计算用量和趋势，`opencode` 继续使用本项目的 rusqlite。
+## 数据流
+
+`parse` 和各数据源适配器统一输入、输出和缓存等计量口径。`normalize` 处理响应去重、累计差额和继承历史。`cache` 保存可重建的索引与 JSONL 读取偏移，`ledger` 保存已采集的计量。`events` 写入归并后的请求记录，供 `summary` 查询用量和趋势。
 
 规则参考 ccusage 固定提交 `06a3343369c026e7e199aa4fa495bd730a0e17c4`：
 
@@ -9,35 +11,41 @@
 - `rust/adapters/opencode/src/parser.rs`、`rust/crates/ccusage-core/src/utils.rs`：缓存/思考与源总量归一化。
 - `rust/adapters/pi/src/parser.rs`、`loader.rs`：分叉复制条目；本实现还覆盖 Pi 0.87 的独立 usage、compaction、branch_summary 和 toolResult。
 
-源码入口：https://github.com/ccusage/ccusage/tree/06a3343369c026e7e199aa4fa495bd730a0e17c4/rust
+[ccusage Rust 源码](https://github.com/ccusage/ccusage/tree/06a3343369c026e7e199aa4fa495bd730a0e17c4/rust)
 
 本实现按本项目接口重新组织，不包含 ccusage CLI、定价、网络请求或第二套 SQLite 绑定。许可与来源声明保存在 `public/licenses/ccusage.txt`；后续参考上游修复时必须重新核对固定提交、增量基线和测试期望，不自动跟随 main。
 
 Qoder 的缓存输入包含关系未确认时，总量只保守计入已记录 input+output，并标记部分统计。缺失 usage 不按文字长度推算。统计范围是本机已经采集的累计消耗，包括子 Agent/归档；删除源记录不会删除已经入账的用量。
 
+## 存储
+
 账本位于应用数据目录的 `Agent Session Manager/usage-ledger-v1.sqlite3`，文件权限 0600，使用 SQLite WAL 事务与 FULL 同步提交。WAL/SHM 旁文件也保留同样权限；在线备份应使用 SQLite backup API，离线备份需先退出前台和采集进程，不单独复制活跃主库。SQLite 固定依赖包含 3.51.3 的 WAL-reset 修复。缓存仍位于系统缓存目录，缓存淘汰、解析版本或数据根切换不会清空累计用量。首次同步先迁移 0.1.23 的相应数字缓存，再处理源文件消失；从未读取且已经删除的计量无法还原。
 
 账本按来源及会话身份保存计量观测，不保存正文。旧观测与新扫描合并，SQLite 消息删除、JSONL 截断/替换不会抹去此前读到的调用；同路径被新会话复用时保留各自计数序列。父历史元数据也保留，使 Codex/Pi 的已删除父日志仍能参与去重；恢复或重新导入同一记录只记一次。写入事务内重读，防止多进程以旧快照覆盖新计量。账本损坏/不可写会返回错误并保留原文件，不静默回退为空账本。
 
-默认按需同步：每次启动应用同步一次；打开用量页、切回该页所在窗口和前台文件通知触发后续增量同步。后台保留关闭时没有常驻采集进程。`usage_file_stamps` 只保存路径、解析版本和文件状态；未变文件不加载完整 `FileCache`，重启后也复用。源改变才读新行/数据库计量，再更新变化会话及相关来源的请求事件。
+## 同步与后台采集
+
+默认按需同步。启动时同步一次。打开用量页、切回窗口或收到文件通知时进行增量同步。后台采集关闭时没有常驻采集进程。`usage_file_stamps` 只保存路径、解析版本和文件状态；未变文件不加载完整 `FileCache`，重启后也复用。数据源变化时读取新增计量，并更新相关会话的请求记录。
 
 按模型明细与趋势共用请求表及时间筛选，不新增扫描或存储。请求数包含可确认的成功/失败请求；累计差额不算一次请求，数量标记为下限。缓存率用汇总后的缓存读取除以完整输入，缺字段或缓存包含关系不明时不显示百分比。成本只加总明确记录的 USD，未知和实测 0 分开，部分记录缺失时展示已知下限；折叠模型列表不会缩小合计范围。
 
-带团队签名的 macOS 应用通过 `service` 的 SMAppService 注册包内 LaunchAgent。后台保留是可选项，新设置默认为关闭，受支持构建升级时保留原开关。ad hoc/无团队签名的构建只提供按需同步，并撤销旧的后台注册，避免 launchd 签名约束与 KeepAlive 导致反复退出弹窗。`--usage-collector` 在 Tauri/WebView 初始化前分流，单独启动 Rust 采集进程；退出界面后继续、登录后自动启动，应用内可暂停/开启，授权与实际运行状态分开报告。`flock` 确保同一数据目录只有一个采集进程；进程退出自动释放，不凭残留 PID 文件认定正在运行。开发/非应用包模式不自动注册后台项目。
+带团队签名的 macOS 应用通过 `service` 的 SMAppService 注册包内 LaunchAgent。后台采集是可选项，新设置默认为关闭，受支持构建升级时保留原开关。ad hoc/无团队签名的构建只提供按需同步，并撤销旧的后台注册，避免 launchd 签名约束与 KeepAlive 导致反复退出弹窗。`--usage-collector` 在 Tauri/WebView 初始化前分流，单独启动 Rust 采集进程；退出界面后继续、登录后自动启动，应用内可暂停/开启，授权与实际运行状态分开报告。`flock` 确保同一数据目录只有一个采集进程；进程退出自动释放，不凭残留 PID 文件认定正在运行。开发/非应用包模式不自动注册后台项目。
 
-`collector` 监听五类日志根与控制目录。尚未存在的根先监听最近的已有父目录，创建后立即重建监听；macOS 物理路径通知会映射回 Adapter 的原路径。变化路径集合及唤醒队列有界，约 150 毫秒合并，不因持续写入无限推迟；每分钟补查元数据/重建监听，失败按 1～60 秒退避重试。空闲每秒只检查退出信号，不周期读取日志正文。`ingest` 仅读变化来源并逐源事务入账，不生成全历史报表、不常驻所有历史；JSONL 只解析新增完整行，SQLite 只读请求元数据，不读 part 正文。前后台采集都在完成或部分失败后归并已入账来源；查询不承担索引更新。
+`collector` 监听各 Agent 的日志目录和控制目录。尚未存在的根先监听最近的已有父目录，创建后立即重建监听；macOS 物理路径通知会映射回 Adapter 的原路径。变化路径集合及唤醒队列有界，约 150 毫秒合并，不因持续写入无限推迟；每分钟补查元数据/重建监听，失败按 1～60 秒退避重试。空闲每秒只检查退出信号，不周期读取日志正文。`ingest` 仅读变化来源并逐源事务入账，不生成全历史报表、不常驻所有历史；JSONL 只解析新增完整行，SQLite 只读请求元数据，不读 part 正文。前后台采集都在完成或部分失败后归并已入账来源；查询不承担索引更新。
 
 冷启动时，启动同步、用量页和采集进程共用可取消的 `SyncLock`，不并行导入同一本账本。用量页接管后取消旧启动任务。查询使用独立只读连接与 WAL 快照，不等待采集器的 Mutex，也不调用 `events::refresh`；空库或尚未升级的库返回暂空结果，由正在进行的同步负责初始化。同步进度通过有节流的事件报告，逐 Agent 完成时刷新统计。大事务期间显示上一次已提交结果，取消不会发布半份索引。
 
-服务设置、进程锁及状态位于应用数据目录的 `Agent Session Manager/collector/`，文件 0600。设置保存前台实际解析的五类数据根，登录服务不依赖终端环境变量。系统可禁用后台项目，界面不会把“等待授权”显示为正在采集。升级后前台会重启仍运行旧版本的采集服务。注册与授权接口参考 [Apple SMAppService](https://developer.apple.com/documentation/ServiceManagement/SMAppService?language=objc) 和 [后台项目包结构](https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos)。
+服务设置、进程锁及状态位于应用数据目录的 `Agent Session Manager/collector/`，文件 0600。设置保存前台解析出的各 Agent 数据目录，登录服务不依赖终端环境变量。系统可禁用后台项目，界面不会把“等待授权”显示为正在采集。升级后前台会重启仍运行旧版本的采集服务。注册与授权接口参考 [Apple SMAppService](https://developer.apple.com/documentation/ServiceManagement/SMAppService?language=objc) 和 [后台项目包结构](https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos)。
 
-本地替换正式 `.app` 时，先暂停/注销旧服务并退出 GUI，备份后再替换。清理已经备份的临时旧应用副本及其 LaunchServices 注册，再从最终安装位置开启服务。2026-10-23 的实机升级曾在旧副本注册尚存时出现“注册成功但 launchd EX_CONFIG”，清理旧副本注册并重新注册后恢复；不能只凭 register 返回成功验收。需同时检查 `launchctl` 的实际运行状态、PID 锁、五类采集状态及进程映射的可执行文件，避免误测仍运行的旧二进制。
+本地替换正式 `.app` 时，先暂停/注销旧服务并退出 GUI，备份后再替换。清理已经备份的临时旧应用副本及其 LaunchServices 注册，再从最终安装位置开启服务。2026-10-23 的实机升级曾在旧副本注册尚存时出现“注册成功但 launchd EX_CONFIG”，清理旧副本注册并重新注册后恢复；不能只凭 register 返回成功验收。需同时检查 `launchctl` 的实际运行状态、进程锁、各来源的采集状态及进程映射的可执行文件，避免误测仍运行的旧二进制。
 
-删除会话的后端入口调用 `preserve_before_delete`，先同步采集并持久化最后可读取的计量，成功后才执行删除。外部工具在系统通知送达/首次读取前立即删除的日志、从未落盘的 usage、系统暂停或服务停用期间已消失的内容无法补回；事件通知不携带已删正文。这不是一分钟的采集间隔。
+## 删除会话时保留用量
 
-Qoder / Claude Code 的适配器复用删除校验生成目标清单，删除前仅同步主日志和本次一并移除的状态目录内的用量日志。局部同步仍使用完整数据根的缓存 scope，不清理其他来源缓存，也不标记整个 Agent 已完成首次同步；已落盘的相关来源仍参与请求去重。同步前后复核文件集合、长度、时间及文件身份，实际删除前再确认目标清单；检测到变化或保存失败即保留会话并报错。账本写锁仍覆盖保存和删除，因其他同步已占锁而等待的情况不会被此优化消除。Codex、Pi 和 OpenCode 暂未提供精确删除清单，继续沿用原有同步方式；回收站及官方 CLI 删除方式不变。
+删除入口调用 `preserve_before_delete`，先同步采集并持久化最后可读取的计量，成功后才执行删除。外部工具在系统通知送达/首次读取前立即删除的日志、从未落盘的 usage、系统暂停或服务停用期间已消失的内容无法补回；事件通知不携带已删正文。
 
-有意调整与本地兼容：
+Qoder / Claude Code 的适配器复用删除校验生成目标清单，删除前仅同步主日志和本次一并移除的状态目录内的用量日志。局部同步仍使用完整数据根的缓存 scope，不清理其他来源缓存，也不标记整个 Agent 已完成首次同步；已落盘的相关来源仍参与请求去重。同步前后复核文件集合、长度、时间及文件身份，实际删除前再确认目标清单；检测到变化或保存失败即保留会话并报错。账本写锁仍覆盖保存和删除，因其他同步已占锁而等待的情况不会被此优化消除。Codex、Pi 和 OpenCode 暂未提供精确删除清单，继续沿用原有同步方式。
+
+## 数据源兼容性
 
 - Claude 的 `chatcmpl` 响应也使用稳定 ID 去重，避免同一流式请求在不同时间戳重复计入；cache 创建总数为 0 而 TTL 细分有值时取完整细分，不叠加两个口径。
 - Claude/Qoder 的 UUID 消息 ID 同样是全局身份；旧账本中按 session/request 定位的 UUID 消息在汇总时统一身份，非全局短 ID 仍保留会话范围。
@@ -45,16 +53,18 @@ Qoder / Claude Code 的适配器复用删除校验生成目标清单，删除前
 - 旧 fork 可把父请求改写到创建时刻；参考上游连续 1 秒回放窗口，并要求父记录存在、首条紧邻创建、至少两条不同累计值。停止连续回放后保留子线程新调用。subagent_history_start_ordinal 在本机部分旧日志会推进到真实调用之后，不能单独作为继承截止线。
 - Pi 扫描所有已保存分支及额外 usage 类型；短 entry ID 仅在同一父分支链内去重。OpenCode 的 message 计量不与 step-finish 相加，模型来自历史记录。
 - Antigravity 从各会话库的 `steps` 和 `gen_metadata` 读取 protobuf 计量和计时。相同消息、响应或提供商 ID 的副本合并，身份缺失时使用确认的步骤匹配。缓存计入输入，思考计入输出。字段参考 [ccusage Antigravity 适配器](https://github.com/ccusage/ccusage/tree/v20.0.51/rust/adapters/antigravity) 和 [agent-events](https://github.com/haowang02/agent-events)。
-- OpenCode fork 会生成新消息 ID、复制原始时间与 tokens，且不保证根 fork 有 parent_id。使用原始请求创建时间/模型/Agent/path 的摘要与会话创建时间识别继承历史：原始调用即使时间和计数相同也分别保留，副本只补原始调用未保留的历史，分叉后新调用分别计量。来源：[OpenCode v1.19.3 fork](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/session/session.ts#L653-L689)。已有旧观测按消息 ID 补充元数据，无法重读的旧观测保留并标记去重不完整，不凭相同计数删除历史。
+- OpenCode fork 会生成新消息 ID、复制原始时间与 Token，且不保证根 fork 有 parent_id。使用原始请求创建时间/模型/Agent/path 的摘要与会话创建时间识别继承历史：原始调用即使时间和计数相同也分别保留，副本只补原始调用未保留的历史，分叉后新调用分别计量。来源：[OpenCode v1.19.3 fork](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/session/session.ts#L653-L689)。已有旧观测按消息 ID 补充元数据，无法重读的旧观测保留并标记去重不完整，不凭相同计数删除历史。
 - 输入/输出分别记录字段可用性及缺失覆盖；同一调用的最终完整快照可补齐早期缺失分项，汇总遇到任何缺分项调用则保留 incomplete。旧账本没有这类标记时只保守识别完整记录/正值，旧的部分记录不能凭零推断“确实用量为零”。
 
 修改映射/解析字段时更新对应来源的缓存版本；JSONL 来源使用 `FileCache.parser_version=3`，OpenCode 为 `4`，Antigravity 为 `1`。0.1.31 升级会重读现存源以补充请求元数据；0.1.32/0.1.33 复用该解析版本及偏移，保留原缓存 scope 以迁移已删日志。账本不能跟随缓存版本删除。界面取消不发布半份报表；后台每份来源完整解析、事务提交后独立保留，后续大文件/失败不回滚已入账来源。历史损坏、缺基线或语义不明应保留完整性标记。
 
-验证入口：`cargo test --offline --locked usage:: -- --test-threads=1`、`cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`、`npm run test:e2e -- usage` 和 `npm run test:integration -- collector`。后者独立启动 release 采集进程，仅使用临时五类日志/账本，验证无窗口采集、单实例、目录创建、重启/删除保留、暂停与真实 CPU/内存。本机对账和已知差异见 `docs/research/agent-usage-2026-10-21.md` 的实施记录。后续维护由本项目负责；参考上游时先锁定 revision，再核对字段和回归期望，不能只为对齐总数而覆盖已验证的本地规则。
+验证入口：`cargo test --offline --locked usage:: -- --test-threads=1`、`cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`、`npm run test:e2e -- usage` 和 `npm run test:integration -- collector`。后者独立启动 release 采集进程，仅使用临时五类日志/账本，验证无窗口采集、单实例、目录创建、重启/删除保留、暂停与真实 CPU/内存。本机对账和已知差异见[调研实施记录](../../../docs/research/agent-usage-2026-10-21.md)。后续维护由本项目负责；参考上游时先锁定 revision，再核对字段和回归期望，不能只为对齐总数而覆盖已验证的本地规则。
 
-OpenCode v2 从 `session_message` 的 assistant 及带 tokens 的 compaction 读取请求计量，模型取消息中的 `model.providerID/id`。合成提示、模型切换和用户记录不计量；会话聚合 tokens 不与消息相加。v1 与 v2 会话 ID 重叠时读取 v2，历史账本保持原有消息身份和继承去重规则。解析层使用只读连接内的临时视图，不写入源库或持久化正文。结构来源：[v2.0.15 SQL](https://github.com/anomalyco/opencode/blob/v2.0.15/packages/core/src/session/sql.ts)、[消息定义](https://github.com/anomalyco/opencode/blob/5ed03ad1377b549df83aa52dc11bdb07593a5327/packages/schema/src/session-message.ts)。
+OpenCode v2 从 `session_message` 的 assistant 及带 Token 的 compaction 读取请求计量，模型取消息中的 `model.providerID/id`。合成提示、模型切换和用户记录不计量；会话聚合 Token 不与消息相加。v1 与 v2 会话 ID 重叠时读取 v2，历史账本保持原有消息身份和继承去重规则。解析层使用只读连接内的临时视图，不写入源库或持久化正文。结构来源：[v2.0.15 SQL](https://github.com/anomalyco/opencode/blob/v2.0.15/packages/core/src/session/sql.ts)、[消息定义](https://github.com/anomalyco/opencode/blob/5ed03ad1377b549df83aa52dc11bdb07593a5327/packages/schema/src/session-message.ts)。
 
-请求事件沿用同一次增量读取，`request_parse` 提取白名单元数据（模型、请求/会话身份、时间、来源、推理档位、结果及日志自带成本），与原始计量一起事务入账；无 usage 的明确错误单独保存，不加入 token 总数。不保存 API 参数、请求/响应正文或错误正文。旧账本原地迁移为 SQLite schema 5，文件名保持不变；从更旧版本升级时仍先建立原有来源身份索引和事件归属。不支持此 schema 的旧程序会拒绝打开，降级需要使用升级前备份，不能用旧程序覆盖账本。
+## 请求记录与统计
+
+请求元数据与用量来自同一次增量读取，`request_parse` 提取白名单元数据（模型、请求/会话身份、时间、来源、推理档位、结果及日志自带成本），与原始计量一起事务入账；无 usage 的明确错误单独保存，不加入 Token 总数。不保存 API 参数、请求/响应正文或错误正文。旧账本原地迁移为 SQLite schema 5，文件名保持不变；从更旧版本升级时仍先建立原有来源身份索引和事件归属。不支持此 schema 的旧程序会拒绝打开，降级需要使用升级前备份，不能用旧程序覆盖账本。
 
 0.1.38 的 `storage` 只调整物理存储，不改变计量或去重语义：来源观测 JSON 使用 Zstandard level 3 压缩，读取同时接受旧 TEXT 与新 BLOB；迁移压缩原始 JSON 字节，包含未知字段。来源表增加整数 ID，身份关系与事件归属引用该 ID，避免在每条关系及索引中反复保存长路径；原始路径、完整身份键、请求 ID、事件 JSON 均保留，不使用摘要替代去重键。身份关系使用 `WITHOUT ROWID`，消除主键索引与行记录的重复。
 
@@ -84,9 +94,11 @@ OpenCode v2 从 `session_message` 的 assistant 及带 tokens 的 compaction 读
 0.1.32 验证：299 项 Rust、38 项 Node 单元测试、19 组 WebKit 回归通过，覆盖请求表/图表对账、夏令时与非整点时区、升级和删除保留。2026-10-27 本机 release 隔离空账本读取 19 份 Codex 日志（120,868,529 字节）约 116 ms，关闭并重开存储后的热同步约 0.33 ms、源读取 0 字节；今日/全部请求统计约 0.74/2.20 ms。可选采集进程空闲 10 秒测得 CPU 时间增量 0 ms、RSS 14.3 MiB，100 次追加约 178 ms 入账。以上为本机样本，不代表其他日志规模或磁盘的耗时。
 
 
-0.1.33 验证：300 项 Rust、38 项 Node、19 组 WebKit 回归和采集进程集成测试通过。原有日志兼容测试在每次扫描后增加局部索引与全量归并的逐事件对照；另验证重启后追加一个会话时，无关历史即使不可解码也不会被读取，其事件不会被改写。采集进程空闲 10 秒 CPU 增量 0 ms、RSS 14.3 MiB，100 次追加约 188 ms 入账；默认仍关闭后台保留。
+0.1.33 验证：300 项 Rust、38 项 Node、19 组 WebKit 回归和采集进程集成测试通过。原有日志兼容测试在每次扫描后增加局部索引与全量归并的逐事件对照；另验证重启后追加一个会话时，无关历史即使不可解码也不会被读取，其事件不会被改写。采集进程空闲 10 秒 CPU 增量 0 ms、RSS 14.3 MiB，100 次追加约 188 ms 入账；后台采集仍默认关闭。
 
-2026-11-04，0.1.38 存储对照：基线为 `c677aac`（0.1.37），同一台 Apple M6 / 24 GiB Mac、release 构建、固定合成日志和隔离数据库。以下空间不包含 `.app`、会话摘要或 WebKit 缓存；主库/用量缓存均在关闭连接后计量，不把 WAL 重复相加。生成和执行方法见 `docs/DEVELOPMENT.md`。
+## 存储性能对照
+
+2026-11-04 测量 0.1.38。基线为 `c677aac`（0.1.37），同一台 Apple M6 / 24 GiB Mac、release 构建、固定合成日志和隔离数据库。以下空间不包含 `.app`、会话摘要或 WebKit 缓存；主库/用量缓存均在关闭连接后计量，不把 WAL 重复相加。生成和执行方法见[开发文档](../../../docs/DEVELOPMENT.md#用量与后台采集)。
 
 | 63,500 请求样本 | 0.1.37 | 0.1.38 |
 | --- | ---: | ---: |
@@ -101,13 +113,13 @@ OpenCode v2 从 `session_message` 的 assistant 及带 tokens 的 compaction 读
 
 原地升级首次打开含压缩、迁移与回收约 1.49 秒（单次，不含编译）；这不是每次启动成本。新建库首次导入后的合计为 160.11 MiB，未做全库 `VACUUM`，与迁移整理后的页填充不同。导入和追加计时均为单次样本，页缓存、磁盘和来源大小会影响结果，不能据此承诺所有操作都加速；缓存被淘汰后的变化来源需要重读，会增加那次同步成本。
 
-升级、新建和追加三组对照的完整来源观测、请求事件及完整身份关系 SHA-256 相同，完整统计及请求数一致。追加只读取 7,840 新字节，请求从 63,500 增至 63,510；未变同步读取 0 字节。本机真实账本的只读备份（2,432 请求，非反馈用户的数据库）也通过同样逐项比对，账本加缓存从 35.48 降至 7.88 MiB（减少 77.8%），升级约 83 ms；其热同步 0.134→0.154 ms、首/末页约 0.14–0.15 ms，属于小样本下的轻微波动。
+升级、新建和追加三组对照的完整来源观测、请求事件及完整身份关系 SHA-256 相同，完整统计及请求数一致。追加只读取 7,840 新字节，请求从 63,500 增至 63,510；未变同步读取 0 字节。本机账本的只读备份（2,432 个请求）也通过同样逐项比对，账本加缓存从 35.48 降至 7.88 MiB（减少 77.8%），升级约 83 ms；其热同步 0.134→0.154 ms、首/末页约 0.14–0.15 ms，属于小样本下的轻微波动。
 
 321 项 Rust、40 项 Node 单元测试、7 组相关 WebKit 回归及真实采集进程集成测试通过。存储专项验证旧库/旧缓存迁移、未知 JSON 字段、源日志已删除、恢复副本与追加去重、缓存淘汰后的零重复读取及重读归并、坏记录/关系导致整体回滚、缓存升级失败时历史仍可导入、已有读快照以及实际多页回收。后台进程同时覆盖五类 Agent、单实例、重启/删除保留及暂停；本机空闲 10 秒 CPU 增量为 0 ms。性能样本以 Codex 为主，不替代各来源的兼容回归。
 
-2026-10-27 23:40（America/Los_Angeles），以 19 份日志的稳定快照对比 `npx --yes ccusage@20.0.45` 的今日、7 天和 30 天（包含今日，离线、不计算费用）。新建账本与旧 schema 3 账本升级后，1,225 条 Codex 事件的身份、时间、模型和各项 token 完全一致；旧账本中其他 Agent 的历史也原样保留。
+2026-10-27 23:40（America/Los_Angeles），以 19 份日志的稳定快照对比 `npx --yes ccusage@20.0.45` 的今日、7 天和 30 天（包含今日，离线、不计算费用）。新建账本与旧 schema 3 账本升级后，1,225 条 Codex 事件的身份、时间、模型和各项 Token 完全一致；旧账本中其他 Agent 的历史也原样保留。
 
-| 来源 / 范围 | 本应用总 tokens | ccusage 总 tokens |
+| 来源 / 范围 | 应用用量（Token） | ccusage 用量（Token） |
 | --- | ---: | ---: |
 | Claude：今日 / 7 天 / 30 天 | 0 | 0 |
 | Codex：今日 | 55,145,221 | 55,040,853 |

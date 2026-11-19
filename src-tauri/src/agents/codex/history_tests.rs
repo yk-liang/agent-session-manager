@@ -382,7 +382,7 @@ fn confirmed_paginated_deletion_receives_every_file_once_and_keeps_other_threads
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&first.canonicalize().unwrap()));
         assert!(paths.contains(&second.canonicalize().unwrap()));
-        Ok(()) // 注入移除器只记录目标，不操作回收站或真实数据。
+        Ok(()) // 注入移除器只记录目标，不操作废纸篓或真实数据。
     })
     .unwrap();
     assert_eq!(calls.get(), 1);

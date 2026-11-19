@@ -35,7 +35,7 @@ export default function SessionActions({ agent, session, onRequestDelete, toast,
   const resume = async (fork: boolean) => {
     try {
       await api.resumeInTerminal(agent.id, session.sessionId, session.cwd ?? undefined, fork);
-      toast(fork ? "已在新终端窗口分叉会话" : "已在新终端窗口恢复会话");
+      toast(fork ? "已向终端发送分叉命令" : "已向终端发送恢复命令");
     } catch (error) {
       toast(String(error), true);
     }

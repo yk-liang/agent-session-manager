@@ -131,7 +131,7 @@ export default function ResizableLayout({ sidebar, sessionList, children }: Prop
       aria-valuenow={widths[panel]}
       aria-valuetext={`${widths[panel]} 像素`}
       tabIndex={0}
-      title="拖动调整宽度，双击恢复默认"
+      title="拖动调整宽度。双击恢复默认宽度。"
       onPointerDown={(event) => startDrag(panel, event)}
       onPointerMove={moveDrag}
       onPointerUp={() => finishDrag(true)}

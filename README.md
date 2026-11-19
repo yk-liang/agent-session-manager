@@ -4,80 +4,55 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-Find past AI coding sessions, switch configurations, and track token usage in one macOS app.
+A macOS app for finding AI coding sessions, switching configuration profiles, and tracking token usage.
 
-Supports **Qoder, Claude Code, Codex, OpenCode, Pi, and Antigravity**.
+Supports **Qoder, Claude Code, Codex, OpenCode, Pi, and Antigravity**. The interface is in Simplified Chinese.
 
 [Download the latest release](https://github.com/yk-liang/agent-session-manager/releases/latest) · [Report an issue](https://github.com/yk-liang/agent-session-manager/issues)
 
-## Features
+## What you can do
 
-Screenshots show the current source build with fictional projects, conversations, and usage data. The app interface is currently in Chinese.
+- **Sessions (会话)** — Browse by project, search conversation text, and read messages in Markdown. Use card shortcuts to copy a resume command, resume in Terminal, or delete a session. Select multiple sessions to delete them together.
+- **Configuration (配置)** — Save and switch profiles, preview changes, and restore configuration files from backups.
+- **Usage (用量)** — Compare token usage by agent, model, or time range. Open a request to see its model, cache usage, timing, and recorded cost.
 
-### Find a session and pick up where you left off
-
-- Browse by Agent and project. Search session titles and conversation text.
-- Read Markdown and jump between messages with the conversation outline. System prompts and injected context are hidden by default; tool calls and reasoning can be expanded.
-- Copy a resume command or continue in a terminal. Delete sessions in bulk and fork sessions for supported Agents.
-
-![Codex sessions grouped by project, with Markdown conversation history and resume controls](docs/images/sessions.png)
-
-Codex support includes local sessions from the CLI, IDE integrations, and desktop app. OpenCode supports both v1 and v2 data formats.
-Antigravity reads local SQLite conversations for browsing, search, and usage. CLI sessions can be resumed with `agy`. Antigravity conversations are read-only in this app.
-
-Codex session browsing supports both `.jsonl` and Zstandard-compressed `.jsonl.zst` logs, with log pages merged into one conversation. The Sessions view lists unarchived user conversations; Usage also covers archived logs.
-
-### Understand usage, down to each request
-
-- Filter by Agent, model, and date range. View hourly trends for today and daily trends for the last 7 or 30 days.
-- Inspect each request's model, tokens, cache usage, TPS, duration, project, and source. Browse numbered pages and filter by outcome.
-- Keep usage history locally, even after deleting the original session. During the first sync, incomplete totals are clearly labeled.
-
-![Token totals, daily trends, and request events with model, speed, and project information](docs/images/usage.png)
-
-Compare request counts, input and output tokens, cache reads, cache hit rates, and recorded costs by model:
-
-![Per-model request counts, tokens, cache reads, cache hit rates, and costs](docs/images/models.png)
-
-### Manage configuration profiles
-
-Save multiple profiles and preview changes before switching. Files are backed up before changes and can be restored. Edit configuration files directly, with format validation and checks for external changes.
-
-![Codex configuration profiles, the active model, and a configuration file preview](docs/images/configuration.png)
-
-## Install and update
-
-**macOS 13 or later, on Apple Silicon or Intel.** The desktop app does not require Node.js or ccusage.
-
-1. Download the installer whose name ends in `universal.dmg` from [Releases](https://github.com/yk-liang/agent-session-manager/releases/latest).
-2. Open it and drag **Agent Session Manager** into **Applications**. Alternatively, download the `.app.zip`, extract it, and move the app there.
-3. To update, quit the old version and replace the app. Sessions, configurations, and saved usage are stored outside the app bundle.
-
-Current releases are not notarized by Apple. If macOS blocks the first launch, verify the download source and follow [Apple's instructions](https://support.apple.com/en-us/102445) to select **Open Anyway** in **System Settings → Privacy & Security**. Releases include SHA-256 checksums.
-
-Resuming or forking sessions in a terminal, and deleting OpenCode sessions, require the corresponding Agent CLI to be installed.
-
-## Get started
-
-1. Use any supported Agent first so that local session logs exist.
-2. Open the app, choose an Agent in the toolbar, and switch between **会话 (Sessions) / 配置 (Configuration) / 用量 (Usage)**. The Usage tab also offers **全部 Agent (All Agents)**.
-3. Importing a large history for the first time may take a few minutes. You can use other pages while it runs. Updates happen automatically.
-
-After saving a configuration, whether the Agent needs a restart depends on how that Agent reloads its settings.
-
-## Usage and data
-
-- **Local logs, not provider billing.** Cache hit rate is cache reads ÷ input tokens. Cache and reasoning are breakdowns, not additional tokens added to the total. TPS is output tokens ÷ request duration, which may include waiting time.
-- **Missing does not mean zero.** `—` means unrecorded, `≈` means estimated, and `≥` marks a known lower bound. Costs are shown only when the logs provide a USD amount.
-- **Saved history stays available.** Current releases sync while the app is in use, not after it quits. Records deleted externally before they were synced cannot be recovered.
-- **Deleting a session affects the original data.** Most sessions go to the system Trash. OpenCode sessions are permanently deleted through its official CLI and cannot be restored by this app.
+![Session list and conversation view with sample data](docs/images/sessions.png)
 
 <details>
-<summary>Where is my data? Why are no sessions showing?</summary>
+<summary>Configuration and usage previews</summary>
 
-The app reads existing local Agent data. If no sessions appear, check that the Agent has written session logs. If you use a custom directory, the app needs access to it.
+![Configuration profiles and file preview](docs/images/configuration.png)
 
-| Agent | Common data locations |
+![Token usage and requests](docs/images/usage.png)
+
+![Token usage by model](docs/images/models.png)
+
+</details>
+
+## Install
+
+Requires **macOS 13 or later** on Apple silicon or Intel.
+
+1. Download the `universal.dmg` from [Releases](https://github.com/yk-liang/agent-session-manager/releases/latest).
+2. Open the disk image and drag **Agent Session Manager** to **Applications**. You can also extract the `.app.zip` and move the app there.
+3. To update, quit the app and replace it with the new version.
+
+The release is not notarized by Apple. If macOS blocks the first launch, verify the download source before allowing the app to open. [Apple’s instructions for opening an app from a known source](https://support.apple.com/en-us/102445)
+
+## Sessions and data
+
+Use a supported agent to create a local session, then select that agent in the app. First-time usage sync can take a few minutes. You can keep using the app while it runs.
+
+- To resume or fork a session in Terminal, install the corresponding CLI. Antigravity CLI sessions resume with `agy`. Forking is available for select agents.
+- Deleting a session usually moves it to the Trash. OpenCode deletes sessions permanently through its CLI. Antigravity sessions are read-only in the app.
+- Usage is based on local logs. The app retains synced usage after you delete a session and displays costs recorded in the logs. Usage syncs automatically while the app is running.
+
+<details>
+<summary>Where is my data?</summary>
+
+Use **打开数据目录 (Open Data Folder)** in the toolbar. If the list is empty, check that the agent has saved a session in a location the app can read.
+
+| Agent | Default locations |
 | --- | --- |
 | Qoder | `~/.qoder/projects/` |
 | Claude Code | `~/.claude/projects/` |
@@ -86,24 +61,20 @@ The app reads existing local Agent data. If no sessions appear, check that the A
 | Pi | `~/.pi/agent/sessions/` |
 | Antigravity | `~/.gemini/antigravity*/conversations/`, `~/.config/antigravity/conversations/` |
 
-`ANTIGRAVITY_DATA_DIR` accepts a data root or a conversations directory. Use commas to specify multiple directories.
+Use `ANTIGRAVITY_DATA_DIR` for custom Antigravity locations. Separate multiple data or conversation directories with commas.
 
-Recognized automatic temporary workspaces, such as pytest runs under a system temporary directory, appear under **未归属项目 (Unassigned)** for all supported Agents. Real Git repositories and explicit Codex project assignments take precedence; ordinary manual temporary directories keep their existing groups. Grouping only affects display: logs and session working directories are unchanged.
+For Codex, **会话 (Sessions)** shows active history and **用量 (Usage)** also includes archived logs.
 
-Qoder sessions use saved desktop titles when available, then log titles or the first meaningful user prompt. Model badges use the session's latest runtime selection and prefer names from the current official model list, falling back to previously resolved names or historical logs when offline.
-
-Saved usage lives in `~/Library/Application Support/Agent Session Manager/`. Configuration profiles and backups live in `~/.agent-session-manager/`. Quit the app before backing up these complete directories; if you use a build with background collection enabled, disable it first. Original sessions remain managed by each Agent.
+The app stores synced usage in `~/Library/Application Support/Agent Session Manager/` and configuration profiles and backups in `~/.agent-session-manager/`.
 
 </details>
 
 ## Feedback and contributions
 
-Please include the app version, Agent version, and reproduction steps when opening an [issue](https://github.com/yk-liang/agent-session-manager/issues). Remove keys, private paths, and conversation content before sharing screenshots or logs.
+Include the app version, agent version, and steps to reproduce when filing an [issue](https://github.com/yk-liang/agent-session-manager/issues). For read or sync errors, use **复制诊断详情 (Copy Diagnostics)**. Review paths and other private information before sharing.
 
-If a session body or usage sync fails, use **复制诊断详情 (Copy diagnostic details)** and the retry button in the error panel. Lists can contain cached summaries, so scan warning counts do not count every unreadable session. Copy diagnostics from the app window experiencing the failure and check local paths before sharing.
+See the [development guide](docs/DEVELOPMENT.md) for build and test instructions in Chinese.
 
-See the [development guide](docs/DEVELOPMENT.md) (Chinese) for building, testing, and regenerating screenshots.
+## License
 
-## License and acknowledgments
-
-[MIT](LICENSE). Thanks to [agent-session-cleaner](https://github.com/haowang02/agent-session-cleaner), [ccusage](https://github.com/ccusage/ccusage), and [agent-events](https://github.com/haowang02/agent-events) for reference implementations. See [public/licenses](public/licenses) for third-party licenses. Agent logos belong to their respective owners.
+[MIT](LICENSE). Thanks to [agent-session-cleaner](https://github.com/haowang02/agent-session-cleaner), [ccusage](https://github.com/ccusage/ccusage), and [agent-events](https://github.com/haowang02/agent-events) for their work. See the [third-party licenses](public/licenses).

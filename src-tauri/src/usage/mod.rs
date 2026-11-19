@@ -1,4 +1,4 @@
-//! 本地 token 统计。解析/去重规则参考 ccusage，运行时不依赖其程序或定价服务。
+//! 从本地日志采集、去重并汇总 Token 用量。
 mod antigravity;
 mod cache;
 #[cfg(test)]

@@ -19,5 +19,5 @@ export default function AgentSwitcher({ agents, value, allowAll, disabled, onCha
     id: agent.id, name: agent.displayName, icon: <AgentIcon agent={agent.id} />,
   }));
   return <Dropdown className="agent-switcher" label="当前 Agent" value={value}
-    options={allowAll ? [allAgents, ...options] : options} disabled={disabled} placeholder="未发现 Agent 数据" onChange={onChange} />;
+    options={allowAll ? [allAgents, ...options] : options} disabled={disabled} placeholder="未找到本地 Agent 数据" onChange={onChange} />;
 }

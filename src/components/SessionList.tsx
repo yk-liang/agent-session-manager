@@ -9,7 +9,7 @@ import SessionActions from "./SessionActions";
 
 interface Props {
   sessions: SessionMeta[];
-  selectedKey: string | null;
+  selectedSessionKey: string | null;
   search: string;
   onSearch: (s: string) => void;
   onSelect: (s: SessionMeta) => void;
@@ -19,7 +19,7 @@ interface Props {
   agent?: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
   toast: (message: string, error?: boolean) => void;
-  checkedKeys: Set<string>;
+  checkedSessionKeys: Set<string>;
   onToggleBatch: () => void;
   onToggleSession: (session: SessionMeta) => void;
   onToggleAll: () => void;
@@ -43,7 +43,7 @@ interface Props {
 
 export default function SessionList({
   sessions,
-  selectedKey,
+  selectedSessionKey,
   search,
   onSearch,
   onSelect,
@@ -53,7 +53,7 @@ export default function SessionList({
   agent,
   onRequestDelete,
   toast,
-  checkedKeys,
+  checkedSessionKeys,
   onToggleBatch,
   onToggleSession,
   onToggleAll,
@@ -74,10 +74,10 @@ export default function SessionList({
   hiddenPathSessionKeys,
   displayRoots,
 }: Props) {
-  const selectedCount = new Set(sessions.filter((s) => checkedKeys.has(sessionKey(s))).map(sessionKey)).size;
-  const allSelected = sessions.length > 0 && sessions.every((s) => checkedKeys.has(sessionKey(s)));
+  const selectedCount = new Set(sessions.filter((s) => checkedSessionKeys.has(sessionKey(s))).map(sessionKey)).size;
+  const allSelected = sessions.length > 0 && sessions.every((s) => checkedSessionKeys.has(sessionKey(s)));
   const emptyHint = loading ? "正在读取会话…"
-    : loadError || warnings.length > 0 ? "会话列表读取不完整，请重试扫描；当前结果不能说明历史会话为空。"
+    : loadError || warnings.length > 0 ? "会话列表读取不完整。请重试。"
     : "没有匹配的会话";
   return (
     <div className="session-list" aria-busy={loading}>
@@ -86,8 +86,8 @@ export default function SessionList({
           <UiIcon icon={Search} size={16} className="search-icon" />
           <input
             type="search"
-            placeholder="搜索会话或对话内容…"
-            aria-label="搜索会话或对话内容"
+            placeholder="搜索会话或正文…"
+            aria-label="搜索会话或正文"
             maxLength={256}
             value={search}
             onChange={(e) => onSearch(e.target.value)}
@@ -99,11 +99,11 @@ export default function SessionList({
         </div>
         {(searchPending || searchSkipped > 0 || searchError) && (
           <div className={`search-status${searchSkipped || searchError ? " warning" : ""}`} role="status" title={searchError ?? undefined}>
-            {searchPending ? "正在搜索对话…" : searchError ? <>正文搜索失败 <button onClick={onRetrySearch} disabled={disabled}>重试搜索</button></> : `${searchSkipped} 个会话未能搜索`}
+            {searchPending ? "正在搜索正文…" : searchError ? <>无法搜索正文 <button onClick={onRetrySearch} disabled={disabled}>重试</button></> : `无法搜索 ${searchSkipped} 个会话`}
           </div>
         )}
-        {loadError && <ReadDiagnostics className="catalog-error" title="读取会话列表失败" errors={[loadError]} retry={onRetryLoad} busy={disabled || loading} />}
-        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`本次扫描有 ${warnings.length} 条告警`} errors={warnings} description="列表可能包含缓存摘要；告警条数不代表全部不可读会话，正文在打开时验证。" retry={onRetryLoad} retryLabel="重试扫描" busy={disabled || loading} />}
+        {loadError && <ReadDiagnostics className="catalog-error" title="无法读取会话列表" errors={[loadError]} retry={onRetryLoad} busy={disabled || loading} />}
+        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`${warnings.length} 条读取提示`} errors={warnings} description="部分会话未能读取。" retry={onRetryLoad} busy={disabled || loading} />}
         <div className="session-list-options">
           <label className="toggle show-empty-toggle">
             <input
@@ -124,22 +124,22 @@ export default function SessionList({
       {batchMode && (
         <div className="batch-toolbar">
           <div className="batch-status" role="status">
-            {progress ? `正在删除 ${progress.completed} / ${progress.total}，请勿关闭应用` : `已选 ${selectedCount} 个会话`}
+            {progress ? `正在删除会话（${progress.completed}/${progress.total}）` : `已选 ${selectedCount} 个会话`}
           </div>
           <div className="batch-actions">
             <button onClick={onToggleAll} disabled={disabled || loading || searchPending || sessions.length === 0}>
-              {allSelected ? "取消全选" : "全选当前结果"}
+              {allSelected ? "取消全选" : "全选结果"}
             </button>
             <button className="danger" onClick={onDeleteSelected} disabled={disabled || loading || searchPending || selectedCount === 0}>
               删除所选
             </button>
           </div>
-          <p className="batch-hint">更改筛选条件会清空勾选。</p>
+          <p className="batch-hint">更改筛选条件会取消选择。</p>
         </div>
       )}
       {failures.length > 0 && (
         <details className="batch-failures" open>
-          <summary><UiIcon icon={ChevronRight} className="details-caret" />{failures.length} 个会话删除失败</summary>
+          <summary><UiIcon icon={ChevronRight} className="details-caret" />{failures.length} 个会话未删除</summary>
           <ul>
             {failures.map(({ session, error }) => (
               <li key={sessionKey(session)}>
@@ -156,8 +156,8 @@ export default function SessionList({
           const isEmpty = !s.statsPending && s.realUserCount === 0;
           const key = sessionKey(s);
           const hit = searchHits.get(key);
-          const checked = checkedKeys.has(key);
-          const title = s.title || (!s.hasTranscript ? "(空壳目录)" : "(无标题)");
+          const checked = checkedSessionKeys.has(key);
+          const title = s.title || "无标题";
           const hidePath = hiddenPathSessionKeys?.has(key) ?? false;
           const displayPath = displayRoots?.get(key) ?? s.cwd;
           const content = (
@@ -165,11 +165,11 @@ export default function SessionList({
               <span className="session-card-title">{title}</span>
               {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
               <span className="session-card-sub">
-                {relativeTime(s.lastTs)} · {!s.statsPending && <>{s.realUserCount + s.assistantTextCount} 条对话 · </>}
+                {relativeTime(s.lastTs)} · {!s.statsPending && <>{s.realUserCount + s.assistantTextCount} 条消息 · </>}
                 {formatSize(s.sizeBytes)}
               </span>
               <span className="session-card-badges">
-                {s.readError && <span className="badge read-error-badge" title="正文未能读取，当前保留列表摘要；点击会话可查看诊断或重试。">正文读取失败</span>}
+                {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}
                 {isEmpty && <span className="badge empty-badge">空会话</span>}
                 <SessionModel session={s} badge />
                 {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
@@ -190,7 +190,7 @@ export default function SessionList({
           ) : (
             <div key={key}
               title={hidePath ? s.cwd ?? undefined : undefined}
-              className={`session-card ${selectedKey === key ? "active" : ""} ${isEmpty ? "empty" : ""}`}
+              className={`session-card ${selectedSessionKey === key ? "active" : ""} ${isEmpty ? "empty" : ""}`}
             >
               <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
                 {content}

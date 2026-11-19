@@ -54,7 +54,7 @@ try {
   assert.equal(await page.locator('.usage-stat strong').first().textContent(), '—');
   await page.getByText('正在读取历史请求…', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '开启后台采集', exact: true }).count(), 0);
-  await page.getByRole('button', { name: '同步与保留说明', exact: true }).click();
+  await page.getByRole('button', { name: '用量同步说明', exact: true }).click();
   assert.ok((await page.getByRole('tooltip').textContent()).includes('此版本不支持退出后的后台采集'));
   await page.keyboard.press('Escape');
   const emitProgress = (phase, done, total) => page.evaluate(({ phase, done, total }) => {
@@ -64,7 +64,7 @@ try {
   await emitProgress('reading', 12, 256);
   await page.getByText('已检查 12 / 256 个文件', { exact: true }).waitFor();
   await page.clock.fastForward(65000);
-  assert.match(await page.locator('.usage-sync-status').textContent(), /已用时 6[5-9] 秒/);
+  assert.match(await page.locator('.usage-sync-status').textContent(), /用时 6[5-9] 秒/);
   assert.equal(await page.locator('[role="alert"]').count(), 0, 'long imports must not become timeout errors');
   assert.equal(await page.locator('.request-table').count(), 0, 'an empty table must not create a wide horizontal scrollbar');
   const assertLayout = async () => {
@@ -101,7 +101,7 @@ try {
   await page.evaluate(() => { window.__COLD__.failSummary = true; window.__COLD__.failEvents = true; });
   await page.getByRole('button', { name: '今日', exact: true }).click();
   await page.locator('.usage-query-error').waitFor(); await page.locator('.request-error').waitFor();
-  await page.getByText('暂时无法读取用量，请重试查询', { exact: true }).waitFor();
+  await page.getByText('无法读取趋势', { exact: true }).waitFor();
   await page.evaluate(() => { window.__COLD__.failSource = true; window.__COLD__.release(); });
   await page.waitForFunction(() => window.__COLD__.active === 'opencode');
   await page.locator('.usage-sync-error').waitFor();

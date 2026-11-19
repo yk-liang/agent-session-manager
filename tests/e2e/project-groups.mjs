@@ -90,9 +90,9 @@ try {
   pass("membership refresh restores directory grouping and clears a vanished virtual selection");
 
   await page.getByRole("button",{name:"批量管理",exact:true}).click();
-  await page.getByRole("button",{name:"全选当前结果",exact:true}).click();
+  await page.getByRole("button",{name:"全选结果",exact:true}).click();
   await page.getByRole("button",{name:"删除所选",exact:true}).click();
-  await page.getByRole("dialog").getByRole("button",{name:"移入回收站（2）",exact:true}).click();
+  await page.getByRole("dialog").getByRole("button",{name:"移入废纸篓（2）",exact:true}).click();
   await page.waitForFunction(()=>window.__GROUP_TEST__.deleted.length===2);
   const deleted=await page.evaluate(()=>window.__GROUP_TEST__.deleted);
   assert.deepEqual(deleted.map(d=>[d.projectDir,d.sessionId]).sort(),[["dir-a","a"],["dir-b","b"]]);

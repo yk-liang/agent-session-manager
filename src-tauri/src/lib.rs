@@ -76,15 +76,14 @@ fn confirm_config_exit(
     state: tauri::State<'_, ConfigGuard>,
 ) -> Result<(), String> {
     if state.0.load(Ordering::SeqCst) & 2 != 0 {
-        return Err("配置操作正在处理中，请稍后再退出".into());
+        return Err("配置操作仍在进行，请稍后退出。".into());
     }
     state.0.store(0, Ordering::SeqCst);
     app.exit(0);
     Ok(())
 }
 
-// 同步命令会在窗口线程执行。扫描、文件锁与外部进程都可能等待，
-// 必须放进阻塞线程池，让慢 I/O 期间窗口仍可切页、刷新或关闭。
+// 文件 I/O 和外部命令在线程池执行，避免阻塞窗口线程。
 async fn run_backend<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -92,7 +91,7 @@ where
 {
     tauri::async_runtime::spawn_blocking(work)
         .await
-        .map_err(|error| format!("后台操作失败: {error}"))?
+        .map_err(|error| format!("后台操作失败：{error}"))?
 }
 
 #[tauri::command]
@@ -309,7 +308,7 @@ async fn resume_in_terminal(
         let source = agents::find_source(&agent)?;
         let cmd = source
             .resume_command(&session_id, fork.unwrap_or(false))
-            .ok_or_else(|| "该 agent 不支持恢复会话".to_string())?;
+            .ok_or_else(|| "该 Agent 不支持恢复会话".to_string())?;
         let full = match cwd {
             Some(dir) => format!("cd {} && {}", agents::shell_quote(&dir), cmd),
             None => cmd,
@@ -438,7 +437,7 @@ pub fn run() {
             let generation = USAGE_GENERATION.load(Ordering::SeqCst);
             tauri::async_runtime::spawn_blocking(move || {
                 if service_app.state::<usage::service::Service>().ensure().is_err() {
-                    eprintln!("Background token collector registration failed; inspect usage service status");
+                    eprintln!("Could not register the background usage collector. Check the collector status for details.");
                 }
                 // 每次启动只同步一次，不依赖可选的登录服务。
                 let cancelled = || USAGE_GENERATION.load(Ordering::SeqCst) != generation;

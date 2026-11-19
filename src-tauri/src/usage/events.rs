@@ -62,7 +62,7 @@ pub(super) fn schema(db: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS usage_requests_agent ON usage_request_events(agent,time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_model ON usage_request_events(model,time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_status ON usage_request_events(status,time DESC,id DESC);")
-        .map_err(|_| "无法初始化请求事件索引，已保留用量账本".into())
+        .map_err(|_| "无法初始化请求记录索引，已保留用量账本".into())
 }
 
 pub(super) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent {
@@ -119,26 +119,26 @@ pub(super) fn refresh(
             |r| r.get(0),
         )
         .optional()
-        .map_err(|error| format!("无法读取请求事件版本：{error}"))?
+        .map_err(|error| format!("无法读取请求记录版本：{error}"))?
         .unwrap_or(false);
     if !dirty {
         return Ok(());
     }
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| format!("无法开始请求事件更新：{error}"))?;
+        .map_err(|error| format!("无法开始请求记录更新：{error}"))?;
     let (revision, indexed): (i64, i64) = tx
         .query_row(
             "SELECT revision,indexed FROM usage_request_index WHERE agent=?1",
             [agent],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
+        .map_err(|error| format!("无法读取请求记录版本：{error}"))?;
     if indexed == 0 {
         // 仅升级旧账本时全量建立身份索引。事务失败/取消时旧事件仍然完整可用。
         let mut statement = tx
             .prepare("SELECT path,data FROM usage_ledger_sources WHERE agent=?1")
-            .map_err(|_| "无法读取请求事件来源")?;
+            .map_err(|_| "无法读取请求记录来源")?;
         let rows = statement
             .query_map([agent], |r| {
                 Ok((
@@ -146,12 +146,12 @@ pub(super) fn refresh(
                     super::storage::decode::<FileCache>(r.get_ref(1)?)?,
                 ))
             })
-            .map_err(|_| "无法读取请求事件来源")?;
+            .map_err(|_| "无法读取请求记录来源")?;
         for row in rows {
             if cancel() {
-                return Err("请求事件读取已取消".into());
+                return Err("请求记录读取已取消".into());
             }
-            let (path, file) = row.map_err(|_| "无法读取请求事件来源")?;
+            let (path, file) = row.map_err(|_| "无法读取请求记录来源")?;
             super::ledger::source_keys(&tx, agent, &PathBuf::from(path), &file)?;
         }
         tx.execute(
@@ -160,7 +160,7 @@ pub(super) fn refresh(
         )
         .map_err(|_| "无法升级请求来源索引")?;
         tx.execute("DELETE FROM usage_request_events WHERE agent=?1", [agent])
-            .map_err(|_| "无法升级请求事件索引")?;
+            .map_err(|_| "无法升级请求记录索引")?;
     }
     loop {
         let seed: Option<String> = tx
@@ -196,7 +196,7 @@ pub(super) fn refresh(
             .map_err(|_| "无法读取相关会话")?;
         for row in rows {
             if cancel() {
-                return Err("请求事件读取已取消".into());
+                return Err("请求记录读取已取消".into());
             }
             let (path, mut file) = row.map_err(|_| "无法读取相关会话")?;
             for sample in file.samples.iter_mut().chain(&mut file.failures) {
@@ -215,8 +215,8 @@ pub(super) fn refresh(
         "UPDATE usage_request_index SET indexed=?2 WHERE agent=?1",
         params![agent, revision],
     )
-    .map_err(|_| "无法保存请求事件版本")?;
-    tx.commit().map_err(|_| "请求事件索引未能落盘".into())
+    .map_err(|_| "无法保存请求记录版本")?;
+    tx.commit().map_err(|_| "无法提交请求索引".into())
 }
 
 fn update_sources(
@@ -266,14 +266,14 @@ fn update_sources(
     for path in files.keys() {
         let mut stmt = tx
             .prepare_cached("SELECT id FROM usage_request_events WHERE agent=?1 AND source=(SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2)")
-            .map_err(|_| "无法读取原请求事件")?;
+            .map_err(|_| "无法读取原请求记录")?;
         let ids = stmt
             .query_map(params![agent, path.to_string_lossy()], |r| {
                 r.get::<_, String>(0)
             })
-            .map_err(|_| "无法更新请求事件索引")?
+            .map_err(|_| "无法更新请求记录索引")?
             .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(|_| "无法更新请求事件索引")?;
+            .map_err(|_| "无法更新请求记录索引")?;
         obsolete.extend(ids);
         tx.execute(
             "UPDATE usage_ledger_sources SET dirty=0,health=NULL WHERE agent=?1 AND path=?2",
@@ -289,16 +289,16 @@ fn update_sources(
     {
         let mut insert = tx.prepare("INSERT INTO usage_request_events VALUES (?1,?2,?3,?4,?5,?6,?7)
             ON CONFLICT(id) DO UPDATE SET time=excluded.time,model=excluded.model,status=excluded.status,data=excluded.data,source=excluded.source
-            WHERE usage_request_events.data != excluded.data OR usage_request_events.source != excluded.source").map_err(|_| "无法保存请求事件")?;
+            WHERE usage_request_events.data != excluded.data OR usage_request_events.source != excluded.source").map_err(|_| "无法保存请求记录")?;
         for sample in samples.into_iter().filter(|s| {
             s.model != "<synthetic>"
                 && !(s.request.scope.as_deref() == Some("usage_delta") && s.tokens.total() == 0)
         }) {
             if cancel() {
-                return Err("请求事件读取已取消".into());
+                return Err("请求记录读取已取消".into());
             }
             let event = from_sample(agent, sample);
-            let data = serde_json::to_string(&event).map_err(|_| "无法编码请求事件")?;
+            let data = serde_json::to_string(&event).map_err(|_| "无法编码请求记录")?;
             obsolete.remove(&event.id);
             insert
                 .execute(params![
@@ -310,21 +310,21 @@ fn update_sources(
                     data,
                     owner_id
                 ])
-                .map_err(|_| "无法保存请求事件")?;
+                .map_err(|_| "无法保存请求记录")?;
         }
     }
     // 新发现的父历史或明确响应 ID 可能取代旧累计差额。仅清除被归并取代的索引行，
     // 来源删除不会走这条分支：持久账本始终保留先前采集的原始观测。
     for id in obsolete {
         tx.execute("DELETE FROM usage_request_events WHERE id=?1", [id])
-            .map_err(|_| "无法归并请求事件")?;
+            .map_err(|_| "无法归并请求记录")?;
     }
     Ok(())
 }
 
 pub fn read(query: EventQuery, cancel: &dyn Fn() -> bool) -> Result<EventPage, String> {
     if cancel() {
-        return Err("请求事件读取已取消".into());
+        return Err("请求记录读取已取消".into());
     }
     let mut db = super::ledger::reader(&super::ledger::path()?)?;
     page(&mut db, query, cancel)
@@ -340,7 +340,7 @@ pub(super) fn page(
         .as_deref()
         .is_some_and(|a| !super::AGENTS.contains(&a))
     {
-        return Err("不支持的请求事件来源".into());
+        return Err("不支持的请求记录来源".into());
     }
     if query
         .status
@@ -350,17 +350,17 @@ pub(super) fn page(
         return Err("不支持的请求结果筛选".into());
     }
     if query.from.zip(query.to).is_some_and(|(a, b)| a >= b) {
-        return Err("请求事件时间范围无效".into());
+        return Err("请求记录时间范围无效".into());
     }
     if cancel() {
-        return Err("请求事件读取已取消".into());
+        return Err("请求记录读取已取消".into());
     }
     // count、页数据和版本来自同一个读快照；新写入只在下一次查询呈现。
-    let tx = db.transaction().map_err(|_| "无法读取请求事件快照")?;
+    let tx = db.transaction().map_err(|_| "无法读取请求记录快照")?;
     let revision: String = {
         let mut stmt = tx
             .prepare("SELECT agent,indexed FROM usage_request_index ORDER BY agent")
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(format!(
@@ -369,9 +369,9 @@ pub(super) fn page(
                     r.get::<_, i64>(1)?
                 ))
             })
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?
             .join("|")
     };
     let models = {
@@ -414,8 +414,8 @@ pub(super) fn page(
             params_from_iter(&values),
             |r| r.get(0),
         )
-        .map_err(|_| "无法读取请求事件数量")?;
-    let total = u64::try_from(total).map_err(|_| "请求事件数量无效")?;
+        .map_err(|_| "无法读取请求记录数量")?;
+    let total = u64::try_from(total).map_err(|_| "请求记录数量无效")?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let pages = total.div_ceil(u64::from(limit)).max(1);
     let mut page = query.page.unwrap_or(1).clamp(1, pages);
@@ -449,17 +449,17 @@ pub(super) fn page(
             .prepare(&format!(
                 "SELECT data FROM usage_request_events WHERE {filter} ORDER BY time DESC,id DESC LIMIT ? OFFSET ?"
             ))
-            .map_err(|_| "无法读取请求事件")?;
+            .map_err(|_| "无法读取请求记录")?;
         let rows = stmt
             .query_map(params_from_iter(&values), |r| r.get::<_, String>(0))
-            .map_err(|_| "无法读取请求事件")?;
+            .map_err(|_| "无法读取请求记录")?;
         for row in rows {
             if cancel() {
-                return Err("请求事件读取已取消".into());
+                return Err("请求记录读取已取消".into());
             }
             events.push(
-                serde_json::from_str(&row.map_err(|_| "无法读取请求事件")?)
-                    .map_err(|_| "请求事件索引损坏，请刷新重建")?,
+                serde_json::from_str(&row.map_err(|_| "无法读取请求记录")?)
+                    .map_err(|_| "请求索引损坏，请重试同步")?,
             );
         }
     }

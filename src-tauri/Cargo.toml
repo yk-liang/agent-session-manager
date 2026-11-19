@@ -1,7 +1,7 @@
 [package]
 name = "agent-session-manager"
 version = "0.1.39"
-description = "多 CLI Agent 会话管理 GUI（Qoder / Claude Code / Codex / OpenCode / Pi）"
+description = "Browse AI coding sessions, manage configuration profiles, and track token usage on macOS."
 authors = ["Agent Session Manager contributors"]
 license = "MIT"
 edition = "2021"

@@ -53,14 +53,14 @@ try {
   await errorPanel.waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   assert.equal(await failedCards.count(), 1);
-  assert.match(await errorPanel.textContent(), /阶段：open.*系统码：24/s);
+  assert.match(await errorPanel.textContent(), /阶段：open.*系统错误码：24/s);
   await errorPanel.getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: session_detail'));
   assert.equal(await copied(), await page.evaluate(() => window.__DIAGNOSTICS__.failure('session_detail')));
   await card('bbbb').click();
   await page.waitForFunction(() => document.querySelectorAll('.read-error-badge').length === 2);
-  await page.locator('.catalog-warnings').getByText('本次扫描有 1 条告警', { exact: true }).waitFor();
-  assert.match(await page.locator('.catalog-warnings').textContent(), /告警条数不代表全部不可读会话/);
+  await page.locator('.catalog-warnings').getByText('1 条读取提示', { exact: true }).waitFor();
+  assert.match(await page.locator('.catalog-warnings').textContent(), /部分会话未能读取/);
   for (const width of [960, 1280]) {
     await page.setViewportSize({ width, height: 800 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
@@ -72,29 +72,29 @@ try {
   assert.equal(await failedCards.count(), 0);
   await chooseAgent(page, 'qoder');
   assert.equal(await failedCards.count(), 2);
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试扫描', exact: true }).click();
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试扫描', exact: true }).waitFor();
+  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).click();
+  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).waitFor();
   assert.equal(await failedCards.count(), 2, 'successful cached catalog refresh must not erase body failures');
   await card('aaaa').click();
   await errorPanel.waitFor();
   await page.evaluate(() => window.__DIAGNOSTICS__.readable.push('aaaa'));
-  await errorPanel.getByRole('button', { name: '重试读取', exact: true }).click();
+  await errorPanel.getByRole('button', { name: '重试', exact: true }).click();
   await page.getByText('Recovered aaaa', { exact: true }).waitFor();
   assert.equal(await failedCards.count(), 1, 'successful retry clears only its own failure');
   console.log(`PASS: cached summaries retain multiple body failures; scan warning count, exact copy, Agent isolation and retry are correct (${engine})`);
 
   await page.evaluate(() => { window.__DIAGNOSTICS__.contentBroken = 'bbbb'; });
   await card('bbbb').click();
-  await errorPanel.getByText('会话内容解析失败', { exact: true }).waitFor();
-  assert.match(await errorPanel.textContent(), /阶段：parse_json.*系统码：none/s);
+  await errorPanel.getByText('无法解析会话正文', { exact: true }).waitFor();
+  assert.match(await errorPanel.textContent(), /阶段：parse_json.*系统错误码：none/s);
   await page.evaluate(() => { const s = window.__DIAGNOSTICS__; s.contentBroken = null; s.readable.push('bbbb'); s.partial = true; });
-  await errorPanel.getByRole('button', { name: '重试读取', exact: true }).click();
+  await errorPanel.getByRole('button', { name: '重试', exact: true }).click();
   await page.getByText('Recovered bbbb', { exact: true }).waitFor();
   await page.locator('.detail-warnings').getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('stage: parse_json'));
   assert.match(await copied(), /line: 2/);
   await page.evaluate(() => { window.__DIAGNOSTICS__.partial = false; });
-  await page.locator('.detail-warnings').getByRole('button', { name: '重试读取', exact: true }).click();
+  await page.locator('.detail-warnings').getByRole('button', { name: '重试', exact: true }).click();
   await page.getByText('Recovered bbbb', { exact: true }).waitFor();
   assert.equal(await page.locator('.detail-warnings').count(), 0);
   console.log(`PASS: invalid content has a distinct error; partial content keeps a copyable warning and can recover (${engine})`);
@@ -103,7 +103,7 @@ try {
   const usageError = page.locator('.usage-sync-error');
   await usageError.waitFor();
   assert.match(await usageError.textContent(), /已保存记录仍可查看/);
-  assert.match(await usageError.textContent(), /阶段：open.*类型：PermissionDenied.*系统码：13/s);
+  assert.match(await usageError.textContent(), /阶段：open.*类型：PermissionDenied.*系统错误码：13/s);
   await usageError.getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: usage_sync'));
   assert.match(await copied(), /cause: Permission denied \(os error 13\)/);
@@ -128,8 +128,8 @@ try {
 
   // Replay the reported cold-start shape: every file fails open and no summary is available.
   await page.goto(`${baseURL}?catalog=failed`);
-  await page.locator('.catalog-warnings').getByText('本次扫描有 283 条告警', { exact: true }).waitFor();
-  assert.doesNotMatch(await page.locator('.sidebar').textContent(), /0 个会话|未发现会话/, 'failed reads must not imply an empty history');
+  await page.locator('.catalog-warnings').getByText('283 条读取提示', { exact: true }).waitFor();
+  assert.doesNotMatch(await page.locator('.sidebar').textContent(), /0 个会话|暂无会话/, 'failed reads must not imply an empty history');
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /会话数量暂不可确认/);
   assert.match(await page.locator('.session-cards').textContent(), /会话列表读取不完整/);
   assert.doesNotMatch(await page.locator('.session-cards').textContent(), /没有匹配的会话/);
@@ -137,14 +137,14 @@ try {
   await page.screenshot({ path: path.join(artifactDir, 'catalog-all-unreadable.png') });
 
   await page.evaluate(() => { window.__DIAGNOSTICS__.catalogMode = 'recovered'; });
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试扫描', exact: true }).click();
+  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).click();
   await card('aaaa').waitFor();
   assert.equal(await page.locator('.catalog-warnings').count(), 0);
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /2 个会话/);
   assert.doesNotMatch(await page.locator('.sidebar').textContent(), /暂不可确认|读取不完整/);
 
   await page.goto(`${baseURL}?catalog=empty`);
-  await page.locator('.sidebar').getByText('未发现会话', { exact: true }).waitFor();
+  await page.locator('.sidebar').getByText('暂无会话', { exact: true }).waitFor();
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /0 个会话/);
   assert.equal(await page.locator('.catalog-warnings').count(), 0);
   assert.deepEqual(pageErrors, []);

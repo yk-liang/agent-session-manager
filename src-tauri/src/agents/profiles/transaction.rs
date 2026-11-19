@@ -744,7 +744,7 @@ where
         journal.phase = Phase::Publishing;
         persist(&journal_path, &journal)?;
         checkpoint(Event::Prepared)?;
-        // 先发布全部新文件，再执行回收站；全部完成以前不删除任何原始暂存。
+        // 先发布全部新文件，再执行废纸篓；全部完成以前不删除任何原始暂存。
         let order: Vec<_> = (0..slots.len())
             .filter(|i| slots[*i].1.is_some())
             .chain((0..slots.len()).filter(|i| slots[*i].1.is_none()))

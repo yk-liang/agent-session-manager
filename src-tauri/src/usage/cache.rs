@@ -67,7 +67,7 @@ pub(super) struct FileCache {
     pub pending: bool,
     pub state: ParserState,
     pub samples: Vec<Sample>,
-    /// 没有 usage 的失败记录也需要保留，但不参与 token 汇总。
+    /// 保留缺少用量的失败记录，汇总时跳过其计量。
     #[serde(default)]
     pub failures: Vec<Sample>,
     pub problem: Option<String>,

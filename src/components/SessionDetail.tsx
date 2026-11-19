@@ -82,7 +82,7 @@ function LongText({ text, query = "", code = false, markdown = false }: { text: 
   const displayed = (start > 0 ? "…" : "") + visible + (!complete ? "…" : "");
   return <><MessageText text={displayed} query={query} markdown={markdown}
     fallback={code ? <pre className="code">{displayed}</pre> : undefined} />
-    {!complete && <button className="expand-text" onClick={() => setLimit(Math.max(limit + 15000, start + limit + 15000))}>展开更多</button>}
+    {!complete && <button className="expand-text" onClick={() => setLimit(Math.max(limit + 15000, start + limit + 15000))}>显示更多</button>}
   </>;
 }
 function ToolContent({ block, input = false, onResolved }: { block: ContentBlock; input?: boolean; onResolved?: (block: ContentBlock) => void }) {
@@ -104,7 +104,6 @@ function ToolContent({ block, input = false, onResolved }: { block: ContentBlock
   }, [block, state, attempt, onResolved]);
   if (error) return <div role="alert">{error} <button onClick={() => { setError(""); setAttempt((n) => n + 1); }}>重试</button></div>;
   if (!loaded) return <div className="tool-loading" role="status">加载中…</div>;
-  // 仅展开后序列化，折叠状态不创建格式化后的大字符串。
   const text = input ? JSON.stringify(loaded.input, null, 2) ?? "" : resultText(loaded);
   return <LongText text={text} code markdown={!input && state.markdown} />;
 }
@@ -151,7 +150,7 @@ function ToolCard({ b, result }: { b: ContentBlock; result?: ContentBlock }) {
       kind="tool"
       error={b.status === "error" || status?.is_error}
       persistKey={`tool:${b.id ?? b.name}`}
-      label={`工具调用 · ${b.name ?? "?"}${stateLabel ? ` · ${stateLabel}` : ""}`}
+      label={`工具调用 · ${b.name ?? "未知工具"}${stateLabel ? ` · ${stateLabel}` : ""}`}
     >
       <div className="tool-section-title">输入</div>
       <ToolContent block={b} input />
@@ -240,14 +239,13 @@ function EventView({
     );
   }
 
-  // assistant
-  const raw = ev.message?.content;
-  const c: ContentBlock[] =
-    typeof raw === "string" ? [{ type: "text", text: raw }] : contentBlocks(raw);
-  if (c.length === 0) return null;
+  const content = ev.message?.content;
+  const blocks: ContentBlock[] =
+    typeof content === "string" ? [{ type: "text", text: content }] : contentBlocks(content);
+  if (blocks.length === 0) return null;
   return (
     <>
-      {c.map((b, i) => {
+      {blocks.map((b, i) => {
         if (b.type === "thinking" && b.thinking) {
           if (!showThinking) return null;
           const preview = b.thinking.replace(/\s+/g, " ").slice(0, 60);
@@ -367,10 +365,8 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
     if (index === null) return;
     markdownAnchor.current = null;
     virtual.measure();
-    // 先让虚拟列表重建空缓存对应的布局，再恢复已挂载行，避免把旧布局当作已测量值。
     virtual.getVirtualItems();
-    // 清空缓存后，尺寸未变化的已挂载行不会触发 ResizeObserver；必须立即恢复它们的真实高度。
-    // 只测量可见行与少量预渲染行，避免折叠卡片长期停在 120px 估值上。
+    // 尺寸未变的已挂载行不会触发 ResizeObserver，清空缓存后要重新测量。
     bodyRef.current?.querySelectorAll<HTMLElement>(".event-group[data-index]").forEach((row) => {
       virtual.resizeItem(Number(row.dataset.index), row.getBoundingClientRect().height);
     });
@@ -387,7 +383,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
     const generation = ++navigation.current;
     setJumpTarget(idx);
     virtual.scrollToIndex(position, { align: "start" });
-    // 先让虚拟行挂载并测量，再按高亮的实际位置校正；目录和全文搜索共用此路径。
+    // 等虚拟行和 Markdown 挂载后，再滚到实际匹配位置。
     let frames = 0;
     const settle = () => {
       if (navigation.current !== generation) return;
@@ -410,16 +406,16 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
   }, [meta.sessionId, meta.projectDir]);
   useEffect(() => {
     if (!searchTarget) return;
-    if (hitIndex < 0) { toast("会话内容已变化，未找到匹配位置，请重新搜索。", true); return; }
+    if (hitIndex < 0) { toast("找不到原来的匹配内容，请重新搜索。", true); return; }
     jumpTo(hitIndex);
   }, [hitIndex, searchTarget, jumpTo, toast, renderMarkdown]);
 
   return (
     <DetailState.Provider value={state}><div className="detail">
       <div className="detail-header">
-        <div className="detail-title">{meta.title || "(无标题)"}</div>
+        <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
-          <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="点击复制完整会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
+          <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
@@ -440,7 +436,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
           )}
         </div>
       </div>
-      {detail.warnings?.length ? <ReadDiagnostics className="detail-warnings" title="部分会话内容未能读取" errors={detail.warnings} description="当前显示可读取的内容。" retry={onRetryRead} /> : null}
+      {detail.warnings?.length ? <ReadDiagnostics className="detail-warnings" title="部分会话内容无法读取" errors={detail.warnings} retry={onRetryRead} /> : null}
       <div className="detail-content">
         <div className="detail-body" ref={bodyRef}>
           <div className="virtual-events" style={{ height: virtual.getTotalSize() }}>
@@ -461,16 +457,16 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
           </div>
           {visible.length === 0 && (
             <div className="empty-hint">
-              {hasContext && !showContext ? "暂无对话正文，可勾选“上下文”查看运行记录" : detail.events.length > 0
-                ? "当前显示选项下没有消息" : meta.hasTranscript
-                ? "该会话暂无消息记录"
-                : "这是一个空壳目录：qoder 启动或 /resume 时创建的占位会话，没有对话记录，可安全删除"}
+              {hasContext && !showContext ? "启用「上下文」可查看运行记录。" : detail.events.length > 0
+                ? "当前筛选条件下没有消息" : meta.hasTranscript
+                ? "此会话暂无消息"
+                : "此会话没有对话记录"}
             </div>
           )}
         </div>
         {toc.length > 1 && (
           <nav className="toc">
-            <div className="toc-title">对话导览 · {toc.length} 条指令</div>
+            <div className="toc-title">对话导览 · {toc.length} 条用户消息</div>
             {toc.map((t, n) => (
               <button key={t.idx} className="toc-item" onClick={() => jumpTo(t.idx)} title={t.text}>
                 <span className="toc-num">{n + 1}</span>

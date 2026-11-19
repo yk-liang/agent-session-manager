@@ -51,7 +51,7 @@ export default function Sidebar({
             </div>
           </button>
         ))}
-        {projects.length === 0 && <div className="empty-hint">{catalogIncomplete ? "会话列表读取不完整，请重试扫描" : "未发现会话"}</div>}
+        {projects.length === 0 && <div className="empty-hint">{catalogIncomplete ? "会话列表读取不完整" : "暂无会话"}</div>}
       </div>
     </aside>
   );

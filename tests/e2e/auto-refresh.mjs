@@ -71,7 +71,7 @@ try {
     const state = window.__AUTO_TEST__; state.rows.qoder[0].realUserCount = 8; state.rows.qoder[0].lastTs = "2026-10-19T00:00:00Z";
     for (let i = 0; i < 1000; i++) state.changed();
   });
-  await page.waitForFunction(() => document.querySelector(".session-card")?.textContent.includes("9 条对话"), undefined, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector(".session-card")?.textContent.includes("9 条消息"), undefined, { timeout: 8000 });
   assert.equal(await count(), before + 1);
   assert.equal(await page.locator(".detail-title").textContent(), "Existing Qoder session");
   pass("continuing a session updates its count/time and a burst of 1000 events causes one scan without replacing the open detail");

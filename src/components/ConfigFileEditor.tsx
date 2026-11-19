@@ -24,7 +24,7 @@ export default function ConfigFileEditor({
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  // 编辑开始时冻结基线。其他文件保存触发的重新读取，不得替换这份草稿的版本。
+  // 保留编辑开始时的文件版本，避免重新读取后覆盖外部修改。
   const baseline = useRef({ content: file.content, revision: file.revision });
   const [validation, setValidation] = useState<ConfigValidation>(
     file.validation,
@@ -106,7 +106,6 @@ export default function ConfigFileEditor({
       setEditing(false);
       await onSaved(file.key, draft);
     } catch (e) {
-      // 拒绝覆盖时保留完整草稿，用户可复制后重新读取磁盘内容。
       setError(String(e));
     } finally {
       setSaving(false);
@@ -130,7 +129,7 @@ export default function ConfigFileEditor({
           <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
           <strong>{file.label}</strong>
           {!file.present && (
-            <span className="config-badge muted">尚未创建</span>
+            <span className="config-badge muted">未创建</span>
           )}
           {dirty && <span className="config-badge amber">未保存</span>}
           <span className="config-line-count">
@@ -198,7 +197,7 @@ export default function ConfigFileEditor({
                     gutterRef.current.scrollTop = e.currentTarget.scrollTop;
                 }}
               >
-                {text || "尚无配置内容"}
+                {text || "暂无内容"}
               </pre>
             )}
           </div>

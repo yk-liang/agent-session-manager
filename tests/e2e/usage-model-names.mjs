@@ -95,9 +95,9 @@ try {
   await chooseAgent(page, 'qoder');
   await rowLabel(primaryId).filter({ hasText: primaryName }).waitFor();
   await page.locator('.usage-models .model-label').filter({ hasText: primaryName }).waitFor();
-  const filter = page.getByRole('combobox', { name: '统计模型', exact: true });
+  const filter = page.getByRole('combobox', { name: '模型', exact: true });
   const search = page.getByRole('combobox', { name: '搜索模型', exact: true });
-  const list = await openDropdown(page, '统计模型');
+  const list = await openDropdown(page, '模型');
   const primaryOption = list.locator(`[role="option"][value="${primaryId}"]`);
   assert.equal(await primaryOption.textContent(), primaryName);
   const qwenIcon = await primaryOption.locator('img').getAttribute('src');
@@ -115,7 +115,7 @@ try {
   await search.fill('DOGFOODING');
   assert.deepEqual(await list.getByRole('option').allTextContents(), [primaryName]);
   await search.fill('no-match');
-  await page.getByText('未找到匹配项', { exact: true }).waitFor();
+  await page.getByText('没有匹配项', { exact: true }).waitFor();
   await search.press('Enter');
   assert.equal(await filter.getAttribute('value'), 'all');
   await search.press('Escape');
@@ -128,7 +128,7 @@ try {
   await page.waitForFunction(id => window.__MODEL_NAMES__.calls.some(c => c.cmd === 'read_request_events' && c.args.query.model === id), primaryId);
   assert.equal(await filter.getAttribute('value'), primaryId);
   assert.ok(await filter.evaluate(el => el === document.activeElement));
-  await chooseOption(page, '统计模型', 'all');
+  await chooseOption(page, '模型', 'all');
   await page.getByText('第 1–50 条，共 55 条', { exact: true }).waitFor();
   await table.getByRole('button', { name: '下一页', exact: true }).click();
   await page.getByText('第 51–55 条，共 55 条', { exact: true }).waitFor();
@@ -155,7 +155,7 @@ try {
   await page.evaluate(() => { window.__MODEL_NAMES__.bulk = true; });
   await page.getByRole('button', { name: '用量', exact: true }).click();
   const lastId = 'mode-bulk-269';
-  const bulkList = await openDropdown(page, '统计模型');
+  const bulkList = await openDropdown(page, '模型');
   await bulkList.getByRole('option', { name: `Readable ${lastId}`, exact: true }).waitFor();
   const scrollBefore = await page.locator('.usage-page').evaluate(el => el.scrollTop);
   await search.press('PageDown');

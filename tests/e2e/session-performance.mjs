@@ -30,7 +30,7 @@ try {
   await page.goto(baseURL);
   await page.locator('.session-card').waitFor();
   await page.waitForFunction(()=>window.__PERF__.refining);
-  assert.ok(!(await page.locator('.session-card-sub').textContent()).includes('条对话'));
+  assert.ok(!(await page.locator('.session-card-sub').textContent()).includes('条消息'));
   assert.equal(await page.locator('.session-card .model-label').count(),0);
   const start=Date.now();await page.locator('.session-card').click();
   await page.locator('.event-group').first().waitFor();
@@ -50,7 +50,7 @@ try {
   await page.getByText('result on demand',{exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
   await page.evaluate(()=>window.__PERF__.release());
-  await page.waitForFunction(()=>document.querySelector('.session-card-sub').textContent.includes('条对话'));
+  await page.waitForFunction(()=>document.querySelector('.session-card-sub').textContent.includes('条消息'));
   assert.equal(await page.locator('.session-card .model-label').textContent(),'logged-codex-model');
   await page.getByRole('searchbox').fill('唯一定位针');
   await page.locator('.session-search-snippet').waitFor();await page.locator('.session-card').click();
@@ -59,7 +59,7 @@ try {
   await page.setViewportSize({width:1100,height:700});
   await page.locator('.toc-item').first().click();await page.locator('#ev-0').waitFor();
   await page.locator('.toc-item').last().click();await page.locator('#ev-6003').waitFor();
-  await page.getByRole('button',{name:'展开更多',exact:true}).click();
+  await page.getByRole('button',{name:'显示更多',exact:true}).click();
   assert.ok((await page.locator('#ev-6003').textContent()).includes('结尾'));
   assert.deepEqual(errors,[]);
   console.log(`PASS: historical model in detail and refined card; bounded DOM, deferred tools, persistent expansion, background counts, TOC, resize and long-text search (${engine})`);

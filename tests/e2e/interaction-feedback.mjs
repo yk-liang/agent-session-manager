@@ -108,7 +108,7 @@ try {
   await page.locator('.catalog-error').waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   await page.evaluate(() => { window.__FEEDBACK__.failCatalog = false; });
-  await page.getByRole('button', { name: '重试读取', exact: true }).click();
+  await page.getByRole('button', { name: '重试', exact: true }).click();
   await page.locator('.session-list[aria-busy="false"]').waitFor();
   assert.equal(await page.locator('.catalog-error').count(), 0);
   console.log(`PASS: file changes update sessions without a refresh button; failures preserve data and offer a contextual retry (${engine})`);

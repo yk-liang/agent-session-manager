@@ -30,7 +30,7 @@ test('input and output distinguish unknown, measured zero and a measured lower b
  const unknown={...row('2026-10-21','a',0,0,30),inputRecorded:false,outputRecorded:false,inputIncomplete:true,outputIncomplete:true};
  const zero={...row('2026-10-21','a',0,0),inputRecorded:true,outputRecorded:true,inputIncomplete:false,outputIncomplete:false};
  const known={...zero,inputTokens:100,totalTokens:100};
- assert.equal(formatUsageField(sumTokens([unknown]),'input'),'未提供');
+ assert.equal(formatUsageField(sumTokens([unknown]),'input'),'未记录');
  assert.equal(formatUsageField(sumTokens([zero]),'output'),'0');
  assert.equal(formatUsageField(sumTokens([unknown,known]),'input'),'≥ 100');
  assert.equal(formatUsageField(modelTotals([unknown,known])[0],'output'),'≥ 0');

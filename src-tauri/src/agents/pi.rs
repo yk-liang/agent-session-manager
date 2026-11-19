@@ -6,7 +6,7 @@
 //!   真正的对话 = 从最后一行（叶节点）沿 parentId 回溯
 //! - version 1 是线性顺序
 //! - 标题来自 session_info entry 的 name（最后一个生效），回退首条用户消息
-//! - 无官方删除命令，直接移文件进回收站（校验必须在本目录树内）
+//! - 无官方删除命令，直接移文件进废纸篓（校验必须在本目录树内）
 
 mod context;
 #[cfg(test)]
@@ -133,9 +133,9 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
     let header_line = match lines.next() {
         Some(Ok(l)) => l,
         Some(Err(e)) => {
-            return super::ParseOutcome::Failed(format!("读取 {:?} 首行失败: {e}", path))
+            return super::ParseOutcome::Failed(format!("读取 {:?} 首行失败：{e}", path))
         }
-        None => return super::ParseOutcome::Failed(format!("Pi 会话文件为空: {:?}", path)),
+        None => return super::ParseOutcome::Failed(format!("Pi 会话文件为空：{:?}", path)),
     };
     let header: Value = match serde_json::from_str(header_line.trim()) {
         Ok(v) => v,
@@ -144,7 +144,7 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
         }
     };
     if header.get("type").and_then(Value::as_str) != Some("session") {
-        return super::ParseOutcome::Failed(format!("Pi 会话 header 类型异常: {:?}", path));
+        return super::ParseOutcome::Failed(format!("Pi 会话文件头类型无效：{:?}", path));
     }
     parsed.id = header
         .get("id")
@@ -321,15 +321,15 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
     let mut lines = BufReader::new(file).lines();
     let header_line = match lines.next() {
         Some(Ok(l)) => l,
-        Some(Err(e)) => return Err(format!("读取 {:?} 首行失败: {e}", path)),
-        None => return Err(format!("Pi 会话文件为空: {:?}", path)),
+        Some(Err(e)) => return Err(format!("读取 {:?} 首行失败：{e}", path)),
+        None => return Err(format!("Pi 会话文件为空：{:?}", path)),
     };
     let header: Value = match serde_json::from_str(header_line.trim()) {
         Ok(v) => v,
         Err(_) => return Err(format!("Pi 会话 header 不是合法 JSON: {:?}", path)),
     };
     if header.get("type").and_then(Value::as_str) != Some("session") {
-        return Err(format!("Pi 会话 header 类型异常: {:?}", path));
+        return Err(format!("Pi 会话文件头类型无效：{:?}", path));
     }
     let id = header
         .get("id")
@@ -344,7 +344,7 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
     }
     // 全量复核：任一坏行/读取失败即视为部分损坏，中止删除
     for line in lines {
-        let line = line.map_err(|e| format!("读取 {:?} 失败，无法完成身份复核: {e}", path))?;
+        let line = line.map_err(|e| format!("读取 {:?} 失败，无法完成身份复核：{e}", path))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -359,12 +359,11 @@ fn strict_session_id(path: &Path) -> Result<String, String> {
     Ok(id)
 }
 
-/// 生产环境的移除方式：移入系统回收站
+/// 生产环境的移除方式：移入系统废纸篓
 fn trash_remove(target: PathBuf) -> Result<(), String> {
-    trash::delete_all([target]).map_err(|e| format!("移入回收站失败: {e}"))
+    trash::delete_all([target]).map_err(|e| format!("移入废纸篓失败：{e}"))
 }
 
-/// 删除实现（root 与移除方式均可注入，便于测试）。
 /// Pi 没有删除命令；流程：
 /// 解析匹配（项目 + 会话 ID 都要一致）→ 严格身份复核（只认 header 内嵌 id）
 /// → 根目录/类型校验 → 移除。project_dir 参与匹配，避免不同项目下
@@ -767,7 +766,7 @@ mod tests {
         let error = read_session_in(tmp.path(), "proj", "dup").err().unwrap();
         assert!(
             error.contains("多个"),
-            "损坏副本也必须参与歧义检查: {error}"
+            "损坏副本也必须参与歧义检查：{error}"
         );
     }
 
@@ -802,13 +801,13 @@ mod tests {
             read_error
                 .as_deref()
                 .is_some_and(|error| error.contains("多个")),
-            "读取必须拒绝歧义: {read_error:?}"
+            "读取必须拒绝歧义：{read_error:?}"
         );
         assert!(
             delete_error
                 .as_deref()
                 .is_some_and(|error| error.contains("多个")),
-            "删除必须拒绝歧义: {delete_error:?}"
+            "删除必须拒绝歧义：{delete_error:?}"
         );
         assert!(!removed.get(), "歧义时不得执行删除");
     }

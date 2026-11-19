@@ -318,7 +318,7 @@ impl Ledger {
                 ON CONFLICT(agent) DO UPDATE SET revision=revision+1",
                 [agent],
             )
-            .map_err(|_| "无法更新请求事件版本")?;
+            .map_err(|_| "无法更新请求索引版本")?;
         }
         tx.commit()
             .map_err(|_| "累计用量未能落盘，请检查磁盘空间后重试".to_owned())

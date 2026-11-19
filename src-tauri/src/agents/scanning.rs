@@ -1,4 +1,4 @@
-//! 扫描基础设施：解析结果三态化与 warning-aware 目录遍历。
+//! 会话日志的扫描、读取与诊断。
 
 use serde_json::Value;
 use std::fs;
@@ -17,8 +17,7 @@ pub(crate) fn sqlite_wal_path(path: &Path) -> std::path::PathBuf {
 /// FIFO 的会话文件足以卡死整轮扫描以及无关会话的删除。这里用 O_NONBLOCK
 /// 打开（对普通文件后续读取无影响），再用 fd 元数据复核确为普通文件，
 /// 把 FIFO/目录等特殊文件挡在读取之前（无检查/使用竞态）。
-/// 不加 O_NOFOLLOW：agent 的会话文件可能是 dotfiles 管理的符号链接，
-/// 跟随到普通文件读取是正常预期。
+/// 允许读取指向普通文件的符号链接，以兼容用户管理的日志目录。
 pub fn open_jsonl(path: &Path) -> std::io::Result<fs::File> {
     open_jsonl_with(path, |_, error| error)
 }
@@ -166,13 +165,11 @@ where
     bad_lines
 }
 
-/// Degraded 解析态的统一措辞：有坏行被跳过时提醒会话信息可能不完整
 pub fn degraded_message(path: &Path, bad_lines: u32) -> String {
-    format!("{:?} 有 {bad_lines} 行无法解析，会话信息可能不完整", path)
+    format!("{:?} 有 {bad_lines} 行无法解析，会话可能不完整", path)
 }
 
-/// warning-aware 目录读取：目录本身或个别条目读取失败都记入 warnings，
-/// 只返回成功读到的条目，替代会静默丢弃错误的 read_dir().flatten()。
+/// 返回可读取的目录条目，同时保留目录或条目的读取错误。
 pub fn read_dir_warned(dir: &Path, warnings: &mut Vec<String>) -> Vec<fs::DirEntry> {
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,

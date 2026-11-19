@@ -46,7 +46,7 @@ try {
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('textarea').fill('{"model":"unsaved"}');
   await chooseAgent(page, 'codex');
-  await page.getByRole('dialog', { name: '放弃未保存修改？' }).waitFor();
+  await page.getByRole('dialog', { name: '放弃未保存的修改？' }).waitFor();
   assert.equal(await switcher.getAttribute("value"), 'claude', 'pending navigation must keep the current Agent visible');
   await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
   assert.equal(await page.locator('textarea').inputValue(), '{"model":"unsaved"}');

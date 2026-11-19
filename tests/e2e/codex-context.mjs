@@ -82,7 +82,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.session-card').length === 2);
   const index = fixture.all.sessions.findIndex(s => s.sessionId === 'context-only');
   await page.locator('.session-card').nth(index).click();
-  await page.getByText('暂无对话正文，可勾选“上下文”查看运行记录', { exact: true }).waitFor();
+  await page.getByText('启用「上下文」可查看运行记录。', { exact: true }).waitFor();
   assert.equal(await page.locator('.toc-item').count(), 0);
   await context.check();
   await page.waitForFunction(() => document.querySelectorAll('.collapsible.context').length === 2);

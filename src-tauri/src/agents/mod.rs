@@ -118,7 +118,7 @@ pub struct SessionDetail {
     pub warnings: Vec<String>,
 }
 
-/// 一次扫描得到的完整目录：项目分组 + 全部会话 + 扫描告警
+/// 会话目录快照，包含项目分组、会话摘要和读取告警。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
@@ -142,11 +142,11 @@ pub struct SessionGroupHint {
     pub root: Option<String>,
 }
 
-/// 会话删除的落地方式，决定 UI 措辞与可恢复性
+/// 会话删除策略，决定可用操作和恢复方式。
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DeletePolicy {
-    /// 移入系统回收站，可还原
+    /// 移入系统废纸篓，可还原
     Trash,
     /// 永久删除（如委托官方 CLI 直接改库），不可还原
     Permanent,
@@ -212,9 +212,9 @@ pub struct AgentInfo {
     /// 此数据源可在列表出现后补全/刷新模型名称。
     pub supports_model_names: bool,
     pub supports_fast_catalog: bool,
-    /// 该 agent 的数据目录（用于「打开数据目录」）
+    /// 该 Agent 的数据目录（用于「打开数据目录」）
     pub data_dir: Option<String>,
-    /// 删除会话的落地方式，或标记会话只读。
+    /// 会话删除策略。
     pub delete_policy: DeletePolicy,
 }
 
@@ -244,7 +244,7 @@ impl AgentWatchPaths {
 pub trait AgentSource: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
-    /// 本机是否存在该 agent 的数据目录
+    /// 本机是否存在该 Agent 的数据目录
     fn is_installed(&self) -> bool;
     fn supports_fork(&self) -> bool {
         false
@@ -255,7 +255,7 @@ pub trait AgentSource: Send + Sync {
     fn supports_model_names(&self) -> bool {
         false
     }
-    /// 删除会话的落地方式；默认移入回收站
+    /// 会话删除策略，默认移入废纸篓。
     fn delete_policy(&self) -> DeletePolicy {
         DeletePolicy::Trash
     }
@@ -325,9 +325,9 @@ pub trait AgentSource: Send + Sync {
     ) -> Result<Option<Vec<PathBuf>>, String> {
         Ok(None)
     }
-    /// 生成恢复会话的 shell 命令；None 表示该 agent 不支持恢复
+    /// 生成恢复会话的 shell 命令；None 表示该 Agent 不支持恢复
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String>;
-    /// 该 agent 的配置文件集合（用于配置快照）。
+    /// 该 Agent 的配置文件集合（用于配置快照）。
     /// 空 = 不支持配置快照；凭证/密钥文件一律不纳入。
     fn config_spec(&self) -> Vec<ConfigFile> {
         Vec::new()
@@ -349,7 +349,7 @@ pub fn find_source(id: &str) -> Result<Box<dyn AgentSource>, String> {
     all_sources()
         .into_iter()
         .find(|s| s.id() == id)
-        .ok_or_else(|| format!("未知的 agent: {id}"))
+        .ok_or_else(|| format!("未知 Agent：{id}"))
 }
 
 /// 只接受 Agent 身份，由同一个 Adapter 解析数据根，避免前端传任意打开路径。
@@ -373,7 +373,7 @@ fn existing_directory(path: PathBuf) -> Result<PathBuf, String> {
         .metadata()
         .map_err(|error| format!("无法读取数据目录信息：{error}"))?;
     if !metadata.is_dir() {
-        return Err(format!("数据目录路径不是文件夹：{}", path.display()));
+        return Err(format!("数据目录路径无效（需要文件夹）：{}", path.display()));
     }
     Ok(resolved)
 }
@@ -460,10 +460,10 @@ pub fn run_in_terminal(cmd: &str) -> Result<(), String> {
         .arg("-e")
         .arg(script)
         .output()
-        .map_err(|e| format!("调用 osascript 失败: {e}"))?;
+        .map_err(|e| format!("调用 osascript 失败：{e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "打开终端失败: {}",
+            "打开终端失败：{}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -513,9 +513,9 @@ mod tests {
         );
         let file = fixture.path().join("config.json");
         std::fs::write(&file, "{}").unwrap();
-        assert!(existing_directory(file.clone()).unwrap_err().contains("不是文件夹"));
+        assert!(existing_directory(file.clone()).unwrap_err().contains("需要文件夹"));
         for value in ["unknown", "/tmp", "../codex", file.to_str().unwrap()] {
-            assert!(data_directory(value).unwrap_err().contains("未知的 agent"));
+            assert!(data_directory(value).unwrap_err().contains("未知 Agent"));
         }
     }
 

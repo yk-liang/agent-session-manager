@@ -50,7 +50,7 @@ try {
   await waitTotal('110'); await waitLabel('已统计 Token');
   await coverage.getByText('正在统计 · 已完成 4 / 5 个 Agent', { exact: true }).waitFor();
   assert.match(await coverage.textContent(), /Codex/);
-  assert.equal(await page.locator('.usage-models tfoot th').textContent(), '已统计合计');
+  assert.equal(await page.locator('.usage-models tfoot th').textContent(), '已统计小计');
   for (const width of [960, 1280, 1600]) {
     await page.setViewportSize({ width, height: 900 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

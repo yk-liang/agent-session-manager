@@ -3,14 +3,13 @@ import type { UsageReport, UsageRow, UsageTokens, UsageSummaryQuery, UsageSummar
 export type UsagePeriod = "today" | "week" | "month" | "all";
 export const emptyTokens = (): UsageTokens => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, totalTokens: 0, inputRecorded: false, outputRecorded: false, inputIncomplete: false, outputIncomplete: false, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false });
 export function addTokens(target: UsageTokens, row: UsageTokens) {
-  // 分组对象还带有模型/日期等字段，只累加明确的计量项。
   for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "unclassifiedTokens", "totalTokens"] as const) target[key] += row[key];
   for (const key of ["inputRecorded", "outputRecorded", "inputIncomplete", "outputIncomplete", "cacheReadRecorded", "cacheWriteRecorded", "reasoningRecorded"] as const) target[key] = !!target[key] || !!row[key];
   return target;
 }
 export function formatUsageField(tokens: UsageTokens, field: "input" | "output") {
   const recorded = field === "input" ? tokens.inputRecorded : tokens.outputRecorded;
-  if (!recorded) return "未提供";
+  if (!recorded) return "未记录";
   const incomplete = field === "input" ? tokens.inputIncomplete : tokens.outputIncomplete;
   return `${incomplete ? "≥ " : ""}${formatTokens(field === "input" ? tokens.inputTokens : tokens.outputTokens)}`;
 }
@@ -35,7 +34,7 @@ export function dailySeries(rows: UsageRow[], period: UsagePeriod, now: Date): (
   const byDay = new Map<string, UsageTokens>();
   for (const row of rows) if (row.date) byDay.set(row.date, addTokens(byDay.get(row.date) ?? emptyTokens(), row));
   const cursor = new Date(`${start}T12:00:00`), result: (UsageTokens & { date: string })[] = [];
-  // 使用本地日期递增，夏令时不能按固定 24 小时递增。
+  // 按本地日期推进，避开夏令时的 23 和 25 小时日。
   while (dateKey(cursor) <= end && result.length < 36525) {
     const date = dateKey(cursor); result.push({ date, ...(byDay.get(date) ?? emptyTokens()) }); cursor.setDate(cursor.getDate() + 1);
   }
@@ -79,8 +78,8 @@ export function modelUsageCells(row: ModelUsage): { text: string; title: string 
     count(row.inputTokens, row.inputRecorded, row.inputIncomplete, "Token"),
     count(row.outputTokens, row.outputRecorded, row.outputIncomplete, "Token"),
     count(row.cacheReadTokens, row.cacheReadRecorded, row.cacheReadIncomplete, "Token"),
-    { text: rate == null ? "—" : `${rate.toFixed(2)}%`, title: rate == null ? "输入或缓存记录不足，无法计算" : "缓存读取 ÷ 输入（输入含缓存）" },
-    { text: cost, title: row.costUsd == null ? "日志未记录成本" : `${row.costIncomplete ? "仅部分请求记录成本；" : ""}已记录 ${row.costUsd.toFixed(6)} USD` },
+    { text: rate == null ? "—" : `${rate.toFixed(2)}%`, title: rate == null ? "输入或缓存读取量不足，无法计算缓存率" : "缓存读取 ÷ 输入（输入含缓存）" },
+    { text: cost, title: row.costUsd == null ? "日志未记录成本" : `${row.costIncomplete ? "部分请求未记录成本。" : ""}已记录 ${row.costUsd.toFixed(6)} USD` },
   ];
 }
 export function formatTokens(value: number, compact = false) {

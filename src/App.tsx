@@ -32,10 +32,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("sessions");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [catalogCache] = useState(() => new AgentCatalogCache(api.catalog, api.resolveModelNames));
-  // 初始为 null：等 agent 列表返回再定默认值，
-  // 避免未安装 Qoder 的用户在启动时发出一次必然失败的请求
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  // “全部”仅是用量范围；返回会话或配置时保留最近选择的本地 Agent。
+  // 用量可查看全部 Agent，会话和配置保留当前 Agent。
   const [usageAgent, setUsageAgent] = useState("all");
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
@@ -52,7 +50,7 @@ export default function App() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogWarnings, setCatalogWarnings] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState(false);
-  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+  const [checkedSessionKeys, setCheckedSessionKeys] = useState<Set<string>>(new Set());
   const [deletion, setDeletion] = useState<DeletionState | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
   const deletionRunning = useRef(false);
@@ -63,11 +61,10 @@ export default function App() {
   pauseAutoRefreshRef.current = pauseAutoRefresh;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
-  // 详情请求代次：切换 agent/项目时递增，过期响应直接丢弃，
-  // 防止旧 agent 的慢请求返回后把详情渲染到新 agent 上
-  const detailGen = useRef(0);
-  const clearDetail = useCallback(() => {
-    detailGen.current++;
+  // 切换会话或离开当前项目后，丢弃尚未返回的正文请求。
+  const detailRequestGeneration = useRef(0);
+  const closeSessionDetail = useCallback(() => {
+    detailRequestGeneration.current++;
     setDetail(null);
     setReadRequest(null);
     setSearchTarget(null);
@@ -97,7 +94,7 @@ export default function App() {
     window.addEventListener("beforeunload", beforeUnload);
     const unlisten = isTauri() ? listen("config-exit-requested", () => {
       const activity = configActivityRef.current;
-      if (activity.busy) { showToast("配置操作正在处理中，请完成后再退出。", true); return; }
+      if (activity.busy) { showToast("配置操作仍在进行，请稍后退出。", true); return; }
       const exit = () => { void api.confirmConfigExit().catch((e) => showToast(String(e), true)); };
       if (activity.dirty) setConfigNavigation({ label: "退出应用", action: exit }); else exit();
     }) : null;
@@ -106,7 +103,7 @@ export default function App() {
 
   const protectConfig = (action: () => void, label: string) => {
     const activity = configActivityRef.current;
-    if (tab === "config" && activity.busy) { showToast("配置操作正在处理中，请稍后再试。", true); return; }
+    if (tab === "config" && activity.busy) { showToast("配置操作仍在进行，请稍后重试。", true); return; }
     if (tab === "config" && activity.dirty) { setConfigNavigation({ label, action }); return; }
     action();
   };
@@ -132,7 +129,7 @@ export default function App() {
   const supportsFastCatalog = currentAgent?.supportsFastCatalog ?? false;
 
   const clearBatchSelection = () => {
-    setCheckedKeys(new Set());
+    setCheckedSessionKeys(new Set());
     setBatchFailures([]);
   };
 
@@ -163,7 +160,6 @@ export default function App() {
     setGroupHints(new Map((cat.sessionGroupHints ?? []).map((hint) => [sessionKey(hint), hint.root])));
   }, []);
 
-  // 切回先展示该 Agent 自己的快照；后台刷新与名称补全各自完成，不等待外部 CLI。
   useEffect(() => {
     if (!selectedAgent || tab !== "sessions") {
       setLoading(false);
@@ -193,7 +189,7 @@ export default function App() {
         if (!cancelled) {
           displayCatalog(cat);
           const available = new Set(cat.sessions.map(sessionKey));
-          setCheckedKeys((keys) => new Set([...keys].filter((key) => available.has(key))));
+          setCheckedSessionKeys((keys) => new Set([...keys].filter((key) => available.has(key))));
         }
         if (!cancelled && supportsFastCatalog && cat.sessions.some((s) => s.statsPending)) {
           const generation = api.nextRefinementGeneration();
@@ -203,14 +199,14 @@ export default function App() {
               if (pauseAutoRefreshRef.current) { scheduler.request("focus"); return; }
               displayCatalog(refined);
             })
-            .catch(() => { /* 首屏仍可打开；下一次日志变化或刷新会重试摘要。 */ });
+            .catch(() => { /* 下次刷新会重试会话摘要。 */ });
         }
         void catalogCache.enrich(selectedAgent, showEmpty, supportsModelNames).then((enriched) => {
           if (cancelled || !enriched) return;
           displayCatalog(enriched);
-        }).catch(() => { /* 名称补全失败保留原始模型标识，下一次刷新可重试。 */ });
+        }).catch(() => { /* 下次刷新会重试模型名称查询。 */ });
         if (!cancelled) setLoading(false);
-        // 首屏已可操作；调度器仍等待统计完成，把这段 I/O 计入自动刷新的时间预算。
+        // 调度器将摘要读取时间计入刷新预算。
         await refinement;
       } catch (e) {
         if (!cancelled) setCatalogError(String(e));
@@ -220,7 +216,7 @@ export default function App() {
       }
     };
     const stopObserving = observeSessionChanges(selectedAgent, scheduler, () => {
-      if (!cancelled) showToast("自动监听暂不可用，切回应用时会再次检查更新。", true);
+      if (!cancelled) showToast("暂时无法监测会话更新。切回应用时会重试。", true);
     });
     void reload();
     return () => {
@@ -238,10 +234,10 @@ export default function App() {
     if (deletionActive || deletionRunning.current || id === selectedAgent) return;
     clearBatchSelection();
     setBatchMode(false);
-    clearDetail();
+    closeSessionDetail();
     setSelectedAgent(id);
     setSelectedProject(null);
-    // 与 Agent 选择一起切换数据，任何一帧都不能把旧 Agent 的卡片当成新 Agent 操作。
+    // 切换 Agent 时立即替换列表，避免操作其他 Agent 的会话。
     applyCatalog(catalogCache.peek(id, showEmpty) ?? EMPTY_CATALOG);
   };
 
@@ -259,7 +255,7 @@ export default function App() {
     if (deletionActive || deletionRunning.current) return;
     clearBatchSelection();
     setBatchMode(false);
-    clearDetail();
+    closeSessionDetail();
     setSelectedProject(dirName);
   };
 
@@ -268,12 +264,11 @@ export default function App() {
   const hiddenPathKeys = useMemo(() => new Set(sessions.filter((session) => sessionGroup(session, projectlessIds, groupHints) === PROJECTLESS_GROUP).map(sessionKey)), [sessions, projectlessIds, groupHints]);
   useEffect(() => {
     if (tab !== "sessions" || loading || deletionActive || selectedProject === null || sidebarGroups.some((group) => group.dirName === selectedProject)) return;
-    // 归属刷新后分组可能消失，回到全部会话，避免停在没有侧栏入口的空筛选中。
-    clearDetail();
+    closeSessionDetail();
     setSelectedProject(null);
     setBatchMode(false);
-    setCheckedKeys(new Set());
-  }, [sidebarGroups, selectedProject, loading, deletionActive, tab, clearDetail]);
+    setCheckedSessionKeys(new Set());
+  }, [sidebarGroups, selectedProject, loading, deletionActive, tab, closeSessionDetail]);
   const contentSearch = useConversationSearch(selectedAgent, search.trim(), scopedSessions, tab === "sessions" && !loading);
 
   const filtered = useMemo(() => {
@@ -286,15 +281,14 @@ export default function App() {
     });
   }, [scopedSessions, search, contentSearch.hits]);
 
-  const selectedKey = detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null;
+  const selectedSessionKey = detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null;
 
   const openSession = async (s: SessionMeta) => {
     if (!selectedAgent || deletionActive || batchMode || deletionRunning.current) return;
-    const gen = ++detailGen.current;
+    const generation = ++detailRequestGeneration.current;
     const agentId = selectedAgent;
     const hit = contentSearch.hits.get(sessionKey(s));
     const target = hit ? { ...hit, query: search.trim() } : null;
-    // 选择变化后旧详情立即不可操作（删除/恢复/分叉按钮随之卸载）
     setDetail(null);
     setReadRequest(current => ({
       session: s, pending: true,
@@ -302,7 +296,7 @@ export default function App() {
     }));
     try {
       const d = await api.readSession(agentId, s.projectDir, s.sessionId);
-      if (gen !== detailGen.current) return;
+      if (generation !== detailRequestGeneration.current) return;
       catalogCache.setReadError(agentId, s, null);
       const cached = catalogCache.peek(agentId, showEmpty);
       if (cached) applyCatalog(cached);
@@ -310,7 +304,7 @@ export default function App() {
       setSearchTarget(target);
       setDetail({ ...d, meta: catalogCache.withNames(agentId, d.meta) });
     } catch (e) {
-      if (gen !== detailGen.current) return;
+      if (generation !== detailRequestGeneration.current) return;
       const error = String(e);
       catalogCache.setReadError(agentId, s, error);
       const cached = catalogCache.peek(agentId, showEmpty);
@@ -321,7 +315,7 @@ export default function App() {
 
   const toggleBatch = () => {
     if (deletionActive || loading || deletionRunning.current) return;
-    clearDetail();
+    closeSessionDetail();
     setBatchMode(!batchMode);
     clearBatchSelection();
   };
@@ -329,7 +323,7 @@ export default function App() {
   const toggleSession = (session: SessionMeta) => {
     if (deletionActive || loading) return;
     const key = sessionKey(session);
-    setCheckedKeys((current) => {
+    setCheckedSessionKeys((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -339,8 +333,8 @@ export default function App() {
 
   const toggleAll = () => {
     if (deletionActive || loading) return;
-    const allSelected = filtered.every((s) => checkedKeys.has(sessionKey(s)));
-    setCheckedKeys(allSelected ? new Set() : new Set(filtered.map(sessionKey)));
+    const allSelected = filtered.every((s) => checkedSessionKeys.has(sessionKey(s)));
+    setCheckedSessionKeys(allSelected ? new Set() : new Set(filtered.map(sessionKey)));
   };
 
   const requestDeletion = (target: SessionDeleteTarget) => {
@@ -353,7 +347,7 @@ export default function App() {
 
   const requestBatchDelete = () => {
     if (loading) return;
-    const targets = new Map(filtered.filter((s) => checkedKeys.has(sessionKey(s))).map((s) => [sessionKey(s), s]));
+    const targets = new Map(filtered.filter((s) => checkedSessionKeys.has(sessionKey(s))).map((s) => [sessionKey(s), s]));
     requestDeletion({ mode: "batch", sessions: [...targets.values()] });
   };
 
@@ -378,15 +372,15 @@ export default function App() {
         if (batch) setDeletion({ phase: "running", progress: { completed: succeeded.length + failures.length, total } });
       }
       if (succeeded.length) {
-        if (succeeded.some((session) => sessionKey(session) === selectedKey)) clearDetail();
+        if (succeeded.some((session) => sessionKey(session) === selectedSessionKey)) closeSessionDetail();
         catalogCache.remove(agent.id, succeeded);
         applyCatalog(catalogCache.peek(agent.id, showEmpty) ?? EMPTY_CATALOG);
       }
-      const action = agent.deletePolicy === "trash" ? "移入回收站" : "永久删除";
+      const action = agent.deletePolicy === "trash" ? "移入废纸篓" : "永久删除";
       if (batch) {
-        setCheckedKeys(new Set(failures.map(({ session }) => sessionKey(session))));
+        setCheckedSessionKeys(new Set(failures.map(({ session }) => sessionKey(session))));
         setBatchFailures(failures);
-        showToast(`已${action} ${succeeded.length} 个会话${failures.length ? `，${failures.length} 个失败，可重试` : ""}`, failures.length > 0);
+        showToast(`已${action} ${succeeded.length} 个会话${failures.length ? `，${failures.length} 个未删除` : ""}`, failures.length > 0);
       } else if (failures.length) {
         showToast(failures[0].error, true);
       } else {
@@ -423,7 +417,7 @@ export default function App() {
             <button
               className="button-with-icon"
               onClick={() =>
-                api.openDataDir(currentAgent.id).catch((e) => showToast(`打开数据目录失败: ${e}`, true))
+                api.openDataDir(currentAgent.id).catch((e) => showToast(`无法打开数据目录：${e}`, true))
               }
               title={`在访达中打开 ${currentAgent.displayName} 数据目录`}
             >
@@ -445,7 +439,7 @@ export default function App() {
           />}
           sessionList={<SessionList
             sessions={filtered}
-            selectedKey={selectedKey}
+            selectedSessionKey={selectedSessionKey}
             search={search}
             onSearch={changeSearch}
             onSelect={openSession}
@@ -455,7 +449,7 @@ export default function App() {
             agent={currentAgent}
             onRequestDelete={requestSessionDelete}
             toast={showToast}
-            checkedKeys={checkedKeys}
+            checkedSessionKeys={checkedSessionKeys}
             onToggleBatch={toggleBatch}
             onToggleSession={toggleSession}
             onToggleAll={toggleAll}
@@ -491,15 +485,14 @@ export default function App() {
             <div className="detail-read-state" aria-busy={readRequest.pending}>
               {readRequest.error ? <ReadDiagnostics
                 className="session-read-error"
-                title={/^stage: (parse_json|decode_utf8)$/m.test(readRequest.error) ? "会话内容解析失败" : "正文读取失败"}
+                title={/^stage: (parse_json|decode_utf8)$/m.test(readRequest.error) ? "无法解析会话正文" : "无法读取会话正文"}
                 errors={[readRequest.error]}
-                description="当前列表保留的是会话摘要，正文未能读取。"
                 retry={() => void openSession(readRequest.session)}
                 busy={readRequest.pending}
               /> : <p role="status">正在读取会话…</p>}
             </div>
           ) : (
-            <div className="placeholder">选择一个会话查看详情</div>
+            <div className="placeholder">选择会话查看详情</div>
           )}
         </ResizableLayout>
       ) : tab === "config" ? (
@@ -515,12 +508,12 @@ export default function App() {
               onActivityChange={onConfigActivity}
             />
           ) : (
-            <div className="placeholder">选择一个 Agent 查看配置</div>
+            <div className="placeholder">选择 Agent 查看配置</div>
           )}
         </main>
       ) : <UsagePanel agents={agents} agent={usageAgent} />}
 
-      {configNavigation && <ConfirmDialog title="放弃未保存修改？" message={`继续${configNavigation.label}会放弃尚未写入文件的草稿。你也可以取消，返回编辑器保存。`} confirmLabel="放弃修改并继续" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
+      {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}会丢失未保存的修改。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;
         setConfigNavigation(null); action();
       }} />}

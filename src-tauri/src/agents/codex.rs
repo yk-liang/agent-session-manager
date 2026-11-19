@@ -543,8 +543,7 @@ fn read_rollout(
         }
     }
 
-    // 不用文件名兜底生成 ID：缺少有效 session_meta（含内容损坏）即解析失败。
-    // 删除路径按解析出的 ID 匹配，绝不能信任文件名推导的身份
+    // 会话 ID 必须来自 session_meta，删除时也以该身份为准。
     if parsed.session_id.is_empty() {
         return super::ParseOutcome::Failed(format!(
             "rollout 缺少有效 session_meta，无法解析会话 ID: {:?}",
@@ -676,7 +675,6 @@ fn is_relevant_session(p: &ParsedRollout) -> bool {
     source_ok && thread_ok
 }
 
-/// catalog 实现，root 可注入（见 all_rollouts_in）
 fn catalog_in(root: &Path, include_empty: bool) -> Result<super::Catalog, String> {
     catalog_with(root, include_empty, false, &|| false)
 }
@@ -785,9 +783,9 @@ fn read_session_mode(
     Ok(detail)
 }
 
-/// 生产环境的移除方式：移入系统回收站
+/// 生产环境的移除方式：移入系统废纸篓
 fn trash_remove(targets: Vec<PathBuf>) -> Result<(), String> {
-    trash::delete_all(targets).map_err(|e| format!("移入回收站失败: {e}"))
+    trash::delete_all(targets).map_err(|e| format!("移入废纸篓失败：{e}"))
 }
 
 /// 删除前的两轮扫描都必须证明身份集合完整；不可读文件不能按“无关”跳过。
@@ -838,8 +836,7 @@ fn same_rollout_identity(a: &ParsedRollout, b: &ParsedRollout) -> bool {
         && a.thread_source == b.thread_source
 }
 
-/// 删除实现（root 与移除方式均可注入，便于测试）。
-/// 仅允许单文件或已证明属于同一分页链的整组文件；全部复核完成后一次移入回收站。
+/// 仅允许单文件或已证明属于同一分页链的整组文件；全部复核完成后一次移入废纸篓。
 fn delete_session_with(
     root: &Path,
     project_dir: &str,
@@ -993,7 +990,6 @@ mod tests {
 
     #[test]
     fn config_spec_resolves_config_toml_under_codex_home() {
-        // 单一 config.toml，路径由 codex_home() 解析（尊重 CODEX_HOME）
         let spec = CodexSource.config_spec();
         assert_eq!(spec.len(), 1);
         assert_eq!(spec[0].key, "config.toml");
@@ -1282,7 +1278,7 @@ mod tests {
 
     /// 集成测试：注入临时目录作为会话根，走完 catalog/read/delete 全链路。
     /// 不用环境变量、不读写真实 ~/.codex；tempdir 退出即清理，
-    /// panic 也不会留下副作用；删除走注入的 remove，不碰真实回收站
+    /// panic 也不会留下副作用；删除走注入的 remove，不碰真实废纸篓
     #[test]
     fn integration_full_flow_with_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1356,7 +1352,6 @@ mod tests {
         assert!(cmd.contains("resume"));
         assert!(cmd.contains(&id_main));
 
-        // 删除全链路：注入的 remove 只作用于临时目录内
         delete_session_with(&root, &project_id, &id_main, |paths| {
             paths
                 .into_iter()
@@ -1587,9 +1582,9 @@ mod tests {
         for f in &files {
             let (parsed, _) = parse_rollout(f, false).split();
             let Some(p) = parsed else {
-                panic!("真实 rollout 应可解析: {f:?}");
+                panic!("真实 rollout 应可解析：{f:?}");
             };
-            assert!(!p.session_id.is_empty(), "session_id 为空: {f:?}");
+            assert!(!p.session_id.is_empty(), "session_id 为空：{f:?}");
             let meta = to_meta(&p, thread_names.get(&p.session_id));
             assert!(meta.title.is_none() || !meta.title.as_deref().unwrap().is_empty());
         }
