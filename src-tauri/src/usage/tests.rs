@@ -884,7 +884,7 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
         db.execute("INSERT INTO session_v2(id,directory,version,time_created,time_updated) VALUES (?1,'/tmp/v2','2.0.15',?2,?2)",rusqlite::params![id,created]).unwrap();
     }
     let usage = json!({"input":100,"output":10,"reasoning":3,"cache":{"read":20,"write":5}});
-    let data = json!({"model":{"id":"v2-model","providerID":"provider"},"agent":"build","time":{"created":time},"tokens":usage,
+    let data = json!({"model":{"modelID":"v2-model","providerID":"provider"},"agent":"build","time":{"created":time},"tokens":usage,
         "content":[{"type":"text","text":"PRIVATE_V2_BODY_NOT_IN_USAGE"}]});
     let insert = |id: &str, session: &str, kind: &str, seq: i64, data: &Value| {
         db.execute(
@@ -924,20 +924,18 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(scan("opencode", dir.path(), &mut store).bytes_read, 0);
     let (cached, _) = opencode::read(&path, None, false, &|| false).unwrap();
-    assert_eq!(cached.parser_version, 4);
+    assert_eq!(cached.parser_version, opencode::PARSER_VERSION);
     assert!(!serde_json::to_string(&cached)
         .unwrap()
         .contains("PRIVATE_V2"));
-    let mut legacy_cache = cached.clone();
-    legacy_cache.parser_version = 2;
-    legacy_cache.samples.clear();
-    assert!(
-        !opencode::read(&path, Some(&legacy_cache), false, &|| false)
-            .unwrap()
-            .0
-            .samples
-            .is_empty()
-    );
+    let mut legacy_cache = cached;
+    legacy_cache.parser_version = 4;
+    for sample in &mut legacy_cache.samples {
+        sample.model = "provider/unknown".into();
+    }
+    let (updated, bytes_read) = opencode::read(&path, Some(&legacy_cache), false, &|| false).unwrap();
+    assert!(bytes_read > 0);
+    assert!(updated.samples.iter().any(|sample| sample.model == "provider/v2-model"));
     db.execute("UPDATE session_message SET data=json_set(data,'$.tokens.output',20) WHERE id='msg_original'",[]).unwrap();
     assert_eq!(total(&scan("opencode", dir.path(), &mut store)), 160);
     let mut new_call = data.clone();

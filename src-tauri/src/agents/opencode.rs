@@ -17,18 +17,12 @@ mod storage;
 #[cfg(test)]
 mod v2_tests;
 
-pub(crate) fn usage_model_names(ids: &[String]) -> std::collections::HashMap<String, String> {
-    let names = models::names();
-    ids.iter()
-        .filter_map(|id| names.get(id).map(|name| (id.clone(), name.clone())))
-        .collect()
-}
-
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
+pub(crate) use models::model_id;
 
 fn data_home() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
@@ -511,7 +505,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
         });
     };
     super::check_catalog_cancelled(cancelled)?;
-    let historical_models = models::latest(&conn, None, &mut warnings);
+    let mut historical_models = models::latest(&conn, None, &mut warnings);
     let mut missing_id = 0u32;
     let mut items = Vec::new();
     for row in rows {
@@ -560,9 +554,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
             &mut warnings,
         );
         let Some(mut meta) = meta else { continue };
-        if let Some(model) = historical_models.get(&row.id) {
-            model.apply(&mut meta);
-        }
+        meta.model = historical_models.remove(&row.id);
         let mut wal = path.as_os_str().to_os_string();
         wal.push("-wal");
         meta.source_files = vec![path.to_path_buf(), PathBuf::from(wal)];
@@ -621,9 +613,7 @@ fn read_session_mode_at(
     });
     let mut meta =
         build_meta(conn, &row, counts, true, &mut warnings).ok_or("未找到该 OpenCode 会话")?;
-    if let Some(model) = models::latest(conn, Some(session_id), &mut warnings).get(session_id) {
-        model.apply(&mut meta);
-    }
+    meta.model = models::latest(conn, Some(session_id), &mut warnings).remove(session_id);
     let (events, issues) = events::read(conn, path, session_id, view)?;
     warnings.extend(issues);
     Ok(SessionDetail {
@@ -639,7 +629,6 @@ fn search_events_at(path: &Path, meta: &SessionMeta) -> Result<Vec<Value>, Strin
     }
     let db = open_db_scoped(path, Some(&meta.session_id))?;
     let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    // 只读取目标身份和有序事件；不重算标题、计数或查询模型目录。
     let (row, mut warnings) = session_row(&snapshot, &meta.session_id)?;
     let directory = row
         .directory
@@ -699,12 +688,7 @@ impl AgentSource for OpenCodeSource {
         include_empty: bool,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
-        let mut catalog = cached_catalog(&db_path(), include_empty, cancelled)?;
-        let names = models::names();
-        for meta in &mut catalog.sessions {
-            models::decorate_meta(meta, &names);
-        }
-        Ok(catalog)
+        cached_catalog(&db_path(), include_empty, cancelled)
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
         token
@@ -716,14 +700,10 @@ impl AgentSource for OpenCodeSource {
         _project_dir: &str,
         session_id: &str,
     ) -> Result<SessionDetail, String> {
-        let mut detail = read_session_mode_at(&db_path(), session_id, true)?;
-        models::decorate_detail(&mut detail, &models::names());
-        Ok(detail)
+        read_session_mode_at(&db_path(), session_id, true)
     }
     fn read_session(&self, _project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
-        let mut detail = read_session_at(&db_path(), session_id)?;
-        models::decorate_detail(&mut detail, &models::names());
-        Ok(detail)
+        read_session_at(&db_path(), session_id)
     }
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         search_events_at(&db_path(), meta)
@@ -814,7 +794,6 @@ fn build_meta(
         cwd: row.directory.clone(),
         title,
         model: None,
-        model_name: None,
         version: row.version.clone(),
         git_branch: None,
         entrypoint: None,

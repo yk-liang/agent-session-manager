@@ -31,7 +31,6 @@ pub struct RequestEvent {
     pub time: i64,
     pub session: String,
     pub model: String,
-    pub model_name: String,
     pub status: String,
     pub partial: bool,
     #[serde(flatten)]
@@ -44,7 +43,6 @@ pub struct RequestEvent {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventPage {
-    pub models: Vec<String>,
     pub events: Vec<RequestEvent>,
     pub total: u64,
     pub page: u64,
@@ -96,7 +94,6 @@ pub(super) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent {
         agent: agent.into(),
         time: s.request.started_at.unwrap_or(s.timestamp),
         session: s.session,
-        model_name: s.model.clone(),
         model: s.model,
         status,
         partial: s.partial,
@@ -374,19 +371,6 @@ pub(super) fn page(
             .map_err(|error| format!("无法读取请求记录版本：{error}"))?
             .join("|")
     };
-    let models = {
-        let mut statement = tx.prepare("SELECT DISTINCT model FROM usage_request_events
-            WHERE (?1 IS NULL OR agent=?1) AND (?2 IS NULL OR time>=?2) AND (?3 IS NULL OR time<?3) ORDER BY model")
-            .map_err(|_| "无法读取请求模型")?;
-        let models = statement
-            .query_map(params![query.agent, query.from, query.to], |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|_| "无法读取请求模型")?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "无法读取请求模型")?;
-        models
-    };
     let mut predicates = vec!["1=1".to_owned()];
     let mut values = Vec::<rusqlite::types::Value>::new();
     for (column, value) in [
@@ -469,6 +453,5 @@ pub(super) fn page(
         page,
         page_size: limit,
         revision,
-        models,
     })
 }

@@ -167,7 +167,6 @@ pub(super) struct HistoryBase {
 pub struct UsageRow {
     pub date: String,
     pub model: String,
-    pub model_name: String,
     #[serde(flatten)]
     pub tokens: Tokens,
     #[serde(flatten)]

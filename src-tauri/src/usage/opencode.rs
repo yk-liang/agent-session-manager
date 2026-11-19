@@ -3,6 +3,7 @@ use super::{
     parse::{normalize, recorded_fields, timestamp},
     types::*,
 };
+use crate::agents::opencode::{model_id, open_db};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const PARSER_VERSION: u8 = 4;
+pub(super) const PARSER_VERSION: u8 = 5;
 
 pub(super) fn read(
     path: &Path,
@@ -23,7 +24,7 @@ pub(super) fn read(
     if !force && old.is_some_and(|old| old.problem.is_none() && old.stamps == stamps) {
         return Ok((old.unwrap().clone(), 0));
     }
-    let conn = crate::agents::opencode::open_db(path)?;
+    let conn = open_db(path)?;
     conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
     let has_sessions = conn
         .prepare("SELECT id,time_created FROM session LIMIT 0")
@@ -36,7 +37,7 @@ pub(super) fn read(
         "NULL"
     };
     let query = format!("SELECT id,session_id,time_created,json_object(
-        'modelID',json_extract(data,'$.modelID'),'providerID',json_extract(data,'$.providerID'),
+        'modelID',json_extract(data,'$.modelID'),'providerID',json_extract(data,'$.providerID'),'model',json_extract(data,'$.model'),
         'completed',json_extract(data,'$.time.completed'),'finish',json_extract(data,'$.finish'),
         'failed',json_extract(data,'$._asm_failed')=1 OR (json_type(data,'$.error') IS NOT NULL AND json_type(data,'$.error') != 'null'),
         'cost',json_extract(data,'$.cost'),'created',json_extract(data,'$.time.created'),'agent',json_extract(data,'$.agent'),
@@ -74,11 +75,7 @@ pub(super) fn read(
             result.state.missing_usage += 1;
             continue;
         };
-        let model = v["modelID"].as_str().unwrap_or("unknown");
-        let model = v["providerID"]
-            .as_str()
-            .map(|p| format!("{p}/{model}"))
-            .unwrap_or_else(|| model.into());
+        let model = model_id(&v).unwrap_or_else(|| "unknown".into());
         let created = timestamp(v.get("created"));
         let copy_fingerprint = created.map(|time| {
             format!(

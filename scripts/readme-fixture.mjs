@@ -37,7 +37,7 @@ const events = requestDays.map(({ day, slot }, i) => {
   const costUsd = agent === 'codex' ? null : Math.round((inputTokens * 0.000003 + outputTokens * 0.000015) * 1e6) / 1e6;
   return {
     id: `demo-request-${String(i).padStart(4, '0')}`, agent, time,
-    session: sessionId(i % titles.length), model: models[agent], modelName: models[agent],
+    session: sessionId(i % titles.length), model: models[agent],
     status: 'success', partial: false, inputTokens, outputTokens, cacheReadTokens,
     cacheWriteTokens: 0, reasoningTokens: agent === 'codex' ? Math.floor(outputTokens * 0.35) : 0,
     unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true,
@@ -63,8 +63,8 @@ const configFile = {
 
 export const screenshotFixture = {
   agents: Object.entries(names).map(([id, displayName]) => ({
-    id, displayName, installed: true, supportsFork: id === 'codex', supportsModelNames: false,
-    supportsFastCatalog: false, dataDir: `/Users/demo/.${id}`, deletePolicy: id === 'opencode' ? 'permanent' : 'trash',
+    id, displayName, installed: true, supportsFork: id === 'codex',
+    dataDir: `/Users/demo/.${id}`, deletePolicy: id === 'opencode' ? 'permanent' : 'trash',
   })),
   catalog: {
     sessions, warnings: [],
@@ -102,7 +102,6 @@ export function installScreenshotFixture(fixture) {
       case 'catalog': return fixture.catalog;
       case 'read_session': return { meta: fixture.catalog.sessions.find(s => s.sessionId === args.sessionId), events: fixture.conversation };
       case 'get_config_workspace': return fixture.workspace;
-      case 'resolve_model_names': return Object.fromEntries(args.models.map(model => [model, model]));
       case 'collector_status': return { desired: false, running: false, authorization: 'signingRequired' };
       case 'sync_request_events': return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
       case 'read_usage_summary': {
@@ -123,7 +122,7 @@ export function installScreenshotFixture(fixture) {
         const scoped = fixture.events.filter(e => (!q.agent || q.agent === e.agent) && (q.from == null || e.time >= q.from) && (q.to == null || e.time < q.to));
         const filtered = scoped.filter(e => (!q.model || q.model === e.model) && (!q.status || q.status === e.status));
         const pageSize = q.limit ?? 50, page = q.page ?? 1;
-        return { events: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize, revision: 'demo-1', models: [...new Set(scoped.map(e => e.model))] };
+        return { events: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize, revision: 'demo-1' };
       }
       case 'plugin:event|listen': return 1;
       case 'plugin:event|unlisten':
@@ -131,7 +130,7 @@ export function installScreenshotFixture(fixture) {
       case 'cancel_usage':
       case 'cancel_usage_summary':
       case 'cancel_request_events':
-      case 'cancel_catalog_refinement':
+      case 'cancel_catalog':
       case 'cancel_conversation_search':
       case 'set_config_guard': return null;
       default: throw Error(`Unexpected screenshot command: ${command}`);

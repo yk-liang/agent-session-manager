@@ -7,7 +7,7 @@ fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let id = args
         .first()
-        .expect("qoder_metadata <session-id> [expected-title] [expected-model-name]");
+        .expect("qoder_metadata <session-id> [expected-title] [expected-model]");
     let source = agents::find_source("qoder").unwrap();
     let catalog = source.catalog(false).expect("Catalog read failed");
     let sessions: Vec<_> = catalog
@@ -21,8 +21,6 @@ fn main() {
         "Requested session must be present and unambiguous"
     );
     let session = sessions[0];
-    let names = source.resolve_model_names(&session.model.iter().cloned().collect::<Vec<_>>());
-    let name = session.model.as_ref().and_then(|model| names.get(model));
     let detail = source
         .read_session(&session.project_dir, id)
         .expect("Session detail read failed");
@@ -38,11 +36,11 @@ fn main() {
         assert_eq!(session.title.as_ref(), Some(expected));
     }
     if let Some(expected) = args.get(2) {
-        assert_eq!(name, Some(expected));
+        assert_eq!(session.model.as_ref(), Some(expected));
     }
     println!(
         "{}",
         serde_json::json!({"sessionId":session.session_id,"title":session.title,
-        "model":session.model,"modelName":name,"catalogWarnings":catalog.warnings.len(),"detailWarnings":detail.warnings.len()})
+        "model":session.model,"catalogWarnings":catalog.warnings.len(),"detailWarnings":detail.warnings.len()})
     );
 }

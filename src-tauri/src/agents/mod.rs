@@ -75,9 +75,6 @@ pub struct SessionMeta {
     pub title: Option<String>,
     /// 会话记录中的模型标识；Qoder 取最后一次运行配置，不以全局默认模型覆盖。
     pub model: Option<String>,
-    /// 数据源确认的可读名称；缺失时由界面显示原始标识。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
     pub version: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
@@ -209,8 +206,6 @@ pub struct AgentInfo {
     pub supports_fork: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_entrypoint: Option<&'static str>,
-    /// 此数据源可在列表出现后补全/刷新模型名称。
-    pub supports_model_names: bool,
     /// 该 Agent 的数据目录（用于「打开数据目录」）
     pub data_dir: Option<String>,
     /// 会话删除策略。
@@ -261,9 +256,6 @@ pub trait AgentSource: Send + Sync {
     fn resume_entrypoint(&self) -> Option<&'static str> {
         None
     }
-    fn supports_model_names(&self) -> bool {
-        false
-    }
     /// 会话删除策略，默认移入废纸篓。
     fn delete_policy(&self) -> DeletePolicy {
         DeletePolicy::Trash
@@ -306,10 +298,6 @@ pub trait AgentSource: Send + Sync {
         session_id: &str,
     ) -> Result<SessionDetail, String> {
         self.read_session(project_dir, session_id)
-    }
-    /// 可选的外部模型名称补全。与目录扫描分开调用，不阻塞会话列表。
-    fn resolve_model_names(&self, _ids: &[String]) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String>;
     /// 使用目录扫描时确认的定位信息读取正文，避免逐会话重新遍历全部数据目录。
@@ -399,7 +387,6 @@ pub fn list_agents() -> Vec<AgentInfo> {
             installed: s.is_installed(),
             supports_fork: s.supports_fork(),
             resume_entrypoint: s.resume_entrypoint(),
-            supports_model_names: s.supports_model_names(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
             delete_policy: s.delete_policy(),
         })

@@ -37,7 +37,7 @@ try {
   },fixture);
   await page.goto(baseURL);
   await page.locator('.session-card .model-label').waitFor();
-  assert.equal(await page.locator('.session-card .model-label').textContent(),'Model Beta');
+  assert.equal(await page.locator('.session-card .model-label').textContent(),'fixture/model-b');
   await page.locator('.session-card').click();
   await page.getByRole('button',{name:/^工具调用 · read.*已完成$/}).waitFor();
   const ids=await page.locator('.event-group').evaluateAll(rows=>rows.map(el=>Number(el.id.slice(3))));
@@ -45,12 +45,12 @@ try {
   assert.ok(ids.indexOf(1)<ids.indexOf(2)&&ids.indexOf(2)<ids.indexOf(3)&&ids.indexOf(3)<ids.indexOf(5));
   assert.ok((await page.locator('#ev-0').textContent()).includes('First request\ncontinued request'));
   assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
-  assert.equal(await page.locator('#ev-1').getAttribute('title'),'模型：Model Alpha\n模型 ID：fixture/model-a');
+  assert.equal(await page.locator('#ev-1').getAttribute('title'),'模型：fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   const info=page.getByRole('group',{name:'会话信息',exact:true});
   assert.equal(await info.locator('dt').first().textContent(),'最近模型');
-  assert.equal(await info.locator('.model-label').first().textContent(),'Model Beta');
-  assert.equal(await info.locator('.session-model-history .model-label').textContent(),'Model Alpha');
+  assert.equal(await info.locator('.model-label').first().textContent(),'fixture/model-b');
+  assert.equal(await info.locator('.session-model-history .model-label').textContent(),'fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   console.log(`PASS: latest model badge, provider-scoped history and per-message model hints (${engine})`);
   console.log(`PASS: source part order, grouped user prompt and folded tools/reasoning (${engine})`);

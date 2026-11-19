@@ -4,7 +4,7 @@ import type { AgentInfo, ConversationSearchHit, SessionDeleteFailure, SessionMet
 import { ChevronRight, Search, X } from "lucide-react";
 import UiIcon from "./UiIcon";
 import { formatSize, relativeTime, sessionKey, shortPath } from "../utils";
-import SessionModel from "./SessionModel";
+import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
@@ -186,7 +186,7 @@ export default function SessionList({
                 <span className="session-card-badges">
                   {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}
                   {isEmpty && <span className="badge empty-badge">空会话</span>}
-                  <SessionModel session={s} badge />
+                  <ModelLabel model={s.model} badge />
                   {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
                 </span>
               </>

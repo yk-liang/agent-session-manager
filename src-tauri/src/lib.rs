@@ -246,14 +246,6 @@ async fn read_tool_payload(token: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn resolve_model_names(agent: String, models: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
-    if models.len() > 256 || models.iter().any(|id| id.len() > 512 || id.chars().any(char::is_control)) {
-        return Err("模型标识数量或长度超出限制".into());
-    }
-    run_backend(move || Ok(agents::find_source(&agent)?.resolve_model_names(&models))).await
-}
-
-#[tauri::command]
 async fn watch_sessions(app: tauri::AppHandle, state: tauri::State<'_, session_watch::SessionWatcher>,
     agent: Option<String>, generation: u64) -> Result<(), String> {
     let watcher = state.inner().clone();
@@ -531,7 +523,6 @@ pub fn run() {
             collector_status,
             set_collector_enabled,
             open_collector_settings,
-            resolve_model_names,
             watch_sessions,
             search_conversations,
             cancel_conversation_search,

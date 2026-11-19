@@ -10,7 +10,7 @@ import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPrefe
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
 import { fullTime, sessionKey } from "../utils";
-import { historicalModels, eventModelTitle } from "../sessionModels";
+import { historicalModels, eventModelTitle } from "../models";
 import ReadDiagnostics from "./ReadDiagnostics";
 
 interface Props {

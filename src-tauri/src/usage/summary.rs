@@ -175,32 +175,7 @@ pub fn read(query: SummaryQuery, cancel: &dyn Fn() -> bool) -> Result<Summary, S
         return Err("用量查询已取消".into());
     }
     let mut db = super::ledger::reader(&super::ledger::path()?)?;
-    let mut result = read_at(&mut db, query, cancel)?;
-    drop(db);
-    // 名称补全只看此次查询涉及的模型，不再次读取计量日志。
-    for agent in ["qoder", "opencode"] {
-        let ids = result
-            .rows
-            .iter()
-            .filter(|r| r.agent == agent)
-            .map(|r| r.usage.model.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if ids.is_empty() {
-            continue;
-        }
-        let names = match agent {
-            "qoder" => crate::agents::qoder::usage_model_names(&ids),
-            _ => crate::agents::opencode::usage_model_names(&ids),
-        };
-        for row in result.rows.iter_mut().filter(|r| r.agent == agent) {
-            if let Some(name) = names.get(&row.usage.model) {
-                row.usage.model_name = name.clone();
-            }
-        }
-    }
-    Ok(result)
+    read_at(&mut db, query, cancel)
 }
 
 #[allow(dead_code)] // 供隔离目录下的 usage_perf 示例复测，GUI 使用独立只读连接。
@@ -395,11 +370,6 @@ pub(super) fn read_at(
             bucket_start,
             usage: UsageRow {
                 date,
-                model_name: if model == "unknown" {
-                    "未知模型".into()
-                } else {
-                    model.clone()
-                },
                 model,
                 total_tokens: group.tokens.total(),
                 tokens: group.tokens,

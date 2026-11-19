@@ -56,9 +56,9 @@ function addModelUsage(target: ModelUsage, row: ModelUsageRow) {
 }
 export function sumModelUsage(rows: ModelUsageRow[]): ModelUsage { return rows.reduce(addModelUsage, emptyModelUsage()); }
 export function modelTotals(rows: ModelUsageRow[]) {
-  const models = new Map<string, ModelUsage & { model: string; modelName: string }>();
+  const models = new Map<string, ModelUsage & { model: string }>();
   for (const row of rows) {
-    const value = models.get(row.model) ?? { ...emptyModelUsage(), model: row.model, modelName: row.modelName };
+    const value = models.get(row.model) ?? { ...emptyModelUsage(), model: row.model };
     addModelUsage(value, row); models.set(row.model, value);
   }
   return [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model));

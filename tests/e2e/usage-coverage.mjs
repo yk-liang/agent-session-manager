@@ -13,7 +13,7 @@ try {
     const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
     const state = window.__COVERAGE__ = { synced: [], calls: [], holdAgent: 'codex', failAgent: null, release: null, holdSummary: false, releaseSummary: null };
     const row = (agent, input) => ({
-      agent, model: `${agent}-fixture`, modelName: `${agent}-fixture`, date: '', bucketStart: Date.now() - 1000,
+      agent, model: `${agent}-fixture`, date: '', bucketStart: Date.now() - 1000,
       inputTokens: input, outputTokens: input / 10, totalTokens: input * 1.1, cacheReadTokens: 0, cacheWriteTokens: 0,
       reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true,
       cacheReadRecorded: true, cacheWriteRecorded: false, reasoningRecorded: false,
@@ -22,7 +22,7 @@ try {
     });
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
-      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }));
+      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, deletePolicy: 'trash' }));
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
       if (cmd === 'sync_request_events') {
@@ -36,7 +36,7 @@ try {
         if (state.holdSummary) { state.holdSummary = false; await new Promise(resolve => state.releaseSummary = resolve); }
         return result;
       }
-      if (cmd === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
+      if (cmd === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
     } };
   });

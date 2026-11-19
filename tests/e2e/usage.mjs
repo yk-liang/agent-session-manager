@@ -29,7 +29,7 @@ try {
   const state = window.__USAGE__ = { fixture, calls: [], syncRounds: 0, holdSync: true, syncResolvers: [], releaseSync: null, holdSummary: null, releaseSummary: null, failSync: null, failSummary: false, collector: { desired: false, running: false, authorization: 'disabled' } };
   window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
    state.calls.push({ cmd, args });
-   if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, dataDir: null, deletePolicy: 'trash' }));
+   if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, dataDir: null, deletePolicy: 'trash' }));
    if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
    if (cmd === 'collector_status') return structuredClone(state.collector);
    if (cmd === 'set_collector_enabled') { state.collector = { desired: args.enabled, running: args.enabled, authorization: args.enabled ? 'enabled' : 'disabled' }; return structuredClone(state.collector); }
@@ -101,7 +101,7 @@ try {
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), ['2','300','30','0','0.00%','—']);
  await chooseOption(page, '模型', 'claude-fixture'); await waitTotal('330');
  await selectAgent('Claude Code');
- assert.equal(await page.getByLabel('模型').getAttribute('value'), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
+ assert.equal(await page.getByRole('combobox', { name: '模型', exact: true }).getAttribute('value'), 'claude-fixture', 'clicking the selected Agent must preserve model selection');
  assert.equal(await page.getByRole('combobox', { name: '当前 Agent', exact: true }).getAttribute("value"), 'claude');
  await selectAgent('全部 Agent');
  for (const [label, count] of [['近 7 天', 7], ['近 30 天', 30]]) {
@@ -187,7 +187,7 @@ try {
  await page.evaluate(() => {
   const summary = window.__USAGE__.fixture.summaries.today, base = summary.rows[0];
   summary.rows = Array.from({ length: 10 }, (_, i) => ({ ...base,
-   model: `provider/model-${i + 1}-with-a-long-name-for-layout-check`, modelName: `provider/model-${i + 1}-with-a-long-name-for-layout-check`,
+   model: `provider/model-${i + 1}-with-a-long-name-for-layout-check`,
    inputTokens: (i + 1) * 100_000_000, outputTokens: (i + 1) * 10_000, totalTokens: (i + 1) * 100_010_000,
    cacheReadTokens: (i + 1) * 90_000_000, requestCount: (i + 1) * 100, costUsd: i === 0 ? 0.000001 : (i + 1) * 0.5, costIncomplete: false,
   }));

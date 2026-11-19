@@ -4,7 +4,6 @@ import { ChevronDown, LoaderCircle } from "lucide-react";
 import * as api from "../api";
 import { AutoRefreshScheduler } from "../autoRefresh";
 import { useDelayedBusy } from "../useDelayedBusy";
-import { useUsageModelNames } from "../useUsageModelNames";
 import { observeSessionChanges } from "../sessionWatch";
 import { dateKey, formatTokens, formatUsageField, modelTotals, modelUsageCells, sumModelUsage, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
 import type { AgentInfo, UsageSummary, UsageSyncProgress } from "../types";
@@ -12,7 +11,8 @@ import CollectorControl from "./CollectorControl";
 import RequestEvents from "./RequestEvents";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
-import { ModelLabel } from "./SessionModel";
+import { modelText } from "../models";
+import ModelLabel from "./ModelLabel";
 import { ModelIcon } from "./BrandIcon";
 import Dropdown from "./Dropdown";
 import ReadDiagnostics from "./ReadDiagnostics";
@@ -119,9 +119,7 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
       .finally(() => { if (!disposed) setQueryLoading(false); });
     return () => { disposed = true; void api.cancelUsageSummary().catch(() => {}); };
   }, [queryKey, eventsRevision]);
-  const sourceRows = (summary?.rows ?? []).filter(row => agent === "all" || row.agent === agent);
-  const { modelLabel, onEventModels } = useUsageModelNames(agents, sourceRows, eventsRevision);
-  const scopedRows = sourceRows.map(row => ({ ...row, modelName: modelLabel(row.agent, row.model, row.modelName) }));
+  const scopedRows = (summary?.rows ?? []).filter(row => agent === "all" || row.agent === agent);
   const rows = scopedRows.filter(r => model === "all" || r.model === model);
   const totals = sumTokens(rows);
   const selectedAgents = agents.filter(a => agent === "all" || a.id === agent);
@@ -136,12 +134,11 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
   const partial = scopedHealth.some(h => h.partial) || rows.some(r => r.partial) || !!queryError ||
     agents.some(a => (agent === "all" || a.id === agent) && syncErrors.has(a.id));
   const allModels = modelTotals(scopedRows);
+  const modelIds = allModels.map(row => row.model);
+  if (model !== "all" && !modelIds.includes(model)) modelIds.unshift(model);
   const options = [{ id: "all", name: "全部模型" },
-    ...allModels.map(({ model: id, modelName: name }) => ({ id, name, icon: <ModelIcon id={id} name={name} /> })),
+    ...modelIds.map(id => ({ id, name: modelText(id), icon: <ModelIcon id={id} /> })),
   ];
-  if (model !== "all" && !allModels.some(row => row.model === model)) {
-    options.splice(1, 0, { id: model, name: model, icon: <ModelIcon id={model} /> });
-  }
   const models = model === "all" ? allModels : modelTotals(rows);
   const series = usageSeries(rows, period, now);
   const value = (number: number) => canShowUsage ? formatTokens(number) : "—";
@@ -191,7 +188,7 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
       <section className="usage-section usage-trend"><h2>{period === "today" ? "每小时趋势" : "每日趋势"}<small className="usage-time-basis">{incomplete && "已统计 · "}请求时间 · 本地时区</small></h2>
         {canShowUsage ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{queryError ? "无法读取趋势" : importing ? "正在同步历史用量…" : incomplete ? "用量尚未统计完成" : "所选时段暂无记录"}</div>}
       </section>
-      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={importing} modelLabel={modelLabel} onModels={onEventModels} />
+      <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={importing} />
       <div className="usage-breakdowns">
         <section className="usage-section usage-models"><h2>按模型<HelpTip label="模型统计">
           输入含缓存，缓存率为缓存读取量占输入量的比例。
@@ -200,7 +197,7 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
           {models.length > 0 ? <><div className="usage-model-table-scroll" tabIndex={0} role="region" aria-label="按模型用量明细"><table>
             <colgroup>{[24, 10, 13, 13, 14, 11, 15].map((width, i) => <col key={i} style={{ width: `${width}%` }} />)}</colgroup>
             <thead><tr>{["模型", "请求", "输入", "输出", "缓存读取", "缓存率", "成本 (USD)"].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead><tbody>
-              {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><th scope="row"><ModelLabel id={m.model} name={m.modelName} /></th>{modelUsageCells(m).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr>)}
+              {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><th scope="row"><ModelLabel model={m.model} /></th>{modelUsageCells(m).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr>)}
             </tbody><tfoot><tr><th scope="row">{incomplete ? "已统计小计" : "合计"}</th>{modelUsageCells(sumModelUsage(rows)).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr></tfoot>
           </table></div>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">{queryError ? "无法读取模型用量" : importing ? "等待历史用量同步" : incomplete ? "模型用量尚未统计完成" : "暂无模型用量"}</div>}
         </section>

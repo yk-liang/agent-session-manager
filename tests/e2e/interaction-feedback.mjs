@@ -23,7 +23,7 @@ try {
       if (command === 'plugin:event|listen') { const id = ++state.listenerId; state.listeners[id] = args; return id; }
       if (command === 'plugin:event|unlisten') { delete state.listeners[args.eventId]; return null; }
       if (command === 'watch_sessions') { if (args.generation >= state.watch.generation) state.watch = args; return null; }
-      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }];
+      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, deletePolicy: 'trash' }];
       if (command === 'catalog') {
         ++state.catalogs;
         if (state.holdCatalog) await new Promise(resolve => state.releaseCatalog = resolve);
@@ -43,9 +43,9 @@ try {
         state.synced = true;
         return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
       }
-      if (command === 'read_usage_summary') return { rows: state.total ? [{ agent: 'claude', model: 'fixture', modelName: 'fixture', date: '', bucketStart: args.query.bounds[0] ?? null,
+      if (command === 'read_usage_summary') return { rows: state.total ? [{ agent: 'claude', model: 'fixture', date: '', bucketStart: args.query.bounds[0] ?? null,
         inputTokens: state.total, outputTokens: 0, totalTokens: state.total, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false, partial: false }] : [], health: {}, syncedAgents: state.synced ? ['claude'] : [], revision: '1' };
-      if (command === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
+      if (command === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
     } };
   });

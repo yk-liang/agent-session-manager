@@ -638,7 +638,6 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         cwd: p.cwd.clone(),
         title: thread_name.cloned().or_else(|| p.first_user_text.clone()),
         model: p.model.clone(),
-        model_name: None,
         version: p.version.clone(),
         git_branch: None,
         entrypoint: None,

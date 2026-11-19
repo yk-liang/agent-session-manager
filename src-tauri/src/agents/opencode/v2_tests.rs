@@ -13,11 +13,7 @@ fn installed_v2_runtime_database_if_requested() {
     };
     let path = PathBuf::from(path);
     let before = std::fs::read(&path).unwrap();
-    let mut catalog = catalog_at(&path, false).unwrap();
-    let names = models::names();
-    for meta in &mut catalog.sessions {
-        models::decorate_meta(meta, &names);
-    }
+    let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(
         catalog.sessions.len(),
@@ -29,7 +25,6 @@ fn installed_v2_runtime_database_if_requested() {
     for meta in &catalog.sessions {
         assert!(meta.version.as_deref().unwrap().starts_with("2."));
         assert_eq!(meta.model.as_deref(), Some("asm-live/live"));
-        assert_eq!(meta.model_name.as_deref(), Some("ASM Live Model"));
         assert!(meta.real_user_count >= 2);
         let full = read_session_at(&path, &meta.session_id).unwrap();
         assert!(full.warnings.is_empty(), "{:?}", full.warnings);
@@ -38,8 +33,7 @@ fn installed_v2_runtime_database_if_requested() {
             .iter()
             .any(|e| e["message"]["content"] == "ASM OpenCode v2 live answer"));
         assert_eq!(search_events_at(&path, meta).unwrap(), full.events);
-        let mut view = read_session_mode_at(&path, &meta.session_id, true).unwrap();
-        models::decorate_detail(&mut view, &names);
+        let view = read_session_mode_at(&path, &meta.session_id, true).unwrap();
         for event in &view.events {
             if let Some(token) = event
                 .pointer("/message/content/0/deferred")

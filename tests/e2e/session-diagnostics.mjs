@@ -29,7 +29,6 @@ try {
         if (!state.readable.includes(args.sessionId)) throw failure('session_detail', args.sessionId);
         return { meta: row(args.sessionId), events: [{ type: 'user', message: { content: `Recovered ${args.sessionId}` } }], warnings: state.partial ? [syntaxError] : [] };
       }
-      if (command === 'resolve_model_names') return {};
       if (command === 'plugin:clipboard-manager|write_text') { state.copied = args.text; return null; }
       if (command === 'plugin:event|listen') { state.listeners.set(args.event, args.handler); return 1; }
       if (command === 'search_conversations') return { hits: [], skipped: 0, cancelled: false };
@@ -38,7 +37,7 @@ try {
         return { updatedAt: Date.now(), checkedFiles: 2, changedFiles: 0, bytesRead: 0 };
       }
       if (command === 'read_usage_summary') return { rows: [], health: {}, syncedAgents: ['qoder', 'claude'], revision: '1' };
-      if (command === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: 50, revision: '1' };
+      if (command === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: 50, revision: '1' };
       if (command === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
       return null;
     } };

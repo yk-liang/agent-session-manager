@@ -451,21 +451,6 @@ fn collect_at(
             .push("Qoder 缓存与输入的包含关系尚未确认，总量仅计已记录输入和输出，可能偏低".into());
     }
     partial |= bad > 0 || missing || !warnings.is_empty();
-    let models: Vec<_> = records
-        .iter()
-        .map(|s| s.model.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let names = if cfg!(test) {
-        Default::default()
-    } else {
-        match agent {
-            "opencode" => crate::agents::opencode::usage_model_names(&models),
-            "qoder" => crate::agents::qoder::usage_model_names(&models),
-            _ => Default::default(),
-        }
-    };
     let mut grouped = BTreeMap::<(String, String), (Tokens, bool, RecordedFields)>::new();
     let mut undated = false;
     for record in &records {
@@ -492,13 +477,6 @@ fn collect_at(
     let rows = grouped
         .into_iter()
         .map(|((date, model), (tokens, partial, details))| UsageRow {
-            model_name: names.get(&model).cloned().unwrap_or_else(|| {
-                if model == "unknown" {
-                    "未知模型".into()
-                } else {
-                    model.clone()
-                }
-            }),
             date,
             model,
             total_tokens: tokens.total(),

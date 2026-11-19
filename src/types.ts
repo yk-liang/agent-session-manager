@@ -4,7 +4,6 @@ export interface AgentInfo {
   installed: boolean;
   supportsFork: boolean;
   resumeEntrypoint?: string;
-  supportsModelNames?: boolean;
   dataDir: string | null;
   deletePolicy: "trash" | "permanent" | "readOnly";
 }
@@ -15,8 +14,6 @@ export interface SessionMeta {
   cwd: string | null;
   title: string | null;
   model: string | null;
-  /** 数据源确认的模型名称，原始标识仍保留在 model 中。 */
-  modelName?: string | null;
   version: string | null;
   gitBranch: string | null;
   entrypoint: string | null;
@@ -98,7 +95,6 @@ export interface SessionEvent {
   message?: {
     role?: string;
     model?: string;
-    modelName?: string;
     content: ContentBlock[] | string;
   };
 }
@@ -236,7 +232,6 @@ export interface CollectorStatus {
 export interface UsageRow extends UsageTokens {
   date: string;
   model: string;
-  modelName: string;
   partial: boolean;
 }
 export interface UsageReport {
@@ -305,7 +300,6 @@ export interface RequestEvent extends Omit<UsageTokens, "totalTokens"> {
   time: number;
   session: string;
   model: string;
-  modelName: string;
   status: "success" | "failed" | "unknown";
   partial: boolean;
   request: RequestMetadata;
@@ -328,5 +322,4 @@ export interface EventPage {
   page: number;
   pageSize: number;
   revision: string;
-  models: string[];
 }

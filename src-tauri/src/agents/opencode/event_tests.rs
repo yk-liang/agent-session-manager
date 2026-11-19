@@ -388,12 +388,7 @@ fn export_ordered_fixture_for_browser_if_requested() {
     if std::env::var("ASM_OPENCODE_SCHEMA").as_deref() == Ok("v2") {
         super::v2_tests::convert_browser_fixture(&path);
     }
-    let mut view = read_session_mode_at(&path, "ses_fixture", true).unwrap();
-    let names = super::models::Names::from([
-        ("fixture/model-a".to_string(), "Model Alpha".to_string()),
-        ("fixture/model-b".to_string(), "Model Beta".to_string()),
-    ]);
-    super::models::decorate_detail(&mut view, &names);
+    let view = read_session_mode_at(&path, "ses_fixture", true).unwrap();
     let mut payloads = std::collections::HashMap::new();
     for event in &view.events {
         if let Some(token) = event

@@ -184,7 +184,7 @@ export default function App() {
     const q = search.trim().toLowerCase();
     if (!q) return scopedSessions;
     return scopedSessions.filter((s) => {
-      return contentSearch.hits.has(sessionKey(s)) || [s.title, s.sessionId, s.cwd, s.modelName, s.model]
+      return contentSearch.hits.has(sessionKey(s)) || [s.title, s.sessionId, s.cwd, s.model]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });

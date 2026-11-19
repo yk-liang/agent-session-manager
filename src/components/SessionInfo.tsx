@@ -2,11 +2,10 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import UiIcon from "./UiIcon";
 import type { SessionMeta } from "../types";
-import SessionModel, { ModelLabel } from "./SessionModel";
-import type { HistoricalModel } from "../sessionModels";
+import ModelLabel from "./ModelLabel";
 
-export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; models?: HistoricalModel[] }) {
-  const others = models.filter((model) => model.id !== meta.model);
+export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; models?: string[] }) {
+  const others = models.filter((model) => model !== meta.model);
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -56,13 +55,13 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
               <div>
                 <dt>{others.length ? "最近模型" : "模型"}</dt>
                 <dd>
-                  <SessionModel session={meta} />
+                  <ModelLabel model={meta.model} />
                 </dd>
               </div>
             )}
             {others.length > 0 && <div className="session-model-history">
               <dt>其他模型</dt>
-              <dd>{others.map((model) => <ModelLabel key={model.id} id={model.id} name={model.name} />)}</dd>
+              <dd>{others.map((model) => <ModelLabel key={model} model={model} />)}</dd>
             </div>}
             {meta.cwd && (
               <div>

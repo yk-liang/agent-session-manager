@@ -45,9 +45,6 @@ export const cancelCatalog = () =>
   invoke<void>("cancel_catalog", { generation: nextCatalogGeneration() });
 export const readToolPayload = (token: string) => invoke<import("./types").ContentBlock>("read_tool_payload", { token });
 
-export const resolveModelNames = (agent: string, models: string[]) =>
-  invoke<Record<string, string>>("resolve_model_names", { agent, models });
-
 export const watchSessions = (agent: string | null, generation: number) =>
   invoke<void>("watch_sessions", { agent, generation });
 

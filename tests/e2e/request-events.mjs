@@ -34,7 +34,7 @@ try {
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
       if (cmd === 'plugin:clipboard-manager|write_text' && state.failCopy) throw Error('Clipboard unavailable');
-      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, dataDir: null, deletePolicy: 'trash' }));
+      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, dataDir: null, deletePolicy: 'trash' }));
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: true, running: true, authorization: 'enabled' };
       if (cmd === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
@@ -48,7 +48,7 @@ try {
         const number = anchor < 0 ? q.page ?? 1 : Math.floor(anchor / pageSize) + 1;
         const page = Math.max(1, Math.min(number, Math.ceil(filtered.length / pageSize)));
         const start = (page - 1) * pageSize;
-        const result = { events: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, revision: state.revision, models: [...new Set(scope.map(e => e.model))] };
+        const result = { events: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, revision: state.revision };
         if (state.delay) { state.delay = false; await new Promise(resolve => state.release = resolve); }
         return structuredClone(result);
       }

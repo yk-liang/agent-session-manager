@@ -272,8 +272,7 @@ pub(super) fn read(
         if let Some(model) = &current_model {
             for event in &mut events[before..] {
                 if event["type"] == "assistant" {
-                    event["message"]["model"] = json!(model.id);
-                    event["message"]["modelName"] = json!(model.label);
+                    event["message"]["model"] = json!(model);
                 }
             }
         }

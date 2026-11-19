@@ -65,8 +65,8 @@ export default function BrandIcon({ src, className, monochrome }: { src?: string
   return <img className={classes} src={src} alt="" aria-hidden="true" />;
 }
 
-export function ModelIcon({ id, name }: { id: string; name?: string }) {
-  return <BrandIcon src={modelSource(id) ?? (name ? modelSource(name) : undefined)} />;
+export function ModelIcon({ id }: { id: string }) {
+  return <BrandIcon src={modelSource(id)} />;
 }
 
 export function ProviderIcon({ provider }: { provider: string }) {

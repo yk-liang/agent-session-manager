@@ -3,7 +3,6 @@ import { sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
 type CatalogLoader = (agent: string, includeEmpty: boolean, generation: number, revision?: number) => Promise<Catalog | null>;
-type NameLoader = (agent: string, models: string[]) => Promise<Record<string, string>>;
 
 interface CatalogScope {
   sequence: number;
@@ -13,16 +12,12 @@ interface CatalogScope {
 
 export class AgentCatalogCache {
   private scopes = new Map<string, CatalogScope>();
-  private names = new Map<string, Map<string, string>>();
-  private pendingNames = new Map<string, Promise<void>>();
   private readFailures = new Map<string, Map<string, SessionMeta>>();
   private listeners = new Set<() => void>();
   private loader: CatalogLoader;
-  private nameLoader: NameLoader;
 
-  constructor(loader: CatalogLoader, nameLoader: NameLoader) {
+  constructor(loader: CatalogLoader) {
     this.loader = loader;
-    this.nameLoader = nameLoader;
   }
 
   private scope(agent: string, includeEmpty: boolean) {
@@ -56,32 +51,14 @@ export class AgentCatalogCache {
     return catalog;
   }
 
-  private withNames(agent: string, meta: SessionMeta): SessionMeta {
-    const name = meta.model ? this.names.get(agent)?.get(meta.model) : undefined;
-    return name && name !== meta.modelName ? { ...meta, modelName: name } : meta;
-  }
-
-  /** 改名/切换模型只更新已打开详情的展示信息，保留这份正文对应的统计与来源身份。 */
   withCurrentMetadata(agent: string, includeEmpty: boolean, meta: SessionMeta): SessionMeta {
     const snapshot = this.visible(agent, includeEmpty);
     const key = sessionKey(meta);
     const latest = snapshot?.sessions.find(session => sessionKey(session) === key);
-    if (!latest) return this.withNames(agent, meta);
-    const named = latest.statsPending
-      ? this.withNames(agent, { ...meta, title: latest.title ?? meta.title })
-      : this.withNames(agent, latest);
-    return meta.title === named.title && meta.model === named.model && meta.modelName === named.modelName
-      ? meta : {...meta, title:named.title, model:named.model, modelName:named.modelName};
-  }
-
-  private accept(agent: string, includeEmpty: boolean, scope: CatalogScope, catalog: Catalog) {
-    let names = this.names.get(agent);
-    for (const session of catalog.sessions) {
-      if (!session.model || !session.modelName) continue;
-      if (!names) this.names.set(agent, names = new Map());
-      names.set(session.model, session.modelName);
-    }
-    return this.publish(scope, this.decorate(agent, includeEmpty, catalog));
+    if (!latest) return meta;
+    const title = latest.statsPending ? latest.title ?? meta.title : latest.title;
+    const model = latest.statsPending ? meta.model : latest.model;
+    return meta.title === title && meta.model === model ? meta : { ...meta, title, model };
   }
 
   private decorate(agent: string, includeEmpty: boolean, catalog: Catalog): Catalog {
@@ -112,9 +89,8 @@ export class AgentCatalogCache {
     }
     const rows = restored.length ? [...catalog.sessions, ...restored] : catalog.sessions;
     const sessions = rows.map(session => {
-      const named = this.withNames(agent, session);
       const readError = failures?.size ? failures.get(sessionKey(session))?.readError : undefined;
-      return readError === named.readError ? named : { ...named, readError };
+      return readError === session.readError ? session : { ...session, readError };
     });
     return restored.length || sessions.some((session, index) => session !== catalog.sessions[index])
       ? { ...catalog, projects, sessions } : catalog;
@@ -138,7 +114,7 @@ export class AgentCatalogCache {
     if (scope.pending && scope.pending.generation === generation) return scope.pending.request;
     const sequence = ++scope.sequence;
     const request = this.loader(agent, includeEmpty, generation, scope.snapshot?.revision).then(catalog => {
-      if (catalog && sequence === scope.sequence) return this.accept(agent, includeEmpty, scope, catalog);
+      if (catalog && sequence === scope.sequence) return this.publish(scope, this.decorate(agent, includeEmpty, catalog));
       return scope.snapshot ?? EMPTY_CATALOG;
     }).finally(() => {
       if (scope.pending?.request === request) scope.pending = undefined;
@@ -151,35 +127,7 @@ export class AgentCatalogCache {
     const scope = this.scope(agent, includeEmpty);
     const sequence = scope.sequence;
     const catalog = await load(scope.snapshot?.revision);
-    if (catalog && sequence === scope.sequence) return this.accept(agent, includeEmpty, scope, catalog);
-  }
-
-  async enrich(agent: string, includeEmpty: boolean) {
-    const catalog = this.peek(agent, includeEmpty);
-    if (!catalog) return;
-    const models = [...new Set(catalog.sessions.flatMap(session => session.model ? [session.model] : []))].sort();
-    if (!models.length) return;
-    const key = JSON.stringify([agent, models]);
-    let request = this.pendingNames.get(key);
-    if (!request) {
-      request = (async () => {
-        const resolved = new Map<string, string>();
-        for (let offset = 0; offset < models.length; offset += 256) {
-          const names = await this.nameLoader(agent, models.slice(offset, offset + 256));
-          for (const [id, name] of Object.entries(names)) resolved.set(id, name);
-        }
-        const names = this.names.get(agent) ?? new Map<string, string>();
-        if (![...resolved].some(([id, name]) => names.get(id) !== name)) return;
-        for (const [id, name] of resolved) names.set(id, name);
-        this.names.set(agent, names);
-        for (const empty of [false, true]) {
-          const scope = this.scope(agent, empty);
-          if (scope.snapshot) this.publish(scope, this.decorate(agent, empty, scope.snapshot));
-        }
-      })().finally(() => { this.pendingNames.delete(key); });
-      this.pendingNames.set(key, request);
-    }
-    await request;
+    if (catalog && sequence === scope.sequence) return this.publish(scope, this.decorate(agent, includeEmpty, catalog));
   }
 
   remove(agent: string, removed: SessionMeta[]) {

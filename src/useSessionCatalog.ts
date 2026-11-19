@@ -12,7 +12,7 @@ export function useSessionCatalog(
   blocked: boolean,
   onWatchError: (error: string) => void,
 ) {
-  const [cache] = useState(() => new AgentCatalogCache(api.catalog, api.resolveModelNames));
+  const [cache] = useState(() => new AgentCatalogCache(api.catalog));
   const [refreshKey, setRefreshKey] = useState(0);
   const scope = useMemo(() => ({ agent, includeEmpty }), [agent, includeEmpty]);
   const catalog = useSyncExternalStore(cache.subscribe, () => active && agent ? cache.visible(agent.id, includeEmpty) : undefined);
@@ -23,7 +23,7 @@ export function useSessionCatalog(
 
   useEffect(() => {
     if (!scope.agent || !active) return;
-    const { id, supportsModelNames } = scope.agent;
+    const { id } = scope.agent;
     const { includeEmpty } = scope;
     let disposed = false;
     const autoRefresh = new AutoRefreshScheduler(reload);
@@ -38,7 +38,6 @@ export function useSessionCatalog(
         const catalog = await cache.load(id, includeEmpty, generation);
         if (disposed) return;
         setStatus({ scope, refreshing: false, error: null });
-        if (supportsModelNames) void cache.enrich(id, includeEmpty).catch(() => {});
         if (catalog.sessions.some(session => session.statsPending)) {
           await cache.refine(id, includeEmpty, async revision => {
             const refined = await api.refineCatalog(id, includeEmpty, generation, revision);

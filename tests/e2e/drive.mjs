@@ -11,7 +11,6 @@ const SESSION_DETAIL = {
     cwd: "/tmp/demo",
     title: "测试会话",
     model: "mode-xyz",
-    modelName: "Qwen3.8-Max-DogFooding",
     version: "1.1.41",
     gitBranch: "main",
     firstTs: "2026-09-03T06:00:00Z",
@@ -127,7 +126,7 @@ const OPENCODE_CONFIG = {
   ],
 };
 const CODEX_DETAIL = {
-  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4", modelName: null },
+  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4" },
   events: [
     { type: "user", uuid: "cu1", message: { role: "user", content: "codex 用户消息" } },
     { type: "assistant", uuid: "ca1", message: { role: "assistant", content: "codex 助手正文" } },
@@ -286,9 +285,9 @@ page.on("pageerror", (e) => {
 
 await page.goto(baseURL);
 await page.waitForSelector(".session-card", { timeout: 10000 });
-assert.equal(await page.locator('.session-card .badge').first().textContent(), "Qwen3.8-Max-DogFooding");
+assert.equal(await page.locator('.session-card .badge').first().textContent(), "mode-xyz");
 assert.ok((await page.locator('.session-card .badge').first().getAttribute('title')).includes('mode-xyz'));
-await page.getByRole('searchbox').fill('Qwen3.8-Max-DogFooding');
+await page.getByRole('searchbox').fill('mode-xyz');
 assert.equal(await page.locator('.session-card').count(), 1);
 await page.getByRole('searchbox').fill('');
 await page.screenshot({ path: `${artifactDir}/qsm-1-list-${engine}.png` });
@@ -315,7 +314,7 @@ await page.getByRole('button', {name: /^复制会话 ID：/}).click();
 assert.equal(await page.evaluate(()=>window.__COPIED_TEXT__), SESSION_DETAIL.meta.sessionId);
 assert.equal(await page.locator('.detail-meta .model-label').count(), 0);
 await page.getByRole('button', {name:'更多信息',exact:true}).click();
-assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "Qwen3.8-Max-DogFooding");
+assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "mode-xyz");
 assert.ok((await page.getByRole('group',{name:'会话信息'}).textContent()).includes('/tmp/demo'));
 await page.keyboard.press('Escape');
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);

@@ -12,7 +12,7 @@ let checks = 0; const pass = label => console.log(`PASS ${++checks}: ${label}`);
 try {
   await page.addInitScript(() => {
     const row = (id, title) => ({ sessionId: id, title, projectDir: "real-source", cwd: "/tmp/real-source", model: null,
-      modelName: null, firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1,
+      firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1,
       sizeBytes: 100, hasTranscript: true });
     const state = { rows: { qoder: [row("q1", "Existing Qoder session")], codex: [row("c1", "Existing Codex session")] },
       calls: [], catalogs: [], watch: { agent: null, generation: 0 }, callbacks: {}, listeners: {}, next: 0 };

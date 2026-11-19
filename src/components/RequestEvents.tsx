@@ -2,14 +2,13 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LoaderCircle } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { useDelayedBusy } from "../useDelayedBusy";
-import type { UsageModelLabel, UsageModelRef } from "../useUsageModelNames";
 import * as api from "../api";
 import type { AgentInfo, EventPage, EventQuery, RequestEvent } from "../types";
 import { dateKey, firstDate, formatTokens, type UsagePeriod } from "../usageView";
 import { shortPath } from "../utils";
 import HelpTip from "./HelpTip";
 import UiIcon from "./UiIcon";
-import { ModelLabel } from "./SessionModel";
+import ModelLabel from "./ModelLabel";
 import AgentIcon from "./AgentIcon";
 import { ProviderIcon } from "./BrandIcon";
 import Dropdown from "./Dropdown";
@@ -22,8 +21,6 @@ interface Props {
   model: string;
   revision: number;
   syncing?: boolean;
-  modelLabel: UsageModelLabel;
-  onModels: (models: UsageModelRef[]) => void;
 }
 const statusLabels = { success: "成功", failed: "失败", unknown: "未记录" };
 const statusOptions = [{ id: "all", name: "全部结果" }, ...Object.entries(statusLabels).map(([id, name]) => ({ id, name }))];
@@ -39,7 +36,7 @@ function visibleRequest(table: HTMLDivElement | null): ViewAnchor | null {
   return row ? { id: row.dataset.eventId!, detail: row.classList.contains("request-detail-row"), offset: row.getBoundingClientRect().top - top, scrollTop: table.scrollTop } : null;
 }
 
-export default function RequestEvents({ agents, period, now, agent, model, revision, syncing = false, modelLabel, onModels }: Props) {
+export default function RequestEvents({ agents, period, now, agent, model, revision, syncing = false }: Props) {
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState<EventPage | null>(null);
   const [pageSize, setPageSize] = useState(50);
@@ -122,9 +119,6 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
       element.scrollTop += row.getBoundingClientRect().top - top - view.offset;
     }
   }, [page]);
-  useEffect(() => {
-    onModels((page?.events ?? []).map(({ agent, model }) => ({ agent, model })));
-  }, [page, onModels]);
   const agentNames = new Map(agents.map(a => [a.id, a.displayName]));
   const pageCount = page ? Math.max(1, Math.ceil(page.total / page.pageSize)) : 1;
   const goTo = (number: number) => {
@@ -163,7 +157,7 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
           return <Fragment key={event.id}><tr data-event-id={event.id} className={expandedRequestId === event.id ? "request-selected" : undefined}>
             <td><button className="request-expand" aria-label={`查看请求详情 ${event.id}`} aria-expanded={expandedRequestId === event.id} onClick={() => setExpandedRequestId(expandedRequestId === event.id ? null : event.id)}><UiIcon icon={ChevronDown} /></button></td>
             <td>{date ? <><span>{date.toLocaleTimeString("zh-CN", { hour12: false })}</span><small>{dateKey(date).replace(/-/g, "/")}</small></> : "未记录"}</td>
-            <td className="request-model"><ModelLabel id={event.model} name={event.model === "unknown" ? "未知模型" : modelLabel(event.agent, event.model, event.modelName)} />{request.provider && <small title={request.provider}><ProviderIcon provider={request.provider} />{request.provider}</small>}</td>
+            <td className="request-model"><ModelLabel model={event.model} />{request.provider && <small title={request.provider}><ProviderIcon provider={request.provider} />{request.provider}</small>}</td>
             <td><span>{request.effort ?? "—"}</span><small>{request.tier ?? "—"}</small></td>
             <td className="request-source"><span><AgentIcon agent={event.agent} inline />{agentNames.get(event.agent) ?? event.agent}</span><small title={request.client ? `客户端：${request.client}` : request.kind ? `日志来源类型：${request.kind}` : "未记录客户端"}>{client}</small></td>
             <td><span className={`request-result ${event.status}`}>{statusLabels[event.status]}</span>{request.scope === "usage_delta" && <small>累计差额</small>}{request.scope === "error" && <small>错误事件</small>}</td>

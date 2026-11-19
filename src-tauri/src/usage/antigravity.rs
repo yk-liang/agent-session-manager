@@ -451,6 +451,7 @@ mod tests {
                 .unwrap();
             assert!(detail.warnings.is_empty(), "{:?}", detail.warnings);
             assert_eq!(detail.meta.real_user_count, session.real_user_count);
+            assert_eq!(detail.meta.model, session.model);
             assert_eq!(
                 detail.meta.assistant_text_count,
                 session.assistant_text_count

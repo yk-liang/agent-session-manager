@@ -14,7 +14,7 @@ try {
     const state = window.__COLD__ = { calls: [], listeners: {}, registrations: {}, nextListener: 0, active: '', generation: 0, release: null, ready: false, failSummary: false, failEvents: false, failSource: false, synced: [] };
     const tokens = { inputTokens: 4467458800, outputTokens: 21, totalTokens: 4467458821, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false };
     const model = `claude-${'long-model-name-'.repeat(30)}`;
-    const event = { ...tokens, id: 'request', agent: 'claude', time: Date.now(), session: 'session', model, modelName: model, status: 'success', partial: false, outputTps: null, request: { project: `/Users/demo/${'long-directory/'.repeat(30)}project`, client: 'Claude Code', kind: 'cli' } };
+    const event = { ...tokens, id: 'request', agent: 'claude', time: Date.now(), session: 'session', model, status: 'success', partial: false, outputTps: null, request: { project: `/Users/demo/${'long-directory/'.repeat(30)}project`, client: 'Claude Code', kind: 'cli' } };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
@@ -26,7 +26,7 @@ try {
         if (state.listeners[args.event] === state.registrations[args.eventId]?.handler) delete state.listeners[args.event];
         delete state.registrations[args.eventId]; return;
       }
-      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }));
+      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, deletePolicy: 'trash' }));
       if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (cmd === 'collector_status') return { desired: false, running: false, authorization: 'signingRequired' };
       if (cmd === 'sync_request_events') {
@@ -38,11 +38,11 @@ try {
       }
       if (cmd === 'read_usage_summary') {
         if (state.failSummary) throw Error('Database temporarily unavailable');
-        return { rows: state.ready ? [{ ...tokens, agent: 'claude', model, modelName: model, date: '', bucketStart: args.query.bounds?.[0] ?? null, partial: false }] : [], health: {}, syncedAgents: [...state.synced], revision: state.ready ? '1' : '' };
+        return { rows: state.ready ? [{ ...tokens, agent: 'claude', model, date: '', bucketStart: args.query.bounds?.[0] ?? null, partial: false }] : [], health: {}, syncedAgents: [...state.synced], revision: state.ready ? '1' : '' };
       }
       if (cmd === 'read_request_events') {
         if (state.failEvents) throw Error('Database temporarily unavailable');
-        return { events: state.ready ? [event] : [], models: state.ready ? [model] : [], total: state.ready ? 1 : 0, page: 1, pageSize: args.query.limit ?? 50, revision: state.ready ? '1' : '' };
+        return { events: state.ready ? [event] : [], total: state.ready ? 1 : 0, page: 1, pageSize: args.query.limit ?? 50, revision: state.ready ? '1' : '' };
       }
       return null;
     } };

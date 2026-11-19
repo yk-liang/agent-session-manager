@@ -114,7 +114,6 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             cwd,
             title: None,
             model: None,
-            model_name: None,
             version: None,
             git_branch: None,
             entrypoint: Some(if is_cli(path) { "cli" } else { "antigravity" }.into()),
@@ -245,7 +244,6 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         let (name, _) = latest.resolve(None, &HashMap::new());
         if name != "unknown" {
             meta.model = Some(name);
-            meta.model_name = latest.display;
         }
         Ok(SessionDetail {
             meta,

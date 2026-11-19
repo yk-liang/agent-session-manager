@@ -18,7 +18,7 @@ try {
     ];
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = { transformCallback: callback => callback, invoke: async (command, args) => {
-      if (command === 'list_agents') return agents.map(([id, displayName, dataDir]) => ({ id, displayName, dataDir, installed: true, supportsFork: false, supportsModelNames: false, deletePolicy: 'trash' }));
+      if (command === 'list_agents') return agents.map(([id, displayName, dataDir]) => ({ id, displayName, dataDir, installed: true, supportsFork: false, deletePolicy: 'trash' }));
       if (command === 'catalog') return { sessions: [], projects: [], warnings: [] };
       if (command === 'open_data_dir') {
         state.opened.push(args);

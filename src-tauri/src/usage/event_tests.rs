@@ -349,14 +349,20 @@ fn request_events_numbered_pages_filters_and_refresh_anchor() {
     scan("claude", dir.path(), &mut store);
     let first = page(&mut store, EventQuery::default());
     assert_eq!((first.total, first.events.len()), (105, 50));
+    store.ledger().unwrap().db.execute(
+        "UPDATE usage_request_events SET data=json_set(data,'$.modelName','Old display name')",
+        [],
+    ).unwrap();
     let second = page(
         &mut store,
         EventQuery {
             page: Some(2),
+            model: Some("claude-sonnet".into()),
             ..Default::default()
         },
     );
     assert_eq!(second.events.len(), 50);
+    assert!(second.events.iter().all(|event| event.model == "claude-sonnet"));
     let third = page(
         &mut store,
         EventQuery {

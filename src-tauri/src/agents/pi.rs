@@ -448,7 +448,6 @@ fn to_meta(p: &ParsedPi) -> SessionMeta {
         cwd: p.cwd.clone(),
         title: p.name.clone().or_else(|| p.first_user_text.clone()),
         model: None,
-        model_name: None,
         version: None,
         git_branch: None,
         entrypoint: None,

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dateKey, firstDate, selectRows, sumTokens, dailySeries, modelTotals, modelUsageCells, sumModelUsage, formatUsageField, summaryQuery, usageSeries } from '../../src/usageView.ts';
-const row=(date,model,input,output,extra=0)=>({date,model,modelName:model,inputTokens:input,outputTokens:output,cacheReadTokens:2,cacheWriteTokens:1,reasoningTokens:1,unclassifiedTokens:extra,totalTokens:input+output+extra,partial:false});
+const row=(date,model,input,output,extra=0)=>({date,model,inputTokens:input,outputTokens:output,cacheReadTokens:2,cacheWriteTokens:1,reasoningTokens:1,unclassifiedTokens:extra,totalTokens:input+output+extra,partial:false});
 test('range boundaries follow local calendar dates and include unknown dates only in all',()=>{
  const now=new Date(2026,9,22,0,30),report={rows:[row('2026-10-15','a',10,1),row('2026-10-16','a',20,2),row('2026-10-22','b',30,3),row('','a',40,4)]};
  assert.equal(dateKey(now),'2026-10-22');assert.equal(firstDate('week',now),'2026-10-16');
@@ -13,7 +13,7 @@ test('cache and reasoning breakdowns do not get added again to source totals',()
  const data=[row('2026-10-21','a',10,5,2),row('2026-10-22','a',20,10,3)];
  const totals=sumTokens(data);assert.equal(totals.totalTokens,50);assert.equal(totals.cacheReadTokens,4);
  const grouped=modelTotals(data);assert.equal(grouped.length,1);assert.equal(grouped[0].totalTokens,50);
- assert.equal(grouped[0].model,'a');assert.equal(grouped[0].modelName,'a');assert.equal(grouped[0].partial,false);
+ assert.equal(grouped[0].model,'a');assert.equal(grouped[0].partial,false);
 });
 test('daily trend fills zero days without altering totals or mutating source rows',()=>{
  const rows=[row('2026-10-21','a',10,5)];const series=dailySeries(rows,'week',new Date(2026,9,22));

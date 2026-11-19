@@ -23,9 +23,9 @@ try {
     document.addEventListener("securitypolicyviolation", (event) => {
       window.__CSP_TEST__.violations.push({ directive: event.effectiveDirective, uri: event.blockedURI });
     });
-    const meta = { sessionId: "security-fixture", projectDir: "fixture-project", cwd: "/tmp/fixture", title: "Security fixture", model: "fixture-model", modelName: null, firstTs: null, lastTs: null, realUserCount: 1, assistantTextCount: 1, userCount: 1, assistantCount: 1, sizeBytes: 100, hasTranscript: true };
+    const meta = { sessionId: "security-fixture", projectDir: "fixture-project", cwd: "/tmp/fixture", title: "Security fixture", model: "fixture-model", firstTs: null, lastTs: null, realUserCount: 1, assistantTextCount: 1, userCount: 1, assistantCount: 1, sizeBytes: 100, hasTranscript: true };
     window.__TAURI_INTERNALS__ = { transformCallback: (callback) => callback, invoke: async (command) => {
-      if (command === "list_agents") return [{ id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, supportsModelNames: false, deletePolicy: "trash" }];
+      if (command === "list_agents") return [{ id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, deletePolicy: "trash" }];
       if (command === "catalog") return { projects: [{ dirName: meta.projectDir, displayPath: meta.cwd, sessionCount: 1, lastActivity: null }], sessions: [meta], warnings: [] };
       if (command === "read_session") return { meta, events: [{ type: "user", message: { content: "Read-only question" } }, { type: "assistant", message: { content: [{ type: "text", text: "# Local markdown\n\n**Bold content** and `code`.\n\n![External image](https://csp-test.invalid/markdown.png)" }] } }] };
       if (command === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
