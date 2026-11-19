@@ -15,9 +15,10 @@ mod history;
 mod history_tests;
 mod projects;
 mod storage;
+mod tool_output;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 #[cfg(test)]
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -114,26 +115,6 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
-fn extract_function_output(payload: &Value) -> (String, bool) {
-    // output 字段本身是一段 JSON 字符串，常见形如 {"output": "..."} 或 {"content": "..."}
-    let raw = payload.get("output").and_then(Value::as_str).unwrap_or("");
-    if let Ok(v) = serde_json::from_str::<Value>(raw) {
-        let is_error = v
-            .pointer("/metadata/status")
-            .and_then(Value::as_str)
-            .map(|s| s == "error")
-            .unwrap_or(false);
-        if let Some(s) = v.get("output").and_then(Value::as_str) {
-            return (s.to_string(), is_error);
-        }
-        if let Some(s) = v.get("content").and_then(Value::as_str) {
-            return (s.to_string(), is_error);
-        }
-        return (v.to_string(), is_error);
-    }
-    (raw.to_string(), false)
-}
-
 /// 把一条 response_item 转成 0..n 个统一事件
 fn convert_response_item(
     payload: &Value,
@@ -147,7 +128,7 @@ fn convert_response_item(
             let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
             let items = payload.get("content").and_then(Value::as_array);
             let Some(items) = items else { return };
-            context::convert_message(role, &text_of_content(items), ts, cwd, out);
+            context::convert_message_content(role, items, ts, cwd, out);
         }
         "reasoning" => {
             let summary = payload.get("summary").and_then(Value::as_array);
@@ -192,7 +173,9 @@ fn convert_response_item(
         }
         "function_call_output" | "custom_tool_call_output" => {
             let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
-            let (content, is_error) = extract_function_output(payload);
+            let output = &payload["output"];
+            let is_error = payload.get("output").is_some_and(tool_output::failed);
+            let content = tool_output::content(output);
             out.push(json!({
                 "type": "user",
                 "timestamp": ts,
@@ -251,12 +234,14 @@ struct Envelope<'a> {
     payload: Option<&'a serde_json::value::RawValue>,
 }
 #[derive(Default, Deserialize)]
-struct ToolHeader {
+struct ToolHeader<'a> {
     #[serde(rename = "type")]
     kind: Option<String>,
     id: Option<String>,
     call_id: Option<String>,
     name: Option<String>,
+    #[serde(borrow)]
+    output: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -376,7 +361,7 @@ fn read_rollout(
         if !matches!(rtype, "session_meta" | "response_item") {
             continue;
         }
-        let shallow: ToolHeader = serde_json::from_str(raw_payload).unwrap_or_default();
+        let shallow: ToolHeader<'_> = serde_json::from_str(raw_payload).unwrap_or_default();
         let tool = matches!(
             shallow.kind.as_deref(),
             Some(
@@ -473,7 +458,7 @@ fn read_rollout(
                         let block = if call {
                             json!({"type":"tool_use","id":shallow.call_id.unwrap_or_default(),"name":shallow.name.unwrap_or_else(|| "?".into()),"deferred":token})
                         } else {
-                            json!({"type":"tool_result","tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token})
+                            json!({"type":"tool_result","is_error":shallow.output.is_some_and(tool_output::raw_failed),"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token})
                         };
                         let role = if call { "assistant" } else { "user" };
                         new_events.push(json!({"type":role,"timestamp":ts,"message":{"role":role,"content":[block]}}));
@@ -497,12 +482,12 @@ fn read_rollout(
                     for ev in &new_events {
                         match ev.get("type").and_then(Value::as_str) {
                             Some("user") => {
-                                // 统计含真实文本的用户消息（工具结果不计）
-                                if let Some(s) =
-                                    ev.pointer("/message/content").and_then(Value::as_str)
-                                {
+                                let content = &ev["message"]["content"];
+                                if super::context::has_user_content(content) {
                                     parsed.user_count += 1;
                                     parsed.real_user_count += 1;
+                                }
+                                if let Some(s) = super::context::first_text(content) {
                                     if parsed.first_user_text.is_none() {
                                         parsed.first_user_text = Some(s.chars().take(80).collect());
                                     }
@@ -510,11 +495,9 @@ fn read_rollout(
                             }
                             Some("assistant") => {
                                 parsed.assistant_count += 1;
-                                // 统一结构中正文消息的 content 为字符串，思考/工具为数组
                                 if ev
                                     .pointer("/message/content")
-                                    .and_then(Value::as_str)
-                                    .is_some()
+                                    .is_some_and(super::context::has_text)
                                 {
                                     parsed.assistant_text_count += 1;
                                 }
@@ -679,7 +662,7 @@ fn catalog_in(root: &Path, include_empty: bool) -> Result<super::Catalog, String
     catalog_with(root, include_empty, false, &|| false)
 }
 // 上下文通知不再算作用户消息；仅重建可再生的会话摘要，不触碰用量账本。
-const SUMMARY_CACHE_KIND: &str = "codex-history-v3";
+const SUMMARY_CACHE_KIND: &str = "codex-history-v4";
 fn catalog_with(
     root: &Path,
     include_empty: bool,
@@ -1005,7 +988,7 @@ mod tests {
             .unwrap();
         let lines = [
             r#"{"timestamp":"2026-09-03T01:00:00Z","type":"session_meta","payload":{"id":"abcdef01","cwd":"/tmp/demo","cli_version":"0.30.0"}}"#,
-            r#"{"timestamp":"2026-09-03T01:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\ncli\n</environment_context>\n帮我写个函数"}]}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\ncli\n</environment_context>\n帮我写个函数"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}}"#,
             r#"{"timestamp":"2026-09-03T01:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"先分析需求"}]}}"#,
             r#"{"timestamp":"2026-09-03T01:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"cmd\":[\"ls\"]}"}}"#,
             r#"{"timestamp":"2026-09-03T01:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"{\"output\":\"file.txt\"}"}}"#,
@@ -1265,6 +1248,9 @@ mod tests {
                 "assistant"
             ]
         );
+
+        assert_eq!(p.events[1]["message"]["content"][0]["text"], "帮我写个函数");
+        assert_eq!(p.events[1]["message"]["content"][1]["type"], "input_image");
 
         let tool_use = &p.events[3]["message"]["content"][0];
         assert_eq!(tool_use["type"], "tool_use");

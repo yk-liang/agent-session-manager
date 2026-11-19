@@ -211,6 +211,8 @@ fn parse_meta_with(
                                 if first_user_text.is_none() {
                                     first_user_text = Some(text);
                                 }
+                            } else if msg["content"].as_array().is_some_and(|parts| parts.iter().any(super::context::is_attachment)) {
+                                meta.real_user_count += 1;
                             }
                         }
                     }
@@ -280,6 +282,13 @@ fn is_relevant(meta: &SessionMeta, opts: FamilyOptions) -> bool {
     true
 }
 
+fn summary_cache_kind(dir_name: &str, opts: FamilyOptions) -> String {
+    format!(
+        "family-transcript-v4:{}:{}:{}:{dir_name}",
+        opts.title_events, opts.filter_non_cli_entrypoint, opts.filter_qoderwork_cwd,
+    )
+}
+
 /// 单遍扫描：每个项目目录只读一次，同时产出项目分组与会话列表。
 /// 读取失败不再静默跳过，记入 warnings；base 不存在/不可读同样降级为
 /// warning（与 read_dir_warned 的统一遍历语义一致），不让整个 catalog 失败。
@@ -343,13 +352,7 @@ fn sessions_in_dir(
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if name.ends_with(".jsonl") {
-            let kind = format!(
-                "family-context-{}:{}:{}:{}:{dir_name}",
-                if opts.title_events { "v3" } else { "v2" },
-                opts.title_events,
-                opts.filter_non_cli_entrypoint,
-                opts.filter_qoderwork_cwd
-            );
+            let kind = summary_cache_kind(dir_name, opts);
             let (parsed, ws) = match super::catalog_cache::summary(&kind, &[path.clone()], || {
                 match parse_meta(&path, dir_name, opts) {
                     super::ParseOutcome::Ok(meta) => Ok((meta, Vec::new())),

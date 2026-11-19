@@ -144,13 +144,24 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() {
     let (_dir, path) = fixture();
+    let db = Connection::open(&path).unwrap();
+    for (id, kind, seq, value) in [
+        ("msg_error", "assistant", 6, json!({"error":{"message":"Provider unavailable"}})),
+        ("msg_files", "user", 7, json!({"files":[{"name":"preview.png","mime":"image/png","data":"AAAA"}]})),
+    ] {
+        db.execute(
+            "INSERT INTO session_message VALUES (?1,'ses_v2',?2,?3,2000000,2000000,?4)",
+            params![id, kind, seq, value.to_string()],
+        ).unwrap();
+    }
+    drop(db);
     let before = std::fs::read(&path).unwrap();
     let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(catalog.sessions.len(), 1);
     let meta = &catalog.sessions[0];
     assert_eq!(meta.title.as_deref(), Some("First v2 prompt"));
-    assert_eq!((meta.real_user_count, meta.assistant_text_count), (1, 2));
+    assert_eq!((meta.real_user_count, meta.assistant_text_count), (2, 2));
     assert_eq!(meta.model.as_deref(), Some("fixture/latest"));
     let detail = read_session_at(&path, "ses_v2").unwrap();
     assert!(detail.warnings.is_empty(), "{:?}", detail.warnings);
@@ -172,6 +183,8 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
             .unwrap()["message"]["content"],
         "Latest answer"
     );
+    assert!(detail.events.iter().any(|event| event["type"] == "system" && event["content"] == "Provider unavailable"));
+    assert_eq!(detail.events.last().unwrap()["message"]["content"][0]["filename"], "preview.png");
     assert_eq!(search_events_at(&path, meta).unwrap(), detail.events);
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(open_db(&path)

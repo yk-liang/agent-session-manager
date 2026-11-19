@@ -11,7 +11,7 @@ try {
     const meta={sessionId:'long',projectDir:'p',cwd:'/tmp/long',title:'长会话性能回归',model:'logged-codex-model',firstTs:null,lastTs:null,userCount:2,assistantCount:6000,realUserCount:2,assistantTextCount:5999,sizeBytes:400000000,hasTranscript:true};
     const events=[{type:'user',uuid:'first',message:{content:'第一条指令'}},
       {type:'assistant',uuid:'tool',message:{content:[{type:'tool_use',id:'call',name:'shell',deferred:'input'}]}},
-      {type:'user',uuid:'result',message:{content:[{type:'tool_result',tool_use_id:'call',deferred:'output'}]}},
+      {type:'user',uuid:'result',message:{content:[{type:'tool_result',tool_use_id:'call',is_error:true,deferred:'output'}]}},
       ...Array.from({length:6000},(_,i)=>({type:'assistant',uuid:`a-${i}`,message:{content:`消息 ${i}\n`+'正文示例\n'.repeat(10)}})),
       {type:'user',uuid:'last',message:{content:'末尾指令 '+ '长文本'.repeat(3000)+' 唯一定位针 '+ '结尾'.repeat(2000)}}];
     const state={calls:[],refining:false,refined:false,release:null};window.__PERF__=state;
@@ -40,7 +40,9 @@ try {
   assert.equal(await page.locator('.session-info-popover .model-label').textContent(),'logged-codex-model');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
-  await page.getByRole('button',{name:/工具调用 · shell/}).click();
+  const tool = page.getByRole('button',{name:/^工具调用 · shell.*失败$/});
+  assert.equal(await tool.getAttribute('aria-expanded'), 'false');
+  await tool.click();
   await page.getByText('result on demand',{exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
   await page.locator('.toc-item').last().click();

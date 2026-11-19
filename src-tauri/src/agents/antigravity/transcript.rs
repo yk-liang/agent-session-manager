@@ -14,20 +14,15 @@ fn first_text(content: &[Value]) -> Option<&str> {
         .find_map(|block| block.get("text").and_then(Value::as_str))
 }
 
-fn content(
-    kind: i64,
-    payload: &[u8],
-    metadata: &Message<'_>,
-) -> std::io::Result<(&'static str, Vec<Value>)> {
+fn content(kind: i64, payload: &[u8]) -> std::io::Result<Vec<Value>> {
     let payload = Message::decode(payload)?;
     let mut blocks = Vec::new();
-    let role = match kind {
+    match kind {
         USER_PROMPT => {
             let prompt = payload.message(19)?;
             if let Some(text) = prompt.text(2).or(prompt.message(3)?.text(1)) {
                 blocks.push(json!({"type":"text", "text":text}));
             }
-            "user"
         }
         MODEL_RESPONSE => {
             let response = payload.message(20)?;
@@ -49,21 +44,43 @@ fn content(
                     );
                 }
             }
-            "assistant"
         }
-        TOOL_RESULT => {
-            let tool = metadata.message(4)?;
-            let output = payload.message(140)?.message(2)?;
-            if let Some(text) = output.text(1) {
-                blocks.push(
-                    json!({"type":"tool_result", "tool_use_id":tool.text(1), "content":text}),
-                );
-            }
-            "user"
-        }
-        _ => return Ok(("assistant", blocks)),
+        _ => {}
+    }
+    Ok(blocks)
+}
+
+fn tool_result(
+    metadata: &Message<'_>,
+    payload: &[u8],
+    status: Option<i64>,
+    error: &[u8],
+) -> std::io::Result<Vec<Value>> {
+    let call = metadata.message(4)?;
+    let output = Message::decode(payload)?.message(140)?.message(2)?;
+    let error_details = Message::decode(error)?;
+    let text = output
+        .text(1)
+        .or_else(|| error_details.text(2))
+        .or_else(|| error_details.text(3));
+    if call.text(1).is_none() && text.is_none() {
+        return Ok(Vec::new());
+    }
+    let status = match status {
+        Some(3) => Some("completed"),
+        Some(7) => Some("error"),
+        _ if !error.is_empty() => Some("error"),
+        _ => None,
     };
-    Ok((role, blocks))
+    if status.is_none() && text.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut result = json!({"type":"tool_result", "tool_use_id":call.text(1), "content":text});
+    if let Some(status) = status {
+        result["status"] = json!(status);
+        result["is_error"] = json!(status == "error");
+    }
+    Ok(vec![result])
 }
 
 fn latest_model(connection: &rusqlite::Connection) -> storage::ReadResult<Option<Model>> {
@@ -120,11 +137,24 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         let mut latest = Model::default();
         let mut last_time = created;
         if schema.steps {
-            let mut stmt = connection.prepare(
-                    "SELECT idx, step_type, metadata,
-                        CASE WHEN step_type IN (:user, :response) OR :detail AND step_type = :tool THEN step_payload END
-                     FROM steps ORDER BY idx"
-                )?;
+            let columns = connection.prepare("SELECT * FROM steps LIMIT 0")?;
+            let status = if columns.column_names().contains(&"status") {
+                "status"
+            } else {
+                "NULL"
+            };
+            let error = if columns.column_names().contains(&"error_details") {
+                "error_details"
+            } else {
+                "NULL"
+            };
+            let mut stmt = connection.prepare(&format!(
+                "SELECT idx, step_type, metadata,
+                    CASE WHEN step_type IN (:user, :response) OR :detail AND step_type = :tool THEN step_payload END,
+                    CASE WHEN :detail AND step_type = :tool THEN {status} END,
+                    CASE WHEN :detail AND step_type = :tool THEN {error} END
+                 FROM steps ORDER BY idx"
+            ))?;
             let mut rows = stmt.query(rusqlite::named_params! {
                 ":user": USER_PROMPT, ":response": MODEL_RESPONSE,
                 ":tool": TOOL_RESULT, ":detail": events,
@@ -139,14 +169,27 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
                     let started = metadata.millis(1)?.filter(|&time| time > 0);
                     let finished = metadata.millis(8)?.filter(|&time| time > 0);
                     let model = Model::step(&metadata)?;
-                    let (role, blocks) = if let Some(payload) = payload {
-                        content(kind, &payload, &metadata)?
+                    let blocks = if events && kind == TOOL_RESULT {
+                        let status = row
+                            .get::<_, Option<i64>>(4)
+                            .map_err(std::io::Error::other)?;
+                        let error = row
+                            .get::<_, Option<Vec<u8>>>(5)
+                            .map_err(std::io::Error::other)?;
+                        tool_result(
+                            &metadata,
+                            payload.as_deref().unwrap_or_default(),
+                            status,
+                            error.as_deref().unwrap_or_default(),
+                        )?
+                    } else if let Some(payload) = payload {
+                        content(kind, &payload)?
                     } else {
-                        ("assistant", Vec::new())
+                        Vec::new()
                     };
-                    Ok((started, finished, model, role, blocks))
+                    Ok((started, finished, model, blocks))
                 };
-                let (started, finished, model, role, blocks) = match step() {
+                let (started, finished, model, blocks) = match step() {
                     Ok(step) => step,
                     Err(error) => {
                         warnings.push(format!("Antigravity 会话步骤 {index} 无法读取：{error}"));
@@ -178,6 +221,11 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
                 }
                 meta.has_transcript |= !blocks.is_empty();
                 if events && !blocks.is_empty() {
+                    let role = if kind == MODEL_RESPONSE {
+                        "assistant"
+                    } else {
+                        "user"
+                    };
                     detail_events.push(json!({
                         "uuid": format!("{session_id}:{index}"),
                         "type": role, "timestamp": started.and_then(ms_to_iso),

@@ -17,7 +17,7 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
     const messages={
       md:[user('u-md','## 用户标题\n\n- **用户重点**'),assistant('a-md',markdown)],
       plain:[user('u-plain','普通文本\n下一行    多个空格\n数量：2 * 3 = 6'),assistant('a-json','{"key":"**不要格式化**","items":["#不是标题"]}'),assistant('a-xml','<status>不是 Markdown</status>')],
-      tools:[user('u-tools','查看日志'),{type:'assistant',uuid:'a-tools',message:{content:[{type:'thinking',thinking:'## 思考标题\n**保持原文**'},{type:'tool_use',id:'call',name:'fixture',deferred:'tool-input'}]}},{type:'user',uuid:'r-tools',message:{content:[{type:'tool_result',tool_use_id:'call',deferred:'tool-output'}]}}],
+      tools:[user('u-tools','查看日志'),{type:'assistant',uuid:'a-tools',message:{content:[{type:'thinking',thinking:'## 思考标题\n**保持原文**'},{type:'tool_use',id:'call',name:'fixture',deferred:'tool-input',description:'查看运行日志'}, {type:'text',text:'样例助手正文'}]}},{type:'user',uuid:'r-tools',message:{content:[{type:'tool_result',tool_use_id:'call',deferred:'tool-output'}]}}],
       safe:[assistant('a-safe','## 安全样例\n\n<script>window.__PWNED__=true</script>\n\n![图片说明](https://markdown-image.invalid/pixel.png)\n\n[危险](javascript:alert(1))\n\n<img src="https://markdown-image.invalid/html.png" onerror="window.__PWNED__=true">')],
     };
     if(long)messages.long=[user('u-first','## 第一条指令'),...Array.from({length:6000},(_,i)=>assistant(`f-${i}`,`## 第 ${i} 条消息\n\n正文 **重点 ${i}**`)),assistant('a-last','# 末尾标题\n\n'+'填充段落 '.repeat(1200)+'\n\n## 搜索段\n\n**最终目标针**\n\n'+'结尾段落 '.repeat(1200))];
@@ -65,7 +65,16 @@ try{
   assert.equal(await page.locator('.msg.user .msg-text').textContent(),'普通文本\n下一行    多个空格\n数量：2 * 3 = 6');
   assert.ok((await page.locator('.detail-body').textContent()).includes('**不要格式化**'));
   await page.locator('.session-card',{hasText:'工具与思考'}).click();
-  await page.getByRole('button',{name:/工具调用 · fixture/}).click();
+  const group = page.locator('.response-group');
+  const groupHeader = group.locator(':scope > .collapsible-head');
+  await groupHeader.waitFor();
+  assert.equal(await groupHeader.getAttribute('aria-expanded'), 'false');
+  await page.getByText('样例助手正文', {exact:true}).waitFor();
+  await groupHeader.click();
+  const tool = page.getByRole('button',{name:/^工具调用 · fixture.*查看运行日志.*已完成$/});
+  await tool.waitFor();
+  assert.equal(await page.evaluate(()=>window.__MD__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
+  await tool.click();
   await page.getByRole('button',{name:/思考过程.*思考标题/}).click();
   await page.locator('.collapsible.thinking .markdown-body h2').waitFor();
   assert.equal(await page.locator('.collapsible .markdown-body').count(),2);

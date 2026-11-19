@@ -744,6 +744,9 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     let view = read_session_mode(&root, "view-thread", ReadMode::View).unwrap();
     assert_eq!(full.events.len(), view.events.len());
     assert_eq!(full.meta.assistant_count, view.meta.assistant_count);
+    let result = &view.events[2]["message"]["content"][0];
+    assert_eq!(result["is_error"], true);
+    assert!(result.get("content").is_none());
     let mut tokens = vec![];
     for (original, light) in full.events.iter().zip(&view.events) {
         assert_eq!(original["uuid"], light["uuid"]);

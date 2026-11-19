@@ -89,10 +89,11 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
             'modelID',json_extract(data,'$.model.id'),'providerID',json_extract(data,'$.model.providerID'),
             'time',json_extract(data,'$.time'),'tokens',json_extract(data,'$.tokens'),
             'cost',json_extract(data,'$.cost'),'finish',json_extract(data,'$.finish'),
+            'error',json_extract(data,'$.error.message'),
             '_asm_failed',json_type(data,'$.error') IS NOT NULL AND json_type(data,'$.error') != 'null',
             'agent',json_extract(data,'$.agent'),'mode',json_extract(data,'$.mode'),'path',json_extract(data,'$.path'))
         ELSE '{' END AS data
-        FROM temp._asm_v2_messages WHERE type IN ('user','assistant','compaction','synthetic')");
+        FROM temp._asm_v2_messages WHERE type IN ('user','assistant','compaction','synthetic','system')");
     let legacy_messages = exists(conn, "message")?;
     if legacy_messages {
         conn.execute_batch(&format!(
@@ -103,13 +104,26 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
     }
     // Array index is the stable part identity and ordering key. Do not sort tool
     // content by timestamp: v2 seq/content order is authoritative even after replay.
-    let mut parts = String::from(
+    let file_data = if session.is_some() {
+        "json_extract(f.value,'$.data')"
+    } else {
+        "NULL"
+    };
+    let mut parts = format!(
         "SELECT id || ':v2:0000000000' AS id,id AS message_id,time_created,
             json_object('type','text','text',json_extract(data,'$.text')) AS data
         FROM temp._asm_v2_messages WHERE type='user' AND json_valid(data)
         UNION ALL
+        SELECT m.id || ':v2:file:' || printf('%010d',f.key),m.id,m.time_created,
+            json_object('type','file','filename',json_extract(f.value,'$.name'),
+                'mime',json_extract(f.value,'$.mime'),'data',{file_data})
+        FROM temp._asm_v2_messages m, json_each(CASE
+            WHEN json_valid(m.data) AND json_type(m.data,'$.files')='array'
+            THEN json_extract(m.data,'$.files') ELSE '[]' END) f
+        WHERE m.type='user' AND f.type='object' AND (json_type(f.value,'$.name')='text' OR json_type(f.value,'$.data')='text')
+        UNION ALL
         SELECT m.id || ':v2:' || printf('%010d',p.key),m.id,m.time_created,
-            CASE WHEN p.type='object' THEN p.value ELSE '{' END
+            CASE WHEN p.type='object' THEN p.value ELSE '{{' END
         FROM temp._asm_v2_messages m, json_each(CASE
             WHEN json_valid(m.data) AND json_type(m.data,'$.content')='array'
             THEN json_extract(m.data,'$.content') ELSE '[]' END) p
@@ -117,11 +131,14 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
         UNION ALL
         SELECT id || ':v2:context',id,time_created,
             json_object('type','context','contextKind',type,'record',json(data))
-        FROM temp._asm_v2_messages WHERE type IN ('compaction','synthetic') AND json_valid(data)
+        FROM temp._asm_v2_messages WHERE type IN ('compaction','synthetic','system') AND json_valid(data)
         UNION ALL
-        SELECT id || ':v2:invalid',id,time_created,'{'
+        SELECT id || ':v2:invalid',id,time_created,'{{'
         FROM temp._asm_v2_messages WHERE type='assistant' AND json_valid(data)
-            AND COALESCE(json_type(data,'$.content'),'null') != 'array'",
+            AND (
+                (json_type(data,'$.content') IS NULL AND COALESCE(json_type(data,'$.error'),'null')='null')
+                OR COALESCE(json_type(data,'$.content'),'null') NOT IN ('array','null')
+            )",
     );
     if legacy_messages && exists(conn, "part")? {
         parts.push_str(

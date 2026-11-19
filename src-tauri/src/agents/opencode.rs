@@ -101,10 +101,13 @@ fn is_placeholder_title(title: &str) -> bool {
 /// 按会话归属计入完整性状态，否则损坏记录会被静默隐藏
 const REAL_MESSAGE_FILTER: &str = "CASE WHEN json_valid(m.data) THEN COALESCE(json_extract(m.data, '$.summary'), 0) != 1 ELSE 0 END";
 const REAL_TEXT_FILTER: &str = "CASE WHEN json_valid(p.data) THEN
-               json_extract(p.data, '$.type') = 'text'
+               (
+                   (json_extract(p.data, '$.type') = 'text' AND TRIM(COALESCE(json_extract(p.data, '$.text'), '')) <> '')
+                   OR (json_extract(m.data, '$.role') = 'user' AND json_extract(p.data, '$.type') = 'file')
+               )
                AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
                AND COALESCE(json_extract(p.data, '$.ignored'), 0) = 0
-               AND TRIM(COALESCE(json_extract(p.data, '$.text'), '')) <> '' ELSE 0 END";
+               ELSE 0 END";
 
 /// 按角色把计数累加进 (user, assistant) 元组；其余角色忽略
 fn add_role_count(counts: &mut (u32, u32), role: &str, n: u32) {

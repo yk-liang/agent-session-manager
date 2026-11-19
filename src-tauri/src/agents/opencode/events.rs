@@ -15,6 +15,13 @@ pub(super) fn tool_blocks(
     };
     let mut call = json!({"type":"tool_use", "id":identity,
         "name":part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?")});
+    if let Some(description) = state
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+    {
+        call["description"] = json!(description);
+    }
     if include_content {
         call["input"] = state
             .get("input")
@@ -27,17 +34,10 @@ pub(super) fn tool_blocks(
     }
     let failed = status == Some("error") || state.get("error").is_some_and(|v| !v.is_null());
     // 有输出不代表已经完成：运行状态单独保留，pending/running 不伪造成功结果。
-    let output = if failed {
-        state
-            .get("error")
-            .or_else(|| state.get("output"))
-            .or_else(|| state.get("content"))
-    } else {
-        state
-            .get("output")
-            .filter(|v| !v.is_null())
-            .or_else(|| state.get("content"))
-    };
+    let output = [failed.then_some("error"), Some("output"), Some("content")]
+        .into_iter()
+        .flatten()
+        .find_map(|key| state.get(key).filter(|value| !value.is_null()));
     let result = if matches!(status, Some("completed" | "error"))
         || output.is_some_and(|v| !v.is_null())
     {
@@ -91,6 +91,7 @@ pub(super) fn read(
     let mut user_time = None;
     let mut bad = 0u32;
     let mut current_model = None;
+    let mut message_error = None;
     for row in rows {
         let (msg_id, msg_data, part_id, part_data, created) = match row {
             Ok(row) => row,
@@ -100,6 +101,7 @@ pub(super) fn read(
             }
         };
         if msg_id != current_msg {
+            events.extend(message_error.take());
             user_index = None;
             current_msg = msg_id;
             let message = serde_json::from_str::<Value>(&msg_data).unwrap_or(Value::Null);
@@ -111,6 +113,9 @@ pub(super) fn read(
             summary = message["summary"] == true;
             current_model = super::models::from_message(&message);
             user_time = created.and_then(ms_to_iso);
+            message_error = message.get("error").and_then(|error| error.as_str().or_else(|| error["data"]["message"].as_str()).or_else(|| error["message"].as_str()))
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| json!({"type":"system", "uuid":format!("{current_msg}:error"), "timestamp":user_time, "content":text}));
             if let Some(system) = message.get("system").filter(|v| !v.is_null() && **v != "") {
                 let source = event(
                     &role,
@@ -213,6 +218,16 @@ pub(super) fn read(
                     ));
                 }
             }
+            Some("file") if role == "user" => {
+                let attachment = if let (Some(mime), Some(data)) =
+                    (part["mime"].as_str(), part["data"].as_str())
+                {
+                    json!({"type":"file","filename":part["filename"],"source":{"type":"base64","media_type":mime,"data":data}})
+                } else {
+                    part
+                };
+                events.push(event("user", &id, time, json!([attachment])));
+            }
             Some("tool") if role == "assistant" => {
                 // 作用域包括源 part，避免不同消息复用 callID 时把结果配给另一张卡片。
                 let identity = format!(
@@ -263,6 +278,7 @@ pub(super) fn read(
             }
         }
     }
+    events.extend(message_error);
     if bad > 0 {
         warnings.push(format!(
             "OpenCode 会话有 {bad} 处消息或分段无法解析，当前显示可读取内容"

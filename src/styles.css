@@ -1001,7 +1001,7 @@ details[open] > summary > .details-caret {
 }
 
 .virtual-events { position: relative; width: 100%; }
-.virtual-events > .event-group { position: absolute; top: 0; left: 0; width: 100%; }
+.virtual-events > .event-group { position: absolute; top: 0; left: 0; width: 100%; display: flex; flex-direction: column; gap: 10px; }
 .expand-text { display: block; margin-top: 6px; padding: 3px 7px; font-size: 12px; }
 .tool-loading { color: var(--text-dim); font-size: 12px; }
 
@@ -1101,6 +1101,11 @@ details[open] > summary > .details-caret {
   word-break: break-word;
 }
 
+.message-image { display: block; max-width: 100%; max-height: 360px; object-fit: contain; border-radius: 6px; }
+.msg > :is(.message-image, .message-attachment):not(:first-child) { margin-top: 8px; }
+.message-attachment { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.tool-result-parts { display: grid; gap: 6px; }
+
 /* 对话正文的可选 Markdown；表格和代码只在卡片内部滚动。 */
 .markdown-body { white-space: normal; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
 .markdown-body > :first-child { margin-top: 0; }
@@ -1199,6 +1204,17 @@ details[open] > summary > .details-caret {
   min-width: 0;
 }
 
+.collapsible-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.collapsible.error > .collapsible-head > .collapsible-status {
+  color: var(--danger);
+}
+
 .collapsible.thinking {
   border-left: 3px solid #8a7fd6;
 }
@@ -1213,6 +1229,11 @@ details[open] > summary > .details-caret {
 
 .collapsible.tool .collapsible-label {
   color: var(--accent);
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .collapsible.tool.error {
@@ -1239,6 +1260,41 @@ details[open] > summary > .details-caret {
   padding: 10px 12px;
   max-height: 360px;
   overflow: auto;
+}
+
+.response-group > .collapsible-head {
+  min-height: 36px;
+}
+
+.response-group > .collapsible-head > .collapsible-label {
+  color: var(--text);
+}
+
+.response-group .response-group-icon {
+  color: var(--text-dim);
+}
+
+.response-group > .collapsible-body {
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+}
+
+.response-group > .collapsible-body > .collapsible {
+  border: 0;
+  border-radius: 0;
+}
+
+.response-group > .collapsible-body > .collapsible + .collapsible {
+  border-top: 1px solid var(--border);
+}
+
+.response-group > .collapsible-body > .collapsible > .collapsible-head {
+  padding-left: 22px;
+}
+
+.response-group > .collapsible-body > .collapsible > .collapsible-body {
+  padding-left: 42px;
 }
 
 .code {

@@ -98,6 +98,7 @@ fn context_label(v: &Value) -> Option<(&'static str, &'static str)> {
 }
 
 pub(super) fn normalize(v: Value) -> Vec<Value> {
+    let v = normalize_tools(v);
     if let Some((kind, label)) = context_label(&v) {
         let event = record(&v, kind, label, &v);
         // Mixed tool-result envelopes must keep their tool results accessible.
@@ -174,4 +175,30 @@ pub(super) fn normalize(v: Value) -> Vec<Value> {
         events.push(normal);
     }
     events
+}
+
+fn normalize_tools(mut event: Value) -> Value {
+    let Some(parts) = event
+        .pointer_mut("/message/content")
+        .and_then(Value::as_array_mut)
+    else {
+        return event;
+    };
+    for part in parts {
+        match part["type"].as_str() {
+            Some("server_tool_use" | "mcp_tool_use") => part["type"] = json!("tool_use"),
+            Some(kind) if kind.ends_with("_tool_result") && part["tool_use_id"].is_string() => {
+                let content = &part["content"];
+                let failed = part["is_error"] == true
+                    || content["error_code"].is_string()
+                    || content["return_code"]
+                        .as_i64()
+                        .is_some_and(|code| code != 0);
+                part["type"] = json!("tool_result");
+                part["is_error"] = json!(failed);
+            }
+            _ => {}
+        }
+    }
+    event
 }

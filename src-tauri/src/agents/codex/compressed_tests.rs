@@ -242,14 +242,16 @@ fn compressed_tools_use_decoded_offsets_validate_rewrites_and_allow_appended_fra
     let call = json!({"type":"response_item","ordinal":2,"payload":{
         "type":"function_call","id":"call","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"initial-tool\"}"}});
     let output = json!({"type":"response_item","ordinal":3,"payload":{
-        "type":"function_call_output","id":"result","call_id":"c1","output":"{\"output\":\"tool result\"}"}});
+        "type":"function_call_output","id":"result","call_id":"c1",
+        "output":[{"type":"input_text","text":"{\"chunk_id\":\"sample\",\"exit_code\":1,\"output\":\"tool result\"}"},
+                  {"type":"input_text","text":"second result block"}]}});
     let plain = page(
         &root,
         "thread",
         "thread",
         0,
         None,
-        vec![message(1, "user", &"prefix ".repeat(20000)), call, output],
+        vec![message(1, "user", &"prefix ".repeat(20000)), call, output.clone()],
     );
     let original = fs::read_to_string(&plain).unwrap();
     let compressed = compress(&plain);
@@ -257,6 +259,11 @@ fn compressed_tools_use_decoded_offsets_validate_rewrites_and_allow_appended_fra
     let view = read_session_mode(&root, "thread", ReadMode::View).unwrap();
     assert!(view.warnings.is_empty());
     assert_eq!(view.events.len(), full.events.len());
+    assert_eq!(view.events[2]["message"]["content"][0]["is_error"], true);
+    assert_eq!(
+        full.events[2]["message"]["content"][0]["content"],
+        output["payload"]["output"]
+    );
     let mut tokens = Vec::new();
     for (event, expected) in view.events.iter().zip(&full.events) {
         if let Some(token) = event

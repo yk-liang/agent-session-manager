@@ -36,6 +36,10 @@ fn context_visibility_claude_and_qoder() {
             json!({"type":"assistant","message":{"role":"assistant","content":"visible-answer"}}),
             json!({"type":"user","isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"context-secret local output"}}),
             json!({"type":"system","subtype":"api_error","content":"Keep this operational error visible"}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"server_tool_use","id":"server","name":"web_search","input":{"query":"example"}},
+                {"type":"web_search_tool_result","tool_use_id":"server","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}
+            ]}}),
         ];
         let records: Vec<_> = records
             .into_iter()
@@ -88,6 +92,10 @@ fn context_visibility_claude_and_qoder() {
         assert!(detail.events.iter().any(|e| e["message"]["content"]
             .as_array()
             .is_some_and(|parts| parts.iter().any(|b| b["type"] == "tool_result"))));
+        let server = detail.events.iter().find(|event| event["uuid"] == "event-12").unwrap();
+        assert_eq!(server["message"]["content"][0]["type"], "tool_use");
+        assert_eq!(server["message"]["content"][1]["type"], "tool_result");
+        assert_eq!(server["message"]["content"][1]["is_error"], true);
         assert_eq!(fs::read(&file).unwrap(), before);
         super::super::context_test_support::check_and_export(
             name,

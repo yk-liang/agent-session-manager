@@ -2,16 +2,34 @@
 use serde_json::{json, Value};
 
 pub(super) fn has_text(value: &Value) -> bool {
+    first_text(value).is_some()
+}
+
+pub(super) fn first_text(value: &Value) -> Option<&str> {
+    let nonempty = |text: &&str| !text.trim().is_empty();
     match value {
-        Value::String(text) => !text.trim().is_empty(),
-        Value::Array(parts) => parts.iter().any(|part| {
-            part["type"] == "text"
-                && part["text"]
-                    .as_str()
-                    .is_some_and(|text| !text.trim().is_empty())
-        }),
-        _ => false,
+        Value::String(text) => Some(text.as_str()).filter(nonempty),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .find(nonempty),
+        _ => None,
     }
+}
+
+pub(super) fn is_attachment(part: &Value) -> bool {
+    matches!(
+        part["type"].as_str(),
+        Some("image" | "input_image" | "input_file" | "file" | "document")
+    )
+}
+
+pub(super) fn has_user_content(value: &Value) -> bool {
+    has_text(value)
+        || value
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(is_attachment))
 }
 
 pub(super) fn record(source: &Value, kind: &str, label: &str, content: &Value) -> Value {

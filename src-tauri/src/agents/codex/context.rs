@@ -99,7 +99,7 @@ fn user_parts(mut text: &str) -> (Vec<Context<'_>>, &str) {
     (contexts, text.trim())
 }
 
-pub(super) fn convert_message(
+fn convert_message(
     role: &str,
     text: &str,
     ts: Option<&str>,
@@ -145,6 +145,39 @@ pub(super) fn convert_message(
     if !conversation.is_empty() {
         out.push(json!({"type":role,"timestamp":ts,"cwd":cwd,
             "message":{"role":role,"content":conversation}}));
+    }
+}
+
+pub(super) fn convert_message_content(
+    role: &str,
+    items: &[Value],
+    ts: Option<&str>,
+    cwd: Option<&str>,
+    out: &mut Vec<Value>,
+) {
+    let start = out.len();
+    convert_message(role, &super::text_of_content(items), ts, cwd, out);
+    if !matches!(role, "user" | "assistant") {
+        return;
+    }
+    let attachments: Vec<_> = items
+        .iter()
+        .filter(|item| crate::agents::context::is_attachment(item))
+        .cloned()
+        .collect();
+    if attachments.is_empty() {
+        return;
+    }
+    let mut content = Vec::new();
+    if let Some(message) = out[start..]
+        .last_mut()
+        .filter(|event| event["type"] == role)
+    {
+        content.push(json!({"type":"text","text":message["message"]["content"].take()}));
+        content.extend(attachments);
+        message["message"]["content"] = json!(content);
+    } else {
+        out.push(json!({"type":role,"timestamp":ts,"cwd":cwd,"message":{"role":role,"content":attachments}}));
     }
 }
 

@@ -112,6 +112,11 @@ export interface ContentBlock {
   text?: string;
   thinking?: string;
   name?: string;
+  description?: string;
+  source?: unknown;
+  url?: string;
+  image_url?: string;
+  filename?: string;
   id?: string;
   input?: unknown;
   tool_use_id?: string;
