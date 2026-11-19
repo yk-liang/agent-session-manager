@@ -2,7 +2,8 @@
 //! main remains SQLITE_OPEN_READ_ONLY. Never migrate the user's OpenCode database.
 //! Schema reference: anomalyco/opencode @ 5ed03ad1377b549df83aa52dc11bdb07593a5327,
 //! packages/core/src/session/sql.ts and packages/schema/src/session-message.ts.
-use rusqlite::Connection;
+use rusqlite::{params_from_iter, Connection};
+use std::collections::HashMap;
 
 fn exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     conn.query_row(
@@ -10,6 +11,60 @@ fn exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         [name],
         |r| r.get(0),
     )
+}
+
+// Measure raw payloads before the v2 projections split and reshape them.
+pub(super) fn session_sizes(conn: &Connection, session: Option<&str>) -> HashMap<String, u64> {
+    let mut sizes = HashMap::new();
+    let scope = if session.is_some() {
+        "m.session_id = ?1"
+    } else {
+        "1"
+    };
+    let legacy_messages = if exists(conn, "session_v2").unwrap_or(false) {
+        let sql = format!(
+            "SELECT m.session_id, SUM(octet_length(m.data))
+             FROM temp._asm_v2_messages m JOIN main.session_v2 s ON s.id = m.session_id
+             WHERE {scope} GROUP BY m.session_id"
+        );
+        sizes.extend(read_sizes(conn, &sql, session).unwrap_or_default());
+        "temp._asm_legacy_messages"
+    } else {
+        "main.message"
+    };
+    let sql = format!(
+        "WITH messages AS (
+            SELECT m.id, m.session_id, octet_length(m.data) AS bytes
+            FROM {legacy_messages} m WHERE {scope} AND typeof(m.session_id) = 'text'
+         )
+         SELECT session_id, SUM(bytes) FROM (
+            SELECT session_id, bytes FROM messages
+            UNION ALL
+            SELECT m.session_id, octet_length(p.data) FROM messages m
+            JOIN main.part p ON p.message_id = m.id
+         ) GROUP BY session_id"
+    );
+    sizes.extend(read_sizes(conn, &sql, session).unwrap_or_default());
+    sizes
+}
+
+fn read_sizes(
+    conn: &Connection,
+    sql: &str,
+    session: Option<&str>,
+) -> rusqlite::Result<HashMap<String, u64>> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(params_from_iter(session), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut sizes = HashMap::new();
+    for row in rows {
+        let (id, bytes) = row?;
+        if let Some(bytes) = bytes {
+            sizes.insert(id, bytes as u64);
+        }
+    }
+    Ok(sizes)
 }
 
 pub(super) fn order_column(conn: &Connection) -> &'static str {
@@ -46,11 +101,11 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
     conn.prepare("SELECT id,time_created FROM main.session_v2 LIMIT 0")?;
     // Scope before JSON expansion. A LEFT JOIN can materialize a UNION view;
     // detail/search must never expand the content of unrelated sessions.
-    let filter = session
-        .map(|id| format!(" WHERE session_id='{}'", id.replace('\'', "''")))
-        .unwrap_or_default();
+    let scope = session
+        .map(|id| format!("session_id='{}'", id.replace('\'', "''")))
+        .unwrap_or_else(|| "1".into());
     conn.execute_batch(&format!(
-        "CREATE TEMP VIEW _asm_v2_messages AS SELECT * FROM main.session_message{filter}"
+        "CREATE TEMP VIEW _asm_v2_messages AS SELECT * FROM main.session_message WHERE {scope}"
     ))?;
     let columns = [
         "id",
@@ -97,10 +152,12 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
     let legacy_messages = exists(conn, "message")?;
     if legacy_messages {
         conn.execute_batch(&format!(
-            "CREATE TEMP VIEW _asm_legacy_messages AS SELECT * FROM main.message{filter}"
+            "CREATE TEMP VIEW _asm_legacy_messages AS
+             SELECT m.* FROM main.message m WHERE {scope}
+             AND NOT EXISTS (SELECT 1 FROM main.session_v2 v WHERE v.id=m.session_id)"
         ))?;
         messages.push_str(" UNION ALL SELECT id,session_id,time_created,time_created AS sort_order,data
-            FROM temp._asm_legacy_messages m WHERE NOT EXISTS (SELECT 1 FROM main.session_v2 v WHERE v.id=m.session_id)");
+            FROM temp._asm_legacy_messages");
     }
     // Array index is the stable part identity and ordering key. Do not sort tool
     // content by timestamp: v2 seq/content order is authoritative even after replay.
@@ -143,8 +200,7 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
     if legacy_messages && exists(conn, "part")? {
         parts.push_str(
             " UNION ALL SELECT p.id,p.message_id,p.time_created,p.data
-            FROM main.part p JOIN temp._asm_legacy_messages m ON m.id=p.message_id
-            WHERE NOT EXISTS (SELECT 1 FROM main.session_v2 v WHERE v.id=m.session_id)",
+            FROM main.part p JOIN temp._asm_legacy_messages m ON m.id=p.message_id",
         );
     }
     conn.execute_batch(&format!(

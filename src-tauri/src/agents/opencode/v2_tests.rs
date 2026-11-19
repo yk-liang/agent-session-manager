@@ -185,7 +185,14 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
         .unwrap()
         .execute("DELETE FROM main.session_v2", [])
         .is_err());
-    assert_eq!(catalog_at(&path, true).unwrap().sessions.len(), 2);
+    let with_empty = catalog_at(&path, true).unwrap();
+    assert_eq!(with_empty.sessions.len(), 2);
+    let empty = with_empty
+        .sessions
+        .iter()
+        .find(|meta| meta.session_id == "ses_empty")
+        .unwrap();
+    assert!(empty.size_bytes.is_none());
 }
 
 #[test]
@@ -282,6 +289,27 @@ fn v2_and_legacy_can_coexist_without_duplicate_sessions_or_stale_messages() {
     let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(catalog.sessions.len(), 2);
+    let v2_size = db
+        .query_row(
+            "SELECT SUM(length(CAST(data AS BLOB))) FROM session_message WHERE session_id = 'ses_v2'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64;
+    let legacy_size =
+        (r#"{"role":"user"}"#.len() + r#"{"type":"text","text":"legacy prompt"}"#.len()) as u64;
+    for (id, bytes) in [("ses_v2", v2_size), ("ses_legacy", legacy_size)] {
+        let meta = catalog
+            .sessions
+            .iter()
+            .find(|meta| meta.session_id == id)
+            .unwrap();
+        assert_eq!(meta.size_bytes, Some(bytes));
+        assert_eq!(
+            read_session_at(&path, id).unwrap().meta.size_bytes,
+            meta.size_bytes
+        );
+    }
     assert_eq!(
         read_session_at(&path, "ses_legacy").unwrap().events[0]["message"]["content"],
         "legacy prompt"

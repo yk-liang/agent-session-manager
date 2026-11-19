@@ -216,7 +216,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
     let mut meta = to_meta(&latest.header, None);
     meta.first_ts = None;
     meta.last_ts = None;
-    meta.size_bytes = pages.iter().map(|p| p.header.size_bytes).sum();
+    meta.size_bytes = Some(pages.iter().map(|p| p.header.size_bytes).sum());
     meta.source_files = pages.iter().map(|p| p.path.clone()).collect();
     let mut events = Vec::new();
     let mut dedup = EventDedup::default();

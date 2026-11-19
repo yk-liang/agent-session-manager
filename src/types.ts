@@ -23,7 +23,7 @@ export interface SessionMeta {
   assistantCount: number;
   realUserCount: number;
   assistantTextCount: number;
-  sizeBytes: number;
+  sizeBytes?: number;
   hasTranscript: boolean;
   statsPending?: boolean;
   /** 本次应用运行中实际打开正文失败的诊断；摘要刷新不能视为正文恢复。 */

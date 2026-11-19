@@ -180,8 +180,9 @@ export default function SessionList({
                 <span className="session-card-title">{title}</span>
                 {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
-                  {relativeTime(s.lastTs)} · {!s.statsPending && <>{s.realUserCount + s.assistantTextCount} 条消息 · </>}
-                  {formatSize(s.sizeBytes)}
+                  {relativeTime(s.lastTs)}
+                  {!s.statsPending && <> · {s.realUserCount + s.assistantTextCount} 条消息</>}
+                  {s.sizeBytes != null && ` · ${formatSize(s.sizeBytes)}`}
                 </span>
                 <span className="session-card-badges">
                   {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}

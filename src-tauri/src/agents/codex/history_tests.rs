@@ -179,7 +179,7 @@ fn paginated_history_is_one_session_with_bounded_ordered_detail_and_search() {
     assert_eq!(meta.assistant_text_count, 2);
     assert_eq!(
         meta.size_bytes,
-        first.metadata().unwrap().len() + second.metadata().unwrap().len()
+        Some(first.metadata().unwrap().len() + second.metadata().unwrap().len())
     );
     let detail = read_session_in(&root, "paged-thread").unwrap();
     assert_eq!(detail.events.len(), 3);

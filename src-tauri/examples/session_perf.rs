@@ -46,7 +46,7 @@ fn main() {
             .unwrap();
         println!(
             "{}",
-            serde_json::json!({"phase":"project-view","ms":start.elapsed().as_secs_f64()*1000.,"events":detail.events.len(),"source_mib":meta.size_bytes as f64/1048576.})
+            serde_json::json!({"phase":"project-view","ms":start.elapsed().as_secs_f64()*1000.,"events":detail.events.len(),"source_mib":meta.size_bytes.map(|bytes| bytes as f64 / 1048576.)})
         );
     }
     let largest = full.sessions.iter().max_by_key(|s| s.size_bytes).unwrap();
@@ -58,7 +58,7 @@ fn main() {
     let json = serde_json::to_vec(&detail).unwrap();
     println!(
         "{}",
-        serde_json::json!({"phase":"largest-view","ms":elapsed,"source_mib":largest.size_bytes as f64/1048576.,"events":detail.events.len(),"ipc_kib":json.len() as f64/1024.})
+        serde_json::json!({"phase":"largest-view","ms":elapsed,"source_mib":largest.size_bytes.map(|bytes| bytes as f64 / 1048576.),"events":detail.events.len(),"ipc_kib":json.len() as f64/1024.})
     );
     if let Ok(path) = std::env::var("ASM_PERF_EXPORT") {
         use std::io::Write;

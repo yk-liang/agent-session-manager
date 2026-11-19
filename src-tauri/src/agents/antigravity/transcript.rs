@@ -123,7 +123,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             assistant_count: 0,
             real_user_count: 0,
             assistant_text_count: 0,
-            size_bytes: stats.len(),
+            size_bytes: Some(stats.len()),
             has_transcript: false,
             stats_pending: false,
             source_files: vec![

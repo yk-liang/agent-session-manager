@@ -22,10 +22,11 @@ try {
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.addInitScript(({detail,payloads})=>{
     const calls=[];window.__OPENCODE__={calls};
+    const meta=new URLSearchParams(location.search).has('no-size')?{...detail.meta,sizeBytes:undefined}:detail.meta;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(cmd,args={})=>{
       calls.push({cmd,args});
       if(cmd==='list_agents')return[{id:'opencode',displayName:'OpenCode',installed:true,supportsFork:true,deletePolicy:'permanent'}];
-      if(cmd==='catalog')return{sessions:[detail.meta],projects:[{dirName:detail.meta.projectDir,displayPath:detail.meta.cwd,sessionCount:1,lastActivity:null}],warnings:[]};
+      if(cmd==='catalog')return{sessions:[meta],projects:[{dirName:meta.projectDir,displayPath:meta.cwd,sessionCount:1,lastActivity:null}],warnings:[]};
       if(cmd==='read_session')return structuredClone(detail);
       if(cmd==='read_tool_payload'){if(!payloads[args.token])throw Error('Unknown tool reference');return structuredClone(payloads[args.token]);}
       if(cmd==='search_conversations'){
@@ -38,6 +39,8 @@ try {
   await page.goto(baseURL);
   await page.locator('.session-card .model-label').waitFor();
   assert.equal(await page.locator('.session-card .model-label').textContent(),'fixture/model-b');
+  assert.ok(fixture.detail.meta.sizeBytes > 0);
+  assert.match(await page.locator('.session-card-sub').textContent(), / · [1-9]\d*(?:\.\d+)? (?:B|KB|MB)$/);
   await page.locator('.session-card').click();
   await page.getByRole('button',{name:/^工具调用 · read.*已完成$/}).waitFor();
   const ids=await page.locator('.event-group').evaluateAll(rows=>rows.map(el=>Number(el.id.slice(3))));
@@ -84,4 +87,8 @@ try {
   await page.waitForFunction(index=>{const m=document.querySelector(`#ev-${index} mark`)?.getBoundingClientRect();const b=document.querySelector('.detail-body')?.getBoundingClientRect();return m&&b&&m.top>=b.top&&m.bottom<=b.bottom;},last);
   assert.equal(await mark.textContent(),'final needle');assert.deepEqual(errors,[]);
   console.log(`PASS: search locates the correct body after interleaved tool/thinking parts (${engine})`);
+  await page.goto(new URL('?no-size', baseURL).href);
+  await page.locator('.session-card-sub').waitFor();
+  assert.match(await page.locator('.session-card-sub').textContent(), / · \d+ 条消息$/);
+  console.log(`PASS: measured session sizes render and unavailable sizes are omitted (${engine})`);
 } finally {await browser?.close();rmSync(privateDir,{recursive:true,force:true});}

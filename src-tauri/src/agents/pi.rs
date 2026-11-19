@@ -68,7 +68,7 @@ struct ParsedPi {
     events: Vec<Value>,
     real_user_count: u32,
     assistant_text_count: u32,
-    size_bytes: u64,
+    size_bytes: Option<u64>,
     mtime_ms: i64,
 }
 
@@ -100,11 +100,10 @@ fn parse_pi_session(path: &Path, collect_events: bool) -> super::ParseOutcome<Pa
             return super::ParseOutcome::Failed(format!("无法读取 Pi 会话文件 {:?}: {e}", path))
         }
     };
-    let size_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mtime_ms = file
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
+    let metadata = file.metadata().ok();
+    let size_bytes = metadata.as_ref().map(|m| m.len());
+    let mtime_ms = metadata
+        .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);

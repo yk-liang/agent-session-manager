@@ -81,7 +81,7 @@ impl Scan {
 
 fn preview(pages: &[history::Page], paths: Vec<PathBuf>) -> SessionMeta {
     let mut meta = to_meta(&pages.last().unwrap().header, None);
-    meta.size_bytes = pages.iter().map(|page| page.header.size_bytes).sum();
+    meta.size_bytes = Some(pages.iter().map(|page| page.header.size_bytes).sum());
     meta.last_ts = paths
         .iter()
         .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())

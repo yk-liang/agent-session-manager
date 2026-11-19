@@ -466,14 +466,16 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
             warnings: Vec::new(),
         });
     }
-    let conn = open_db(path)?;
+    let db = open_db(path)?;
+    let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let conn = &snapshot;
     let mut warnings = Vec::new();
     // 批量计数三态：必须保留"计数是否完整"——split() 会把 Ok 与
     // Degraded 拍平成同一个 Some(map)，丢失部分缺失的信号。
     // 只有完整计数才能把不在表中的会话判为空；降级/失败时
     // 已有条目也可能只是部分计数（坏行会丢掉某个 role 分组），
     // 不能仅凭存在就信任，一律逐会话重查
-    let (counts_complete, counts) = match batch_message_counts(&conn) {
+    let (counts_complete, counts) = match batch_message_counts(conn) {
         super::ParseOutcome::Ok(map) => (true, map),
         super::ParseOutcome::Degraded(map, w) => {
             warnings.push(w);
@@ -490,9 +492,9 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
     let corrupt = if counts_complete {
         None
     } else {
-        corrupt_sessions(&conn)
+        corrupt_sessions(conn)
     };
-    let (rows, ws) = load_session_rows(&conn).split();
+    let (rows, ws) = load_session_rows(conn).split();
     warnings.extend(ws);
     let Some(rows) = rows else {
         // 会话表完全不可读：告警已记录，返回空目录
@@ -505,7 +507,9 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
         });
     };
     super::check_catalog_cancelled(cancelled)?;
-    let mut historical_models = models::latest(&conn, None, &mut warnings);
+    let mut historical_models = models::latest(conn, None, &mut warnings);
+    super::check_catalog_cancelled(cancelled)?;
+    let mut sizes = storage::session_sizes(conn, None);
     let mut missing_id = 0u32;
     let mut items = Vec::new();
     for row in rows {
@@ -529,7 +533,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
         let (cnt, bypass_empty_filter) = if counts_complete {
             (counts.get(&row.id).copied().unwrap_or((0, 0)), false)
         } else {
-            match session_message_counts(&conn, &row.id) {
+            match session_message_counts(conn, &row.id) {
                 Some(c) => (c, false),
                 None => {
                     // 计数未知：保底展示 + 告警（区分损坏记录/查询失败），
@@ -547,7 +551,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
             }
         };
         let meta = build_meta(
-            &conn,
+            conn,
             &row,
             cnt,
             include_empty || bypass_empty_filter,
@@ -555,6 +559,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
         );
         let Some(mut meta) = meta else { continue };
         meta.model = historical_models.remove(&row.id);
+        meta.size_bytes = sizes.remove(&row.id);
         let mut wal = path.as_os_str().to_os_string();
         wal.push("-wal");
         meta.source_files = vec![path.to_path_buf(), PathBuf::from(wal)];
@@ -614,6 +619,7 @@ fn read_session_mode_at(
     let mut meta =
         build_meta(conn, &row, counts, true, &mut warnings).ok_or("未找到该 OpenCode 会话")?;
     meta.model = models::latest(conn, Some(session_id), &mut warnings).remove(session_id);
+    meta.size_bytes = storage::session_sizes(conn, Some(session_id)).remove(session_id);
     let (events, issues) = events::read(conn, path, session_id, view)?;
     warnings.extend(issues);
     Ok(SessionDetail {
@@ -803,7 +809,7 @@ fn build_meta(
         assistant_count: assistant_text,
         real_user_count: real_user,
         assistant_text_count: assistant_text,
-        size_bytes: 0,
+        size_bytes: None,
         has_transcript: true,
         stats_pending: false,
         source_files: Vec::new(),
@@ -827,14 +833,15 @@ mod tests {
             CREATE TABLE part (id TEXT, message_id TEXT, time_created INTEGER, data TEXT);
             INSERT INTO session VALUES ('ses_cached', 'original', '/tmp/x', NULL, 1, 1, NULL, NULL);
             INSERT INTO message VALUES ('m1', 'ses_cached', 1, '{\"role\":\"user\"}');
-            INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"question\"}');
+            INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"问题\"}');
             PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
-        assert_eq!(
-            catalog_at(&path, false).unwrap().sessions[0].assistant_text_count,
-            0
-        );
+        let initial = catalog_at(&path, false).unwrap();
+        let initial_bytes =
+            (r#"{"role":"user"}"#.len() + r#"{"type":"text","text":"问题"}"#.len()) as u64;
+        assert_eq!(initial.sessions[0].assistant_text_count, 0);
+        assert_eq!(initial.sessions[0].size_bytes, Some(initial_bytes));
         let before = path.metadata().unwrap();
         conn.execute_batch(
             "INSERT INTO message VALUES ('m2', 'ses_cached', 2, '{\"role\":\"assistant\"}');
@@ -851,6 +858,12 @@ mod tests {
         );
         let updated = catalog_at(&path, false).unwrap();
         assert_eq!(updated.sessions[0].assistant_text_count, 1);
+        let added_bytes =
+            (r#"{"role":"assistant"}"#.len() + r#"{"type":"text","text":"answer"}"#.len()) as u64;
+        assert_eq!(
+            updated.sessions[0].size_bytes,
+            Some(initial_bytes + added_bytes)
+        );
         assert_eq!(updated.sessions[0].title.as_deref(), Some("renamed"));
         conn.execute("UPDATE session SET time_archived=99", [])
             .unwrap();

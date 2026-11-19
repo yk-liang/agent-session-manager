@@ -86,7 +86,8 @@ pub struct SessionMeta {
     pub real_user_count: u32,
     /// 含正文文本的 assistant 消息数（排除纯工具调用/思考事件）
     pub assistant_text_count: u32,
-    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     pub has_transcript: bool,
     /// 首屏仅有文件头时尚无精确计数；后台摘要完成后清除。
     #[serde(default)]

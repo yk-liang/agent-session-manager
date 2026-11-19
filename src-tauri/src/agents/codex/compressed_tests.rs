@@ -170,10 +170,12 @@ fn check_mixed_pages(compress_middle: bool) {
     assert_eq!(meta.source_files.len(), 3);
     assert_eq!(
         meta.size_bytes,
-        [&first, &second, &third]
-            .iter()
-            .map(|p| p.metadata().unwrap().len())
-            .sum::<u64>()
+        Some(
+            [&first, &second, &third]
+                .iter()
+                .map(|p| p.metadata().unwrap().len())
+                .sum()
+        )
     );
     let detail = read_session_in(&root, "thread").unwrap();
     assert!(detail.warnings.is_empty(), "{:?}", detail.warnings);

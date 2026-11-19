@@ -12,13 +12,17 @@ fn main() {
     let start = Instant::now();
     source.catalog(false).unwrap();
     let cached_catalog_ms = start.elapsed().as_secs_f64() * 1000.;
-    let path = source.data_dir().unwrap().join("opencode.db");
-    let conn = agents::opencode::open_db(&path).unwrap();
     let requested = std::env::var("ASM_OPENCODE_SESSION").ok();
-    let (id,bytes):(String,i64)=conn.query_row("SELECT s.id,sum(length(p.data)) FROM session s JOIN message m ON m.session_id=s.id JOIN part p ON p.message_id=m.id
-        WHERE s.parent_id IS NULL AND s.time_archived IS NULL AND (?1 IS NULL OR s.id=?1) GROUP BY s.id ORDER BY 2 DESC LIMIT 1",[requested],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let session_id = requested.as_deref().unwrap_or_else(|| {
+        &catalog
+            .sessions
+            .iter()
+            .max_by_key(|session| session.size_bytes)
+            .expect("No OpenCode sessions")
+            .session_id
+    });
     let start = Instant::now();
-    let detail = source.read_session_view("", &id).unwrap();
+    let detail = source.read_session_view("", session_id).unwrap();
     let read_ms = start.elapsed().as_secs_f64() * 1000.;
     if let Ok(path) = std::env::var("ASM_OPENCODE_VIEW_EXPORT") {
         use std::io::Write;
@@ -48,7 +52,8 @@ fn main() {
         "{}",
         serde_json::json!({"sessions":catalog.sessions.len(),"catalog_ms":catalog_ms,"cached_catalog_ms":cached_catalog_ms,
         "models":catalog.sessions.iter().filter(|s|s.model.is_some()).count(),
-        "source_mib":bytes as f64/1048576.,"events":detail.events.len(),
+        "sessions_with_size":catalog.sessions.iter().filter(|s| s.size_bytes.is_some()).count(),
+        "source_mib":detail.meta.size_bytes.map(|bytes| bytes as f64 / 1048576.),"events":detail.events.len(),
         "read_ms":read_ms,"first_tool_ms":start.elapsed().as_secs_f64()*1000.,"ipc_kib":serde_json::to_vec(&detail).unwrap().len() as f64/1024.,
         "tools":detail.events.iter().filter(|e|e.pointer("/message/content/0/type").and_then(serde_json::Value::as_str)==Some("tool_use")).count(),
         "thinking":detail.events.iter().filter(|e|e.pointer("/message/content/0/type").and_then(serde_json::Value::as_str)==Some("thinking")).count()})

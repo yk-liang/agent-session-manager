@@ -647,7 +647,7 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         assistant_count: p.assistant_count,
         real_user_count: p.real_user_count,
         assistant_text_count: p.assistant_text_count,
-        size_bytes: p.size_bytes,
+        size_bytes: Some(p.size_bytes),
         has_transcript: true,
         stats_pending: false,
         source_files: Vec::new(),
