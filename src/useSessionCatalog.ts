@@ -3,19 +3,19 @@ import * as api from "./api";
 import { AutoRefreshScheduler } from "./autoRefresh";
 import { AgentCatalogCache, EMPTY_CATALOG } from "./catalogCache";
 import { observeSessionChanges } from "./sessionWatch";
-import type { AgentInfo } from "./types";
+import type { AgentInfo, CatalogFilter } from "./types";
 
 export function useSessionCatalog(
   agent: AgentInfo | undefined,
-  includeEmpty: boolean,
+  filter: CatalogFilter,
   active: boolean,
   blocked: boolean,
   onWatchError: (error: string) => void,
 ) {
   const [cache] = useState(() => new AgentCatalogCache(api.catalog));
   const [refreshKey, setRefreshKey] = useState(0);
-  const scope = useMemo(() => ({ agent, includeEmpty }), [agent, includeEmpty]);
-  const catalog = useSyncExternalStore(cache.subscribe, () => active && agent ? cache.visible(agent.id, includeEmpty) : undefined);
+  const scope = useMemo(() => ({ agent, filter }), [agent, filter]);
+  const catalog = useSyncExternalStore(cache.subscribe, () => active && agent ? cache.visible(agent.id, filter) : undefined);
   const [status, setStatus] = useState<{ scope: typeof scope; refreshing: boolean; error: string | null }>();
   const scheduler = useRef<AutoRefreshScheduler | null>(null);
   const blockedRef = useRef(blocked);
@@ -24,7 +24,7 @@ export function useSessionCatalog(
   useEffect(() => {
     if (!scope.agent || !active) return;
     const { id } = scope.agent;
-    const { includeEmpty } = scope;
+    const { filter } = scope;
     let disposed = false;
     const autoRefresh = new AutoRefreshScheduler(reload);
     scheduler.current = autoRefresh;
@@ -35,12 +35,12 @@ export function useSessionCatalog(
       autoRefresh.setBusy(true);
       setStatus({ scope, refreshing: true, error: null });
       try {
-        const catalog = await cache.load(id, includeEmpty, generation);
+        const catalog = await cache.load(id, filter, generation);
         if (disposed) return;
         setStatus({ scope, refreshing: false, error: null });
         if (catalog.sessions.some(session => session.statsPending)) {
-          await cache.refine(id, includeEmpty, async revision => {
-            const refined = await api.refineCatalog(id, includeEmpty, generation, revision);
+          await cache.refine(id, filter, async revision => {
+            const refined = await api.refineCatalog(id, filter, generation, revision);
             if (disposed) return null;
             if (blockedRef.current) {
               autoRefresh.request("focus");
@@ -73,7 +73,7 @@ export function useSessionCatalog(
   return {
     cache,
     catalog: catalog ?? EMPTY_CATALOG,
-    loading: active && !!agent && !cache.peek(agent.id, includeEmpty) && !error,
+    loading: active && !!agent && !cache.peek(agent.id, filter) && !error,
     refreshing: active && (current?.refreshing ?? false),
     error,
     refresh: () => setRefreshKey(key => key + 1),

@@ -24,7 +24,7 @@ pub use scanning::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 展开路径开头的 ~（用于环境变量覆盖值）
 pub fn expand_tilde(p: &str) -> std::path::PathBuf {
@@ -89,6 +89,8 @@ pub struct SessionMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     pub has_transcript: bool,
+    #[serde(default)]
+    pub archived: bool,
     /// 首屏仅有文件头时尚无精确计数；后台摘要完成后清除。
     #[serde(default)]
     pub stats_pending: bool,
@@ -205,6 +207,7 @@ pub struct AgentInfo {
     pub display_name: String,
     pub installed: bool,
     pub supports_fork: bool,
+    pub supports_archive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_entrypoint: Option<&'static str>,
     /// 该 Agent 的数据目录（用于「打开数据目录」）
@@ -236,6 +239,12 @@ impl AgentWatchPaths {
 
 pub type CatalogRefinement = Box<dyn FnOnce(&dyn Fn() -> bool) -> Result<Catalog, String> + Send>;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CatalogFilter {
+    pub include_empty: bool,
+    pub include_archived: bool,
+}
+
 pub fn check_catalog_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     if cancelled() {
         Err("目录更新已取消".into())
@@ -252,6 +261,9 @@ pub trait AgentSource: Send + Sync {
     /// 本机是否存在该 Agent 的数据目录
     fn is_installed(&self) -> bool;
     fn supports_fork(&self) -> bool {
+        false
+    }
+    fn supports_archive(&self) -> bool {
         false
     }
     fn resume_entrypoint(&self) -> Option<&'static str> {
@@ -272,20 +284,20 @@ pub trait AgentSource: Send + Sync {
     }
     #[allow(dead_code)] // Standalone catalog inspection examples.
     fn catalog(&self, include_empty: bool) -> Result<Catalog, String> {
-        self.scan_catalog(include_empty, &|| false)
+        self.scan_catalog(CatalogFilter { include_empty, ..Default::default() }, &|| false)
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Catalog, String>;
     fn prepare_catalog(
         &self,
-        include_empty: bool,
+        filter: CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Catalog, Option<CatalogRefinement>), String> {
         check_catalog_cancelled(cancelled)?;
-        let catalog = self.scan_catalog(include_empty, cancelled)?;
+        let catalog = self.scan_catalog(filter, cancelled)?;
         check_catalog_cancelled(cancelled)?;
         Ok((catalog, None))
     }
@@ -308,6 +320,9 @@ pub trait AgentSource: Send + Sync {
     }
     fn delete_session(&self, _project_dir: &str, _session_id: &str) -> Result<(), String> {
         Err("该 Agent 的会话为只读".into())
+    }
+    fn set_session_archived(&self, _: &str, _: &str, _: bool) -> Result<(), String> {
+        Err("该 Agent 不支持归档会话".into())
     }
     /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
     /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
@@ -387,6 +402,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
             display_name: s.display_name().to_string(),
             installed: s.is_installed(),
             supports_fork: s.supports_fork(),
+            supports_archive: s.supports_archive(),
             resume_entrypoint: s.resume_entrypoint(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
             delete_policy: s.delete_policy(),
@@ -406,7 +422,6 @@ pub fn shell_quote(s: &str) -> String {
 /// 补充常见安装目录，逐个查实际存在且带执行位的文件，返回首个
 /// 命中；找不到返回 None（调用方须显式报错，绝不静默降级）。
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let mut dirs: Vec<PathBuf> = Vec::new();
     // 1) 继承的 PATH（终端/dev 启动时已足够；空路径段跳过）
     if let Ok(path) = std::env::var("PATH") {
@@ -427,17 +442,15 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
             dirs.push(home.join(sub));
         }
     }
-    for dir in dirs {
-        let candidate = dir.join(name);
-        // metadata 跟随符号链接（Homebrew 的 bin 多为软链接），
-        // 只接受带执行位的普通文件
-        if let Ok(meta) = candidate.metadata() {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    dirs.into_iter()
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// 在新终端窗口中执行命令（仅 macOS，通过 osascript 驱动 Terminal）
@@ -524,7 +537,7 @@ mod tests {
         fn data_dir(&self) -> Option<PathBuf> {
             None
         }
-        fn scan_catalog(&self, _: bool, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
+        fn scan_catalog(&self, _: CatalogFilter, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(assemble_catalog(vec![]))
         }
@@ -543,7 +556,7 @@ mod tests {
     fn delete_semantics_per_agent() {
         for source in all_sources() {
             let expected = match source.id() {
-                "opencode" => DeletePolicy::Permanent,
+                "codex" | "opencode" => DeletePolicy::Permanent,
                 "antigravity" => DeletePolicy::ReadOnly,
                 _ => DeletePolicy::Trash,
             };
@@ -555,16 +568,17 @@ mod tests {
     fn catalog_preparation_honors_cancellation_without_agent_specific_dispatch() {
         use std::sync::atomic::Ordering;
         let source = FixtureSource(Default::default());
-        assert!(source.prepare_catalog(false, &|| true).is_err());
+        let filter = CatalogFilter::default();
+        assert!(source.prepare_catalog(filter, &|| true).is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 0);
         assert!(source
-            .prepare_catalog(false, &|| source.0.load(Ordering::SeqCst) > 0)
+            .prepare_catalog(filter, &|| source.0.load(Ordering::SeqCst) > 0)
             .is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 1);
-        assert!(source.prepare_catalog(false, &|| false).is_ok());
+        assert!(source.prepare_catalog(filter, &|| false).is_ok());
         assert!(source.read_tool_payload("anything").is_none());
         assert!(source.watch_paths(false).transcript_dirs.is_empty());
-        assert!(codex::CodexSource.prepare_catalog(false, &|| true).is_err());
+        assert!(codex::CodexSource.prepare_catalog(filter, &|| true).is_err());
     }
 
     #[test]

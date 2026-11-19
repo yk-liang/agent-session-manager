@@ -30,7 +30,7 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
             ? `${agent.displayName} · ${sessions.length} 个会话`
             : `「${session.title || session.sessionId.slice(0, 8) + "…"}」`}</p>
           <p>{toTrash ? "会话文件将移入废纸篓，可在访达中还原。" : "会话将永久删除，无法恢复。"}</p>
-          {agent.id === "opencode" && <p>关联的 OpenCode 子会话也会被删除。</p>}
+          {(agent.id === "codex" || agent.id === "opencode") && <p>关联的子会话也会被删除。</p>}
           {batch && (
             <>
               <ul className="batch-targets">

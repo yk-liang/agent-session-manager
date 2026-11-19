@@ -189,10 +189,10 @@ impl AgentSource for AntigravitySource {
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Catalog, String> {
-        catalog_in(&conversation_dirs(), include_empty, cancelled)
+        catalog_in(&conversation_dirs(), filter.include_empty, cancelled)
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
         let mut warnings = Vec::new();

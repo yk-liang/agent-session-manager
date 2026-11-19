@@ -470,8 +470,8 @@ fn search_positions_stay_aligned_after_reasoning_and_tool_parts_are_inserted() {
         fn data_dir(&self) -> Option<PathBuf> {
             Some(self.0.parent().unwrap().into())
         }
-        fn scan_catalog(&self, empty: bool, _: &dyn Fn() -> bool) -> Result<super::super::Catalog, String> {
-            catalog_at(&self.0, empty)
+        fn scan_catalog(&self, filter: crate::agents::CatalogFilter, _: &dyn Fn() -> bool) -> Result<super::super::Catalog, String> {
+            catalog_at(&self.0, filter.include_empty)
         }
         fn read_session(&self, _: &str, id: &str) -> Result<SessionDetail, String> {
             read_session_at(&self.0, id)

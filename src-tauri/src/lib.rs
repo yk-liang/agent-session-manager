@@ -22,7 +22,7 @@ fn open_collector_settings(service: tauri::State<usage::service::Service>) -> Re
 
 use agents::profiles::workspace::{ChangeKind, ChangePreview, Validation, Workspace};
 use agents::profiles::{CurrentConfig, ProfileSummary};
-use agents::{AgentInfo, SessionDetail};
+use agents::{AgentInfo, CatalogFilter, SessionDetail};
 use session_catalog::{SessionCatalogs, Snapshot};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
@@ -193,6 +193,7 @@ async fn catalog(
     state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
     agent: String,
     include_empty: bool,
+    include_archived: Option<bool>,
     generation: u64,
     revision: Option<u64>,
 ) -> Result<Option<Snapshot>, String> {
@@ -200,7 +201,10 @@ async fn catalog(
     run_backend(move || {
         state.load(
             agents::find_source(&agent)?.as_ref(),
-            include_empty,
+            CatalogFilter {
+                include_empty,
+                include_archived: include_archived.unwrap_or(false),
+            },
             generation,
             revision,
         )
@@ -225,6 +229,7 @@ async fn refine_catalog(
     state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
     agent: String,
     include_empty: bool,
+    include_archived: Option<bool>,
     generation: u64,
     revision: Option<u64>,
 ) -> Result<Option<Snapshot>, String> {
@@ -232,7 +237,10 @@ async fn refine_catalog(
     run_backend(move || {
         state.refine(
             agents::find_source(&agent)?.as_ref(),
-            include_empty,
+            CatalogFilter {
+                include_empty,
+                include_archived: include_archived.unwrap_or(false),
+            },
             generation,
             revision,
         )
@@ -296,6 +304,19 @@ async fn delete_session(
             }
             source.delete_session(&project_dir, &session_id)
         })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_session_archived(
+    agent: String,
+    project_dir: String,
+    session_id: String,
+    archived: bool,
+) -> Result<(), String> {
+    run_backend(move || {
+        agents::find_source(&agent)?.set_session_archived(&project_dir, &session_id, archived)
     })
     .await
 }
@@ -528,6 +549,7 @@ pub fn run() {
             cancel_conversation_search,
             read_session,
             delete_session,
+            set_session_archived,
             resume_command,
             resume_in_terminal,
             get_current_config,

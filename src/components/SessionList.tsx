@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { AgentInfo, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
+import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight, Search, X } from "lucide-react";
 import UiIcon from "./UiIcon";
 import { formatSize, relativeTime, sessionKey, shortPath } from "../utils";
@@ -16,11 +16,12 @@ interface Props {
   search: string;
   onSearch: (s: string) => void;
   onSelect: (s: SessionMeta) => void;
-  showEmpty: boolean;
-  onShowEmpty: (v: boolean) => void;
+  filter: CatalogFilter;
+  onFilterChange: (filter: CatalogFilter) => void;
   batchMode: boolean;
   agent?: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
+  onToggleArchive: (session: SessionMeta) => void;
   toast: (message: string, error?: boolean) => void;
   checkedSessionKeys: Set<string>;
   onToggleBatch: () => void;
@@ -52,11 +53,12 @@ export default function SessionList({
   search,
   onSearch,
   onSelect,
-  showEmpty,
-  onShowEmpty,
+  filter,
+  onFilterChange,
   batchMode,
   agent,
   onRequestDelete,
+  onToggleArchive,
   toast,
   checkedSessionKeys,
   onToggleBatch,
@@ -118,15 +120,20 @@ export default function SessionList({
         {loadError && <ReadDiagnostics className="catalog-error" title="无法读取会话列表" errors={[loadError]} retry={onRetryLoad} busy={disabled || busy} />}
         {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`${warnings.length} 条读取提示`} errors={warnings} description="部分会话未能读取。" retry={onRetryLoad} busy={disabled || busy} />}
         <div className="session-list-options">
-          <label className="toggle show-empty-toggle">
-            <input
-              type="checkbox"
-              checked={showEmpty}
-              onChange={(e) => onShowEmpty(e.target.checked)}
-              disabled={disabled}
-            />
-            显示空会话
-          </label>
+          <div className="session-list-filters">
+            <label className="toggle show-empty-toggle">
+              <input type="checkbox" checked={filter.includeEmpty}
+                onChange={(e) => onFilterChange({ ...filter, includeEmpty: e.target.checked })} disabled={disabled} />
+              显示空会话
+            </label>
+            {agent?.supportsArchive && (
+              <label className="toggle">
+                <input type="checkbox" checked={filter.includeArchived}
+                  onChange={(e) => onFilterChange({ ...filter, includeArchived: e.target.checked })} disabled={disabled} />
+                显示已归档
+              </label>
+            )}
+          </div>
           {agent && agent.deletePolicy !== "readOnly" && (
             <button onClick={onToggleBatch} disabled={disabled || busy || searchPending || (!batchMode && sessions.length === 0)}>
               {batchMode ? "完成" : "批量管理"}
@@ -187,6 +194,7 @@ export default function SessionList({
                 <span className="session-card-badges">
                   {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}
                   {isEmpty && <span className="badge empty-badge">空会话</span>}
+                  {s.archived && <span className="badge">已归档</span>}
                   <ModelLabel model={s.model} badge />
                   {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
                 </span>
@@ -214,7 +222,8 @@ export default function SessionList({
                     <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
                       {content}
                     </button>
-                    {agent && <SessionActions agent={agent} session={s} onRequestDelete={onRequestDelete} toast={toast} compact disabled={disabled} />}
+                    {agent && <SessionActions agent={agent} session={s} onRequestDelete={onRequestDelete}
+                      onToggleArchive={onToggleArchive} toast={toast} compact disabled={disabled} />}
                   </div>
                 )}
               </div>

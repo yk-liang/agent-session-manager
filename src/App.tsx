@@ -18,15 +18,17 @@ import { sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog } from "./useSessionCatalog";
-import type { AgentInfo, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
+import { DEFAULT_CATALOG_FILTER } from "./catalogCache";
+import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
 
 type Tab = "sessions" | "config" | "usage";
 
-type DeletionState =
-  | { phase: "confirm"; request: SessionDeletion }
-  | { phase: "running"; progress: { completed: number; total: number } | null };
+type SessionOperation =
+  | { kind: "confirmDelete"; request: SessionDeletion }
+  | { kind: "delete"; progress: { completed: number; total: number } | null }
+  | { kind: "archive" };
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("sessions");
@@ -39,14 +41,14 @@ export default function App() {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [readRequest, setReadRequest] = useState<{ session: SessionMeta; pending: boolean; error: string | null } | null>(null);
   const [searchTarget, setSearchTarget] = useState<ConversationSearchTarget | null>(null);
-  const [showEmpty, setShowEmpty] = useState(false);
+  const [filter, setFilter] = useState(DEFAULT_CATALOG_FILTER);
   const [configRefreshKey, setConfigRefreshKey] = useState(0);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedSessionKeys, setCheckedSessionKeys] = useState<Set<string>>(new Set());
-  const [deletion, setDeletion] = useState<DeletionState | null>(null);
+  const [operation, setOperation] = useState<SessionOperation | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
-  const deletionRunning = useRef(false);
-  const deletionActive = deletion !== null;
+  const mutationRunning = useRef(false);
+  const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   // 切换会话或离开当前项目后，丢弃尚未返回的正文请求。
@@ -113,9 +115,11 @@ export default function App() {
 
   const availableAgents = agents.filter((agent) => agent.installed);
   const currentAgent = availableAgents.find((agent) => agent.id === selectedAgent);
+  const includeArchived = filter.includeArchived && !!currentAgent?.supportsArchive;
+  const catalogFilter = useMemo(() => ({ includeEmpty: filter.includeEmpty, includeArchived }), [filter.includeEmpty, includeArchived]);
   const onWatchError = useCallback(() => showToast("暂时无法监测会话更新。切回应用时会重试。", true), [showToast]);
   const { cache: catalogCache, catalog, loading, refreshing, error: catalogError, refresh: refreshCatalog } = useSessionCatalog(
-    currentAgent, showEmpty, tab === "sessions", deletionActive || batchMode, onWatchError,
+    currentAgent, catalogFilter, tab === "sessions", sessionActionsBusy || batchMode, onWatchError,
   );
   const catalogWarnings = catalog.warnings;
   const batchBusy = loading || refreshing;
@@ -126,24 +130,18 @@ export default function App() {
   };
 
   const changeTab = (next: Tab) => {
-    if (next === tab || deletionActive || deletionRunning.current) return;
+    if (next === tab || sessionActionsBusy || mutationRunning.current) return;
     protectConfig(() => { clearBatchSelection(); setBatchMode(false); setTab(next); }, "切换标签页");
   };
 
   const changeSearch = (next: string) => {
-    if (deletionActive || deletionRunning.current) return;
+    if (sessionActionsBusy || mutationRunning.current) return;
     clearBatchSelection();
     setSearch(next);
   };
 
-  const changeShowEmpty = (next: boolean) => {
-    if (deletionActive || deletionRunning.current) return;
-    clearBatchSelection();
-    setShowEmpty(next);
-  };
-
   const selectAgentNow = (id: string) => {
-    if (deletionActive || deletionRunning.current || id === selectedAgent) return;
+    if (sessionActionsBusy || mutationRunning.current || id === selectedAgent) return;
     clearBatchSelection();
     setBatchMode(false);
     closeSessionDetail();
@@ -152,7 +150,7 @@ export default function App() {
   };
 
   const selectAgent = (id: string) => {
-    if (deletionActive || deletionRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
+    if (sessionActionsBusy || mutationRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
     const available = availableAgents.some(agent => agent.id === id);
     if (!available && !(tab === "usage" && id === "all")) return;
     protectConfig(() => {
@@ -162,7 +160,7 @@ export default function App() {
   };
 
   const selectProject = (dirName: string | null) => {
-    if (deletionActive || deletionRunning.current) return;
+    if (sessionActionsBusy || mutationRunning.current) return;
     clearBatchSelection();
     setBatchMode(false);
     closeSessionDetail();
@@ -172,12 +170,12 @@ export default function App() {
   const { groups: sidebarGroups, byGroup, hints: groupHints, projectlessKeys: hiddenPathKeys } = catalogGroups(catalog);
   const scopedSessions = selectedProject === null ? catalog.sessions : byGroup.get(selectedProject) ?? NO_SESSIONS;
   useEffect(() => {
-    if (tab !== "sessions" || loading || deletionActive || selectedProject === null || sidebarGroups.some((group) => group.dirName === selectedProject)) return;
+    if (tab !== "sessions" || loading || sessionActionsBusy || selectedProject === null || sidebarGroups.some((group) => group.dirName === selectedProject)) return;
     closeSessionDetail();
     setSelectedProject(null);
     setBatchMode(false);
     setCheckedSessionKeys(new Set());
-  }, [sidebarGroups, selectedProject, loading, deletionActive, tab, closeSessionDetail]);
+  }, [sidebarGroups, selectedProject, loading, sessionActionsBusy, tab, closeSessionDetail]);
   const contentSearch = useConversationSearch(selectedAgent, search.trim(), scopedSessions, tab === "sessions" && !loading);
 
   const filtered = useMemo(() => {
@@ -199,16 +197,26 @@ export default function App() {
 
   const selectedDetail = useMemo(() => {
     if (tab !== "sessions" || !detail || !selectedAgent) return detail;
-    const meta = catalogCache.withCurrentMetadata(selectedAgent, showEmpty, detail.meta);
+    const meta = catalogCache.withCurrentMetadata(selectedAgent, catalogFilter, detail.meta);
     return meta === detail.meta ? detail : { ...detail, meta };
-  }, [catalog, catalogCache, detail, selectedAgent, showEmpty, tab]);
+  }, [catalog, catalogCache, catalogFilter, detail, selectedAgent, tab]);
 
   const selectedSessionKey = detail ? sessionKey(detail.meta) : readRequest ? sessionKey(readRequest.session) : null;
 
-  const openSession = async (s: SessionMeta) => {
-    if (!selectedAgent || deletionActive || batchMode || deletionRunning.current) return;
+  const changeFilter = (next: CatalogFilter) => {
+    if (sessionActionsBusy || mutationRunning.current) return;
+    clearBatchSelection();
+    setFilter(currentAgent?.supportsArchive ? next : { ...next, includeArchived: filter.includeArchived });
+    if (!next.includeArchived && (selectedDetail?.meta ?? readRequest?.session)?.archived) closeSessionDetail();
+  };
+
+  const openSession = (s: SessionMeta) => {
+    if (!selectedAgent || sessionActionsBusy || batchMode || mutationRunning.current) return;
+    void loadSession(selectedAgent, s);
+  };
+
+  const loadSession = async (agentId: string, s: SessionMeta) => {
     const generation = ++detailRequestGeneration.current;
-    const agentId = selectedAgent;
     const hit = contentSearch.hits.get(sessionKey(s));
     const target = hit ? { ...hit, query: search.trim() } : null;
     setDetail(null);
@@ -232,14 +240,14 @@ export default function App() {
   };
 
   const toggleBatch = () => {
-    if (deletionActive || batchBusy || deletionRunning.current) return;
+    if (sessionActionsBusy || batchBusy || mutationRunning.current) return;
     closeSessionDetail();
     setBatchMode(!batchMode);
     clearBatchSelection();
   };
 
   const toggleSession = (session: SessionMeta) => {
-    if (deletionActive || batchBusy) return;
+    if (sessionActionsBusy || batchBusy) return;
     const key = sessionKey(session);
     setCheckedSessionKeys((current) => {
       const next = new Set(current);
@@ -250,18 +258,40 @@ export default function App() {
   };
 
   const toggleAll = () => {
-    if (deletionActive || batchBusy) return;
+    if (sessionActionsBusy || batchBusy) return;
     const allSelected = filtered.every((s) => checkedSessionKeys.has(sessionKey(s)));
     setCheckedSessionKeys(allSelected ? new Set() : new Set(filtered.map(sessionKey)));
   };
 
   const requestDeletion = (target: SessionDeleteTarget) => {
-    if (!currentAgent || currentAgent.deletePolicy === "readOnly" || deletionActive
-      || deletionRunning.current || !target.sessions.length) return;
-    setDeletion({ phase: "confirm", request: { ...target, agent: currentAgent } });
+    if (!currentAgent || currentAgent.deletePolicy === "readOnly" || sessionActionsBusy
+      || mutationRunning.current || !target.sessions.length) return;
+    setOperation({ kind: "confirmDelete", request: { ...target, agent: currentAgent } });
   };
 
   const requestSessionDelete = (session: SessionMeta) => requestDeletion({ mode: "single", sessions: [session] });
+
+  const toggleSessionArchive = async (session: SessionMeta) => {
+    if (!currentAgent?.supportsArchive || sessionActionsBusy || mutationRunning.current) return;
+    const archived = !session.archived;
+    mutationRunning.current = true;
+    setOperation({ kind: "archive" });
+    try {
+      await api.setSessionArchived(currentAgent.id, session, archived);
+      catalogCache.setArchived(currentAgent.id, session, archived);
+      if (selectedSessionKey === sessionKey(session)) {
+        if (archived && !includeArchived) closeSessionDetail();
+        else void loadSession(currentAgent.id, { ...session, archived });
+      }
+      showToast(archived ? "会话已归档" : "会话已取消归档");
+    } catch (error) {
+      showToast(String(error), true);
+    } finally {
+      mutationRunning.current = false;
+      setOperation(null);
+      refreshCatalog();
+    }
+  };
 
   const requestBatchDelete = () => {
     if (batchBusy) return;
@@ -270,12 +300,12 @@ export default function App() {
   };
 
   const confirmDeletion = async () => {
-    if (deletion?.phase !== "confirm" || deletionRunning.current) return;
-    const { agent, sessions: targets, mode } = deletion.request;
+    if (operation?.kind !== "confirmDelete" || mutationRunning.current) return;
+    const { agent, sessions: targets, mode } = operation.request;
     const batch = mode === "batch";
     const total = targets.length;
-    deletionRunning.current = true;
-    setDeletion({ phase: "running", progress: batch ? { completed: 0, total } : null });
+    mutationRunning.current = true;
+    setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
     if (batch) setBatchFailures([]);
     const succeeded: SessionMeta[] = [];
     const failures: SessionDeleteFailure[] = [];
@@ -287,7 +317,7 @@ export default function App() {
         } catch (error) {
           failures.push({ session, error: String(error) });
         }
-        if (batch) setDeletion({ phase: "running", progress: { completed: succeeded.length + failures.length, total } });
+        if (batch) setOperation({ kind: "delete", progress: { completed: succeeded.length + failures.length, total } });
       }
       if (succeeded.length) {
         if (succeeded.some((session) => sessionKey(session) === selectedSessionKey)) closeSessionDetail();
@@ -305,8 +335,8 @@ export default function App() {
       }
       if (batch || succeeded.length) refreshCatalog();
     } finally {
-      setDeletion(null);
-      deletionRunning.current = false;
+      setOperation(null);
+      mutationRunning.current = false;
     }
   };
 
@@ -314,17 +344,17 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <AgentSwitcher agents={availableAgents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
-          disabled={deletionActive || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
+          disabled={sessionActionsBusy || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
-          <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={deletionActive}>
+          <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={sessionActionsBusy}>
             会话
           </button>
           {availableAgents.length > 0 && (
-            <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={deletionActive}>
+            <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={sessionActionsBusy}>
               配置
             </button>
           )}
-          <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={deletionActive}>用量</button>
+          <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={sessionActionsBusy}>用量</button>
         </nav>
         <div className="topbar-actions">
           {tab !== "usage" && currentAgent?.dataDir && (
@@ -349,34 +379,35 @@ export default function App() {
             selected={selectedProject}
             onSelect={selectProject}
             loading={loading}
-            disabled={deletionActive}
+            disabled={sessionActionsBusy}
             catalogIncomplete={!!catalogError || catalogWarnings.length > 0}
           />}
           sessionList={<SessionList
-            scopeKey={JSON.stringify([selectedAgent, selectedProject, showEmpty])}
+            scopeKey={JSON.stringify([selectedAgent, selectedProject, catalogFilter])}
             sessions={filtered}
             selectedSessionKey={selectedSessionKey}
             search={search}
             onSearch={changeSearch}
             onSelect={openSession}
-            showEmpty={showEmpty}
-            onShowEmpty={changeShowEmpty}
+            filter={catalogFilter}
+            onFilterChange={changeFilter}
             batchMode={batchMode}
             agent={currentAgent}
             onRequestDelete={requestSessionDelete}
+            onToggleArchive={toggleSessionArchive}
             toast={showToast}
             checkedSessionKeys={checkedSessionKeys}
             onToggleBatch={toggleBatch}
             onToggleSession={toggleSession}
             onToggleAll={toggleAll}
             onDeleteSelected={requestBatchDelete}
-            disabled={deletionActive}
+            disabled={sessionActionsBusy}
             loading={loading}
             refreshing={refreshing}
             loadError={catalogError}
             warnings={catalogWarnings}
             onRetryLoad={refreshCatalog}
-            progress={deletion?.phase === "running" ? deletion.progress : null}
+            progress={operation?.kind === "delete" ? operation.progress : null}
             failures={batchFailures}
             searchHits={contentSearch.hits}
             searchPending={contentSearch.pending}
@@ -393,7 +424,8 @@ export default function App() {
               detail={selectedDetail}
               agent={currentAgent}
               onRequestDelete={requestSessionDelete}
-              actionsDisabled={deletionActive}
+              onToggleArchive={toggleSessionArchive}
+              actionsDisabled={sessionActionsBusy}
               toast={showToast}
               searchTarget={searchTarget?.query === search.trim() ? searchTarget : null}
               onRetryRead={() => void openSession(selectedDetail.meta)}
@@ -435,10 +467,10 @@ export default function App() {
         setConfigNavigation(null); action();
       }} />}
 
-      {deletion?.phase === "confirm" && <SessionDeleteDialog
-        deletion={deletion.request}
+      {operation?.kind === "confirmDelete" && <SessionDeleteDialog
+        deletion={operation.request}
         onConfirm={confirmDeletion}
-        onCancel={() => setDeletion((current) => current?.phase === "confirm" ? null : current)}
+        onCancel={() => setOperation(current => current?.kind === "confirmDelete" ? null : current)}
       />}
       {toast && <div className={`toast ${toast.error ? "error" : ""}`}>{toast.msg}</div>}
     </div>

@@ -17,13 +17,14 @@ interface Props {
   detail: Detail;
   agent: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
+  onToggleArchive: (session: SessionMeta) => void;
   actionsDisabled: boolean;
   toast: (msg: string, isError?: boolean) => void;
   searchTarget?: ConversationSearchTarget | null;
   onRetryRead?: () => void;
 }
 
-export default function SessionDetailView({ detail, agent, onRequestDelete, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
+export default function SessionDetailView({ detail, agent, onRequestDelete, onToggleArchive, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
   const [showTools, setShowTools] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
@@ -119,6 +120,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
       <div className="detail-header">
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
+          {meta.archived && <span className="badge">已归档</span>}
           <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
@@ -129,7 +131,8 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, acti
           <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
         </div>
         <div className="detail-actions">
-          <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete} toast={toast} disabled={actionsDisabled} />
+          <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete}
+            onToggleArchive={onToggleArchive} toast={toast} disabled={actionsDisabled} />
           {meta.hasTranscript && (
             <span className="view-toggles">
               <ViewToggle label="工具调用" checked={showTools} onChange={setShowTools} />

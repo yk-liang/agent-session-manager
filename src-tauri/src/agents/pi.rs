@@ -458,6 +458,7 @@ fn to_meta(p: &ParsedPi) -> SessionMeta {
         assistant_text_count: p.assistant_text_count,
         size_bytes: p.size_bytes,
         has_transcript: true,
+        archived: false,
         stats_pending: false,
         source_files: Vec::new(),
     }
@@ -483,7 +484,7 @@ impl AgentSource for PiSource {
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
         let mut warnings = Vec::new();
@@ -506,7 +507,7 @@ impl AgentSource for PiSource {
                 }
             };
             warnings.extend(ws);
-            if !include_empty && meta.real_user_count == 0 {
+            if !filter.include_empty && meta.real_user_count == 0 {
                 continue;
             }
             let display = meta

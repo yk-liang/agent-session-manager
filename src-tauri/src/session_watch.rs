@@ -333,6 +333,7 @@ mod tests {
         for path in [
             "sessions/2099/01/01/a.jsonl",
             "sessions/2099/01/01/a.jsonl.zst",
+            "archived_sessions/a.jsonl.zst",
             "session_index.jsonl",
             ".codex-global-state.json",
         ] {

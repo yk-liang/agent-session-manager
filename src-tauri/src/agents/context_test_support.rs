@@ -21,7 +21,7 @@ pub(super) fn check_and_export(
         fn data_dir(&self) -> Option<PathBuf> {
             None
         }
-        fn scan_catalog(&self, _: bool, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
+        fn scan_catalog(&self, _: crate::agents::CatalogFilter, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
             Ok(assemble_catalog(vec![(
                 self.0.meta.clone(),
                 "/tmp/context".into(),

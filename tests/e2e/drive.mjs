@@ -136,7 +136,7 @@ const mock = {
   list_agents: [
     { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
     { id: "claude", displayName: "Claude Code", installed: true, supportsFork: false, dataDir: "/Users/demo/.claude", deletePolicy: "trash" },
-    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, dataDir: "/Users/demo/.codex", deletePolicy: "trash" },
+    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, supportsArchive: true, dataDir: "/Users/demo/.codex", deletePolicy: "permanent" },
     { id: "opencode", displayName: "OpenCode", installed: true, supportsFork: false, dataDir: "/Users/demo/.config/opencode", deletePolicy: "permanent" },
     { id: "pi", displayName: "Pi", installed: true, supportsFork: false, dataDir: "/Users/demo/.pi/agent", deletePolicy: "trash" },
   ],
@@ -455,11 +455,12 @@ await page.evaluate(({ projects, sessions }) => {
   window.__CATALOG_BY_AGENT__.pi = { projects: [], sessions: [], warnings: [] };
 }, { projects: manyProjects, sessions: manySessions });
 await page.locator(".tabs button", { hasText: "会话" }).click();
+await chooseAgent(page, "codex");
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 }]) {
   await page.setViewportSize(viewport);
   await chooseAgent(page, { label: "Qoder" });
-  await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
+  await page.locator(".sidebar-projects-header").getByText("60 个会话", { exact: true }).waitFor();
   const agentControl = page.getByRole("combobox", { name: "当前 Agent" });
   const allSessions = page.locator(".sidebar .project-item", { hasText: "全部会话" });
   const agentPosition = await agentControl.boundingBox();
@@ -492,7 +493,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 
   await page.screenshot({ path: `${artifactDir}/qsm-sidebar-bottom-${viewport.width}-${engine}.png` });
 
   await page.mouse.click(allPosition.x + allPosition.width / 2, allPosition.y + allPosition.height / 2);
-  await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
+  await page.locator(".sidebar .project-item.active", { hasText: "全部会话" }).waitFor();
+  await page.locator(".session-card", { hasText: "项目 1 的会话" }).waitFor();
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), projectScroll);
 
   assert.ok(agentPosition.y >= 0 && agentPosition.y + agentPosition.height <= 48);

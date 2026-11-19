@@ -691,10 +691,10 @@ impl AgentSource for OpenCodeSource {
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
-        cached_catalog(&db_path(), include_empty, cancelled)
+        cached_catalog(&db_path(), filter.include_empty, cancelled)
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
         token
@@ -811,6 +811,7 @@ fn build_meta(
         assistant_text_count: assistant_text,
         size_bytes: None,
         has_transcript: true,
+        archived: false,
         stats_pending: false,
         source_files: Vec::new(),
     })

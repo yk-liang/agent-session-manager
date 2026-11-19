@@ -1,5 +1,7 @@
-use super::{all_rollouts_in, history, load_thread_names_in, projects, to_meta, ReadMode};
-use crate::agents::{self, catalog_cache, check_catalog_cancelled, Catalog, SessionMeta};
+use super::{history, load_thread_names_in, projects, storage, to_meta, ReadMode};
+use crate::agents::{
+    self, catalog_cache, check_catalog_cancelled, Catalog, CatalogFilter, SessionMeta,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -8,16 +10,21 @@ const SUMMARY_CACHE_KIND: &str = "codex-history-v4";
 
 pub(super) struct Scan {
     root: PathBuf,
+    filter: CatalogFilter,
     paths: Vec<PathBuf>,
     titles: HashMap<String, String>,
     warnings: Vec<String>,
 }
 
 impl Scan {
-    pub(super) fn new(root: &Path, cancelled: &dyn Fn() -> bool) -> Result<Self, String> {
+    pub(super) fn new(
+        root: &Path,
+        filter: CatalogFilter,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, String> {
         check_catalog_cancelled(cancelled)?;
         let mut warnings = Vec::new();
-        let paths = all_rollouts_in(root, &mut warnings, cancelled)?;
+        let paths = storage::rollouts(root, filter.include_archived, &mut warnings, cancelled)?;
         check_catalog_cancelled(cancelled)?;
         let titles = root
             .parent()
@@ -25,6 +32,7 @@ impl Scan {
             .unwrap_or_default();
         Ok(Self {
             root: root.to_path_buf(),
+            filter,
             paths,
             titles,
             warnings,
@@ -33,7 +41,6 @@ impl Scan {
 
     pub(super) fn read(
         &self,
-        include_empty: bool,
         quick: bool,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Catalog, String> {
@@ -57,12 +64,16 @@ impl Scan {
             match result {
                 Ok((mut meta, ws)) => {
                     warnings.extend(ws);
-                    if !include_empty && !meta.stats_pending && meta.real_user_count == 0 {
+                    if !self.filter.include_empty
+                        && !meta.stats_pending
+                        && meta.real_user_count == 0
+                    {
                         continue;
                     }
                     if let Some(name) = self.titles.get(&meta.session_id) {
                         meta.title = Some(name.clone());
                     }
+                    meta.archived = storage::is_archived(&self.root, &pages.last().unwrap().path);
                     let display = meta.cwd.clone().unwrap_or_else(|| "(未知目录)".into());
                     items.push((meta, display));
                 }

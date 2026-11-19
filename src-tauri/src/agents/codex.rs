@@ -1,9 +1,10 @@
-//! Codex 本地数据源（CLI、IDE、桌面）：读取 sessions 下的 .jsonl 与 .jsonl.zst 日志。
+//! Codex 本地数据源（CLI、IDE、桌面）：读取活跃和已归档的会话日志。
 //!
 //! 与 Claude 系完全不同：OpenAI Responses 格式（session_meta + response_item）。
 //! 转换为统一对话事件，运行指令与状态通知独立标记为 context。
 //! 项目按 session_meta 里的 cwd 分组。
 
+mod app_server;
 mod catalog;
 #[cfg(test)]
 mod compressed_tests;
@@ -26,7 +27,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
+use super::{AgentSource, CatalogFilter, ConfigFile, DeletePolicy, SessionDetail, SessionMeta};
+use app_server::ThreadAction;
 
 fn codex_home() -> PathBuf {
     if let Ok(v) = std::env::var("CODEX_HOME") {
@@ -211,6 +213,7 @@ struct ReadLimit {
     ordinal: Option<u64>,
 }
 
+#[cfg(test)]
 fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<ParsedRollout> {
     read_rollout(
         path,
@@ -541,41 +544,6 @@ fn read_rollout(
     super::ParseOutcome::Ok(parsed)
 }
 
-/// 枚举给定会话根目录下的全部 rollout（年/月/日分层）。
-/// root 可注入：生产取 sessions_root()，测试直接用临时目录，
-/// 不再依赖全局 CODEX_HOME 环境变量重定向
-fn all_rollouts_in(
-    root: &Path,
-    warnings: &mut Vec<String>,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    for year in super::read_dir_warned(root, warnings) {
-        super::check_catalog_cancelled(cancelled)?;
-        for month in super::read_dir_warned(&year.path(), warnings) {
-            for day in super::read_dir_warned(&month.path(), warnings) {
-                super::check_catalog_cancelled(cancelled)?;
-                for f in super::read_dir_warned(&day.path(), warnings) {
-                    super::check_catalog_cancelled(cancelled)?;
-                    let name = f.file_name().to_string_lossy().to_string();
-                    if name.starts_with("rollout-")
-                        && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
-                    {
-                        let path = f.path();
-                        // 零字节文件没有会话身份或正文，也可能尚未写入，扫描时忽略。
-                        // 仅跳过已确认的空普通文件；特殊文件和读取失败仍交给解析器告警。
-                        if path.metadata().is_ok_and(|m| m.is_file() && m.len() == 0) {
-                            continue;
-                        }
-                        files.push(path);
-                    }
-                }
-            }
-        }
-    }
-    Ok(files)
-}
-
 /// 从 <home>/session_index.jsonl 读取会话标题（thread_name）；
 /// 读取失败（非"不存在"）与损坏行进 warnings。home 可注入
 fn load_thread_names_in(
@@ -649,6 +617,7 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         assistant_text_count: p.assistant_text_count,
         size_bytes: Some(p.size_bytes),
         has_transcript: true,
+        archived: false,
         stats_pending: false,
         source_files: Vec::new(),
     }
@@ -668,7 +637,8 @@ fn is_relevant_session(p: &ParsedRollout) -> bool {
 
 #[cfg(test)]
 fn catalog_in(root: &Path, include_empty: bool) -> Result<super::Catalog, String> {
-    catalog::Scan::new(root, &|| false)?.read(include_empty, false, &|| false)
+    let filter = CatalogFilter { include_empty, ..Default::default() };
+    catalog::Scan::new(root, filter, &|| false)?.read(false, &|| false)
 }
 
 fn read_session_in(root: &Path, session_id: &str) -> Result<SessionDetail, String> {
@@ -683,11 +653,12 @@ fn read_session_mode(
         return Err("非法会话 ID".into());
     }
     let mut warnings = Vec::new();
-    let paths = all_rollouts_in(root, &mut warnings, &|| false)?;
+    let paths = storage::rollouts(root, true, &mut warnings, &|| false)?;
     let pages = history::read_headers(&paths, &mut warnings, &|| false)?;
     let groups = history::group_pages(pages);
     let pages = groups.get(session_id).ok_or("未找到该 Codex 会话")?;
     let (mut detail, ws) = history::read(pages, mode)?;
+    detail.meta.archived = storage::is_archived(root, &pages.last().unwrap().path);
     detail.warnings = ws;
     let names = root
         .parent()
@@ -697,48 +668,6 @@ fn read_session_mode(
         detail.meta.title = Some(name.clone());
     }
     Ok(detail)
-}
-
-/// 生产环境的移除方式：移入系统废纸篓
-fn trash_remove(targets: Vec<PathBuf>) -> Result<(), String> {
-    trash::delete_all(targets).map_err(|e| format!("移入废纸篓失败：{e}"))
-}
-
-/// 删除前的两轮扫描都必须证明身份集合完整；不可读文件不能按“无关”跳过。
-fn deletion_pages(root: &Path, session_id: &str) -> Result<Vec<history::Page>, String> {
-    let mut warnings = Vec::new();
-    let paths = all_rollouts_in(root, &mut warnings, &|| false)?;
-    if !warnings.is_empty() {
-        return Err(format!(
-            "会话目录扫描不完整（{}），已中止删除",
-            warnings.join("；")
-        ));
-    }
-    let mut pages = Vec::new();
-    for path in paths {
-        // 先按项目过滤会掩盖跨项目的重复 ID，无法确认删除目标唯一。
-        match parse_rollout(&path, false) {
-            super::ParseOutcome::Ok(p) if p.session_id == session_id => {
-                pages.push(history::Page { path, header: p });
-            }
-            super::ParseOutcome::Degraded(p, w) if p.session_id == session_id => {
-                return Err(format!(
-                    "目标文件解析不完整（{w}），无法完成身份复核，已中止删除"
-                ));
-            }
-            super::ParseOutcome::Failed(w) => {
-                return Err(format!("文件身份无法确认（{w}），已中止删除"));
-            }
-            _ => {}
-        }
-    }
-    pages.sort_by(|a, b| {
-        a.header
-            .created_ts
-            .cmp(&b.header.created_ts)
-            .then(a.path.cmp(&b.path))
-    });
-    Ok(pages)
 }
 
 fn same_rollout_identity(a: &ParsedRollout, b: &ParsedRollout) -> bool {
@@ -752,63 +681,6 @@ fn same_rollout_identity(a: &ParsedRollout, b: &ParsedRollout) -> bool {
         && a.thread_source == b.thread_source
 }
 
-/// 仅允许单文件或已证明属于同一分页链的整组文件；全部复核完成后一次移入废纸篓。
-fn delete_session_with(
-    root: &Path,
-    project_dir: &str,
-    session_id: &str,
-    remove: impl Fn(Vec<PathBuf>) -> Result<(), String>,
-) -> Result<(), String> {
-    if session_id.len() > 64 || session_id.contains(['/', '\\', '\'']) {
-        return Err("非法会话 ID".into());
-    }
-    let pages = deletion_pages(root, session_id)?;
-    let latest = pages.last().ok_or("未找到会话文件")?;
-    if pages.len() > 1 && !pages.iter().all(|p| p.header.paginated) {
-        return Err("存在多个无法确认归属同一分页链的会话文件，已中止删除".into());
-    }
-    let (chain, issues) = history::resolve(&pages);
-    if !issues.is_empty() || chain.len() != pages.len() {
-        return Err("无法确认会话文件属于完整的同一分页链，已中止删除".into());
-    }
-    if to_meta(&latest.header, None).project_dir != project_dir {
-        return Err("会话所属项目与请求不匹配，已中止删除".into());
-    }
-    let mut targets = Vec::new();
-    for page in &pages {
-        let target = super::verify_within_root(root, &page.path, super::TargetKind::File)?;
-        match parse_rollout(&target, false) {
-            super::ParseOutcome::Ok(p) if same_rollout_identity(&p, &page.header) => {
-                targets.push(target)
-            }
-            super::ParseOutcome::Ok(_) => return Err("目标文件身份已变化，已中止删除".into()),
-            super::ParseOutcome::Degraded(_, w) | super::ParseOutcome::Failed(w) => {
-                return Err(format!(
-                    "目标文件解析不完整（{w}），无法完成身份复核，已中止删除"
-                ))
-            }
-        }
-    }
-    let fresh = deletion_pages(root, session_id)?;
-    let (fresh_chain, fresh_issues) = history::resolve(&fresh);
-    if fresh.len() != pages.len()
-        || fresh
-            .iter()
-            .zip(&pages)
-            .any(|(a, b)| a.path != b.path || !same_rollout_identity(&a.header, &b.header))
-        || !fresh_issues.is_empty()
-        || fresh_chain.len() != fresh.len()
-        || targets
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != targets.len()
-    {
-        return Err("会话分页集合已变化，请刷新后重试".into());
-    }
-    remove(targets)
-}
-
 pub struct CodexSource;
 
 impl AgentSource for CodexSource {
@@ -819,39 +691,36 @@ impl AgentSource for CodexSource {
         "Codex"
     }
     fn is_installed(&self) -> bool {
-        sessions_root().exists()
+        let root = sessions_root();
+        root.exists() || storage::archived_root(&root).exists()
     }
     fn data_dir(&self) -> Option<PathBuf> {
         sessions_root().parent().map(|p| p.to_path_buf())
     }
-    fn watch_paths(&self, usage: bool) -> super::AgentWatchPaths {
+    fn watch_paths(&self, _: bool) -> super::AgentWatchPaths {
         let mut paths = super::AgentWatchPaths::transcripts("sessions", None);
         paths.extra_transcript_suffixes.push(".jsonl.zst");
-        if usage {
-            paths
-                .transcript_dirs
-                .push(PathBuf::from("archived_sessions"));
-        }
+        paths.transcript_dirs.push(PathBuf::from(storage::ARCHIVED_SESSIONS));
         paths.root_files = vec!["session_index.jsonl", ".codex-global-state.json"];
         paths
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
-        catalog::Scan::new(&sessions_root(), cancelled)?.read(include_empty, false, cancelled)
+        catalog::Scan::new(&sessions_root(), filter, cancelled)?.read(false, cancelled)
     }
     fn prepare_catalog(
         &self,
-        include_empty: bool,
+        filter: CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(super::Catalog, Option<super::CatalogRefinement>), String> {
-        let scan = catalog::Scan::new(&sessions_root(), cancelled)?;
-        let catalog = scan.read(include_empty, true, cancelled)?;
+        let scan = catalog::Scan::new(&sessions_root(), filter, cancelled)?;
+        let catalog = scan.read(true, cancelled)?;
         let refinement = if catalog.sessions.iter().any(|session| session.stats_pending) {
             let refine: super::CatalogRefinement =
-                Box::new(move |cancelled| scan.read(include_empty, false, cancelled));
+                Box::new(move |cancelled| scan.read(false, cancelled));
             Some(refine)
         } else {
             None
@@ -889,7 +758,22 @@ impl AgentSource for CodexSource {
         Ok(detail.events)
     }
     fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
-        delete_session_with(&sessions_root(), project_dir, session_id, trash_remove)
+        app_server::update(ThreadAction::Delete, project_dir, session_id)
+    }
+    fn delete_policy(&self) -> DeletePolicy {
+        DeletePolicy::Permanent
+    }
+    fn supports_archive(&self) -> bool {
+        true
+    }
+    fn set_session_archived(
+        &self,
+        project_dir: &str,
+        session_id: &str,
+        archived: bool,
+    ) -> Result<(), String> {
+        let action = if archived { ThreadAction::Archive } else { ThreadAction::Unarchive };
+        app_server::update(action, project_dir, session_id)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         Some(format!(
@@ -1114,7 +998,7 @@ mod tests {
     fn catalog_keeps_identified_empty_sessions_when_requested() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("sessions");
-        write_delete_fixture(
+        write_rollout_fixture(
             &root,
             "2099/12/31/rollout-meta-only.jsonl",
             "empty-id",
@@ -1206,7 +1090,7 @@ mod tests {
     /// 不用环境变量、不读写真实 ~/.codex；tempdir 退出即清理，
     /// panic 也不会留下副作用；删除走注入的 remove，不碰真实废纸篓
     #[test]
-    fn integration_full_flow_with_cleanup() {
+    fn archive_filter_preserves_session_identity_and_history() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("sessions");
         let (id_main, id_gui, id_sub) = (
@@ -1278,43 +1162,26 @@ mod tests {
         assert!(cmd.contains("resume"));
         assert!(cmd.contains(&id_main));
 
-        delete_session_with(&root, &project_id, &id_main, |paths| {
-            paths
-                .into_iter()
-                .try_for_each(|p| fs::remove_file(p).map_err(|e| e.to_string()))
-        })
-        .unwrap();
-        assert!(!main_file.exists(), "匹配 id 的会话应被注入方式移除");
+        let archived = storage::archived_root(&root);
+        fs::create_dir(&archived).unwrap();
+        fs::rename(&main_file, archived.join(main_file.file_name().unwrap())).unwrap();
+        assert!(catalog_in(&root, false).unwrap().sessions.is_empty());
+
+        let filter = CatalogFilter { include_archived: true, ..Default::default() };
+        let scan = catalog::Scan::new(&root, filter, &|| false).unwrap();
+        for quick in [true, false] {
+            let catalog = scan.read(quick, &|| false).unwrap();
+            assert_eq!(catalog.sessions.len(), 1);
+            assert!(catalog.sessions[0].archived);
+            assert_eq!(catalog.projects[0].session_count, 1);
+            assert_eq!(CodexSource.search_events(&catalog.sessions[0]).unwrap(), detail.events);
+        }
+        let archived_detail = read_session_in(&root, &id_main).unwrap();
+        assert!(archived_detail.meta.archived);
+        assert_eq!(archived_detail.events, detail.events);
     }
 
-    #[test]
-    fn delete_refuses_partially_corrupt_rollout() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("sessions");
-        // session_meta 身份正确，但后续含损坏行：Degraded 匹配必须被拒绝，
-        // 错误发生在 remove 被调用之前，无任何外部副作用
-        let day_dir = root.join("2099").join("12").join("31");
-        fs::create_dir_all(&day_dir).unwrap();
-        let file = day_dir.join("rollout-2099-12-31T00-00-00-c0ffee01.jsonl");
-        fs::write(
-            &file,
-            [
-                r#"{"timestamp":"2099-12-31T00:00:00Z","type":"session_meta","payload":{"id":"c0ffee01","cwd":"/tmp/x"}}"#,
-                "这一行不是合法 JSON",
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-
-        let err = delete_session_with(&root, &escape_cwd("/tmp/x"), "c0ffee01", |_| {
-            panic!("部分损坏的 rollout 不得调用 remove")
-        })
-        .unwrap_err();
-        assert!(err.contains("解析不完整"), "{err}");
-        assert!(file.exists(), "部分损坏的 rollout 不得删除");
-    }
-
-    fn write_delete_fixture(root: &Path, relative_path: &str, id: &str, cwd: &str) -> PathBuf {
+    fn write_rollout_fixture(root: &Path, relative_path: &str, id: &str, cwd: &str) -> PathBuf {
         let path = root.join(relative_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
@@ -1326,171 +1193,10 @@ mod tests {
     }
 
     #[test]
-    fn delete_refuses_wrong_project_without_removal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let file = write_delete_fixture(
-            root,
-            "2099/12/31/rollout-unrelated-name.jsonl",
-            "delete-me",
-            "/tmp/codex-delete",
-        );
-        for _ in 0..2 {
-            let err = delete_session_with(root, &escape_cwd("/tmp/other"), "delete-me", |_| {
-                panic!("错误项目不得调用 remove")
-            })
-            .unwrap_err();
-            assert!(err.contains("项目"), "{err}");
-            assert!(file.exists());
-        }
-    }
-
-    fn assert_duplicate_deletion_refused(second_cwd: &str) {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let first_cwd = "/tmp/codex-delete";
-        let first = write_delete_fixture(
-            root,
-            "2099/12/30/rollout-first.jsonl",
-            "duplicate-id",
-            first_cwd,
-        );
-        let second = write_delete_fixture(
-            root,
-            "2099/12/31/rollout-second.jsonl",
-            "duplicate-id",
-            second_cwd,
-        );
-        for cwd in [first_cwd, second_cwd] {
-            let err = delete_session_with(root, &escape_cwd(cwd), "duplicate-id", |_| {
-                panic!("重复 ID 不得调用 remove")
-            })
-            .unwrap_err();
-            assert!(err.contains("多个"), "{err}");
-            assert!(first.exists());
-            assert!(second.exists());
-        }
-    }
-
-    #[test]
-    fn delete_refuses_duplicate_id_in_same_project_without_removal() {
-        assert_duplicate_deletion_refused("/tmp/codex-delete");
-    }
-
-    #[test]
-    fn delete_refuses_duplicate_id_across_projects_without_removal() {
-        assert_duplicate_deletion_refused("/tmp/other");
-    }
-
-    #[test]
-    fn delete_refuses_degraded_match_even_with_complete_candidate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let complete = write_delete_fixture(
-            root,
-            "2099/12/30/rollout-complete.jsonl",
-            "duplicate-id",
-            "/tmp/codex-delete",
-        );
-        let degraded = write_delete_fixture(
-            root,
-            "2099/12/31/rollout-degraded.jsonl",
-            "duplicate-id",
-            "/tmp/other",
-        );
-        fs::write(
-            &degraded,
-            format!("{}\ninvalid JSON", fs::read_to_string(&degraded).unwrap()),
-        )
-        .unwrap();
-        let err = delete_session_with(
-            root,
-            &escape_cwd("/tmp/codex-delete"),
-            "duplicate-id",
-            |_| panic!("匹配的降级记录存在时不得调用 remove"),
-        )
-        .unwrap_err();
-        assert!(err.contains("解析不完整"), "{err}");
-        assert!(complete.exists());
-        assert!(degraded.exists());
-    }
-
-    #[test]
-    fn delete_unique_correct_project_ignores_unrelated_corruption() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let file = write_delete_fixture(
-            root,
-            "2099/12/31/rollout-unrelated-name.jsonl",
-            "delete-me",
-            "/tmp/codex-delete",
-        );
-        let unrelated = write_delete_fixture(
-            root,
-            "2099/12/30/rollout-other.jsonl",
-            "other-id",
-            "/tmp/codex-delete",
-        );
-        let degraded = write_delete_fixture(
-            root,
-            "2099/12/30/rollout-degraded.jsonl",
-            "other-degraded-id",
-            "/tmp/codex-delete",
-        );
-        fs::write(
-            &degraded,
-            format!("{}\ninvalid JSON", fs::read_to_string(&degraded).unwrap()),
-        )
-        .unwrap();
-        // 无法解析身份的文件既不能当目标，也不能据此证明它与目标无关。
-        let failed = root.join("2099/12/30/rollout-delete-me.jsonl");
-        fs::write(&failed, r#"{"type":"session_meta","payload":{}}"#).unwrap();
-        let err = delete_session_with(root, &escape_cwd("/tmp/codex-delete"), "delete-me", |_| {
-            panic!("身份未知时不得调用 remove")
-        })
-        .unwrap_err();
-        assert!(err.contains("身份无法确认"), "{err}");
-        assert!(file.exists() && failed.exists());
-        fs::remove_file(&failed).unwrap();
-
-        // 某层目录不可遍历，也不能证明扫描结果完整。
-        let blocked = root.join("2098");
-        fs::write(&blocked, "not a directory").unwrap();
-        let err = delete_session_with(root, &escape_cwd("/tmp/codex-delete"), "delete-me", |_| {
-            panic!("目录扫描不完整时不得调用 remove")
-        })
-        .unwrap_err();
-        assert!(err.contains("目录扫描不完整"), "{err}");
-        fs::remove_file(blocked).unwrap();
-
-        let target = file.canonicalize().unwrap();
-        let calls = std::cell::Cell::new(0);
-        let project_dir = escape_cwd("/tmp/codex-delete");
-        delete_session_with(root, &project_dir, "delete-me", |p| {
-            calls.set(calls.get() + 1);
-            assert_eq!(p, vec![target.clone()]);
-            p.into_iter()
-                .try_for_each(|path| fs::remove_file(path).map_err(|e| e.to_string()))
-        })
-        .unwrap();
-        assert_eq!(calls.get(), 1);
-        assert!(!file.exists());
-
-        let err = delete_session_with(root, &project_dir, "delete-me", |_| {
-            panic!("重复请求不得删除无关文件")
-        })
-        .unwrap_err();
-        assert!(err.contains("未找到"), "{err}");
-        assert!(unrelated.exists());
-        assert!(degraded.exists());
-    }
-
-    /// 真实数据冒烟测试：本机装有 Codex 时验证所有 rollout 都能解析（只读）
-    #[test]
     fn real_data_smoke_if_present() {
         let mut warnings = Vec::new();
         let root = sessions_root();
-        let files = all_rollouts_in(&root, &mut warnings, &|| false).unwrap();
+        let files = storage::rollouts(&root, false, &mut warnings, &|| false).unwrap();
         if files.is_empty() {
             return;
         }

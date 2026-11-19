@@ -44,7 +44,8 @@
 先使用支持的 Agent 生成本机会话，再在应用中选择对应的 Agent。首次同步用量可能需要几分钟，期间可继续使用应用。
 
 - 在终端恢复或分叉会话需要安装对应的 CLI。Antigravity CLI 会话通过 `agy` 恢复。分叉功能因 Agent 而异。
-- 删除会话通常会将文件移入废纸篓。OpenCode 通过 CLI 永久删除会话。Antigravity 会话在应用中为只读。
+- 勾选「显示已归档」可查看已归档的 Codex 会话。会话操作使用本机 Codex App Server，可由桌面应用、VS Code 扩展或 CLI 提供。
+- 删除会话通常会将文件移入废纸篓。Codex 和 OpenCode 会永久删除会话。Antigravity 会话在应用中为只读。
 - 用量来自本地日志。删除会话后，已同步的用量仍可查看。应用运行时会自动同步，成本以日志记录为准。
 
 <details>

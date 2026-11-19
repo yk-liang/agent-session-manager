@@ -2,15 +2,19 @@
 #![allow(dead_code, unused_imports)]
 #[path = "../src/agents/mod.rs"]
 mod agents;
-use agents::AgentSource;
+use agents::{AgentSource, CatalogFilter};
 use std::time::Instant;
 fn main() {
     let source = agents::codex::CodexSource;
+    let filter = CatalogFilter {
+        include_archived: std::env::args().any(|arg| arg == "--include-archived"),
+        ..Default::default()
+    };
     let start = Instant::now();
-    let (quick, refine) = source.prepare_catalog(false, &|| false).unwrap();
+    let (quick, refine) = source.prepare_catalog(filter, &|| false).unwrap();
     println!(
         "{}",
-        serde_json::json!({"phase":"first-screen","ms":start.elapsed().as_secs_f64()*1000.,"sessions":quick.sessions.len(),"models":quick.sessions.iter().filter(|s|s.model.is_some()).count(),"pending":quick.sessions.iter().filter(|s|s.stats_pending).count(),"warnings":quick.warnings.len()})
+        serde_json::json!({"phase":"first-screen","ms":start.elapsed().as_secs_f64()*1000.,"sessions":quick.sessions.len(),"archived":quick.sessions.iter().filter(|s|s.archived).count(),"models":quick.sessions.iter().filter(|s|s.model.is_some()).count(),"pending":quick.sessions.iter().filter(|s|s.stats_pending).count(),"warnings":quick.warnings.len()})
     );
     if std::env::args().any(|s| s == "--quick-only") {
         return;
@@ -22,7 +26,7 @@ fn main() {
         serde_json::json!({"phase":"refined","ms":start.elapsed().as_secs_f64()*1000.,"sessions":full.sessions.len(),"models":full.sessions.iter().filter(|s|s.model.is_some()).count(),"warnings":full.warnings.len()})
     );
     let start = Instant::now();
-    let (cached, _) = source.prepare_catalog(false, &|| false).unwrap();
+    let (cached, _) = source.prepare_catalog(filter, &|| false).unwrap();
     println!(
         "{}",
         serde_json::json!({"phase":"cached-list","ms":start.elapsed().as_secs_f64()*1000.,"models":cached.sessions.iter().filter(|s|s.model.is_some()).count()})

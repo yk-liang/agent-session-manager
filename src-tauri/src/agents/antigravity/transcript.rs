@@ -125,6 +125,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             assistant_text_count: 0,
             size_bytes: Some(stats.len()),
             has_transcript: false,
+            archived: false,
             stats_pending: false,
             source_files: vec![
                 path.to_path_buf(),

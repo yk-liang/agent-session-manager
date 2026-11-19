@@ -1,10 +1,10 @@
-use crate::agents::{self, check_catalog_cancelled, AgentSource, Catalog, CatalogRefinement};
+use crate::agents::{self, check_catalog_cancelled, AgentSource, Catalog, CatalogFilter, CatalogRefinement};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-type Scope = (&'static str, bool);
+type Scope = (&'static str, CatalogFilter);
 
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -43,16 +43,16 @@ impl SessionCatalogs {
     pub fn load(
         &self,
         source: &dyn AgentSource,
-        include_empty: bool,
+        filter: CatalogFilter,
         generation: u64,
         revision: Option<u64>,
     ) -> Result<Option<Snapshot>, String> {
         self.cancel(generation);
         let cancelled = || self.generation.load(Ordering::SeqCst) != generation;
-        let (catalog, refine) = source.prepare_catalog(include_empty, &cancelled)?;
+        let (catalog, refine) = source.prepare_catalog(filter, &cancelled)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         check_catalog_cancelled(&cancelled)?;
-        let scope = (source.id(), include_empty);
+        let scope = (source.id(), filter);
         state.refinement = refine.map(|refine| (generation, scope, refine));
         Ok(state.publish(source, scope, catalog, revision))
     }
@@ -60,12 +60,12 @@ impl SessionCatalogs {
     pub fn refine(
         &self,
         source: &dyn AgentSource,
-        include_empty: bool,
+        filter: CatalogFilter,
         generation: u64,
         revision: Option<u64>,
     ) -> Result<Option<Snapshot>, String> {
         let cancelled = || self.generation.load(Ordering::SeqCst) != generation;
-        let scope = (source.id(), include_empty);
+        let scope = (source.id(), filter);
         let refine = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             check_catalog_cancelled(&cancelled)?;

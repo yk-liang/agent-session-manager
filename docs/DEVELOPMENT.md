@@ -125,7 +125,7 @@ cargo test --release --offline --locked --lib usage::storage_bench::storage_comp
 
 指定本机某条分页会话做只读完整性检查：在 `src-tauri/` 中运行 `ASM_TEST_CODEX_SESSION='<会话ID>' cargo test --release --offline --locked --lib agents::codex::history_tests::real_paginated_history_is_unique_and_complete_if_present -- --exact --nocapture --test-threads=1`（将占位内容替换为实际 ID）。会话未列出或存在历史告警时测试失败，避免指定目标未命中却被当作验证通过；默认只输出文件数、消息数、事件数和告警数，不导出正文。压缩首段与两段普通续页的独立回归为 `compressed_first_page_is_restored_before_two_plain_continuations`。
 
-Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib compressed -- --test-threads=1`。覆盖压缩与普通日志混合分页、解压后字节边界、按需工具读取、追加帧、缓存刷新和删除保护。分叉起点引用父线程的物理页时不误报缺页，也不将父线程文件加入删除范围；子线程自身缺页仍告警并拒绝删除。压缩格式在读取时流式解压，不向磁盘落正文副本；卡片大小表示实际文件占用。会话页仍只扫描 `sessions/`，归档与子代理不能直接计入该页应显示的主会话数量。仅核对本机目录可运行 `cargo run --release --offline --locked --example session_perf -- --catalog-only`，输出数量与耗时，不导出正文。
+Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib compressed -- --test-threads=1`。覆盖压缩与普通日志混合分页、解压后字节边界、按需工具读取、追加帧和缓存刷新。会话页默认读取活跃会话，启用「显示已归档」时也读取归档日志。归档、取消归档和删除由 Codex app-server 执行。可用 `cargo run --release --offline --locked --example session_perf -- --catalog-only --include-archived` 核对本机目录，输出数量和耗时。
 
 本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
 输出各 Agent 三轮目录耗时，不输出会话正文。

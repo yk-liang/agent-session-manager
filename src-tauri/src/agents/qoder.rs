@@ -86,13 +86,13 @@ impl AgentSource for QoderSource {
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
         load_catalog(
             &qoder_dir(),
             desktop::database_path().as_deref(),
-            include_empty,
+            filter.include_empty,
             cancelled,
         )
     }

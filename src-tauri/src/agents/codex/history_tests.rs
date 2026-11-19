@@ -349,133 +349,6 @@ fn replayed_legacy_prefix_is_deduplicated_without_losing_repeated_messages_in_on
 }
 
 #[test]
-fn confirmed_paginated_deletion_receives_every_file_once_and_keeps_other_threads() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("sessions");
-    let first = page(
-        &root,
-        "thread",
-        "thread",
-        0,
-        None,
-        vec![message(1, "user", "first")],
-    );
-    let second = page(
-        &root,
-        "thread_next",
-        "thread",
-        1,
-        Some(json!({"thread_id":"thread","end_byte_offset":first.metadata().unwrap().len()})),
-        vec![message(2, "user", "last")],
-    );
-    let other = page(
-        &root,
-        "other",
-        "other",
-        0,
-        None,
-        vec![message(1, "user", "other")],
-    );
-    let calls = std::cell::Cell::new(0);
-    delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |paths| {
-        calls.set(calls.get() + 1);
-        assert_eq!(paths.len(), 2);
-        assert!(paths.contains(&first.canonicalize().unwrap()));
-        assert!(paths.contains(&second.canonicalize().unwrap()));
-        Ok(()) // 注入移除器只记录目标，不操作废纸篓或真实数据。
-    })
-    .unwrap();
-    assert_eq!(calls.get(), 1);
-    assert!(other.exists() && first.exists() && second.exists());
-}
-
-#[test]
-fn paginated_deletion_refuses_any_corrupt_member_before_calling_the_remover() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("sessions");
-    let first = page(
-        &root,
-        "thread",
-        "thread",
-        0,
-        None,
-        vec![message(1, "user", "first")],
-    );
-    let second = page(
-        &root,
-        "thread_next",
-        "thread",
-        1,
-        Some(json!({"thread_id":"thread","end_byte_offset":first.metadata().unwrap().len()})),
-        vec![message(2, "user", "last")],
-    );
-    use std::io::Write;
-    writeln!(
-        fs::OpenOptions::new().append(true).open(&second).unwrap(),
-        "invalid JSON"
-    )
-    .unwrap();
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| panic!(
-            "不得开始部分删除"
-        ))
-        .is_err()
-    );
-    assert!(first.exists() && second.exists());
-}
-
-#[test]
-fn paginated_deletion_refuses_unreadable_or_missing_predecessor() {
-    for unreadable in [true, false] {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("sessions");
-        let first = page(&root, "thread", "thread", 0, None, vec![]);
-        let second = page(
-            &root,
-            "thread_next",
-            "thread",
-            1,
-            Some(json!({"thread_id":"thread","end_byte_offset":first.metadata().unwrap().len()})),
-            vec![message(2, "user", "last")],
-        );
-        if unreadable {
-            fs::write(&first, b"\xff\xfe\n").unwrap();
-        } else {
-            fs::remove_file(&first).unwrap();
-        }
-        let calls = std::cell::Cell::new(0);
-        let result = delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| {
-            calls.set(calls.get() + 1);
-            Ok(())
-        });
-        assert!(result.is_err(), "不可把唯一可见的最新页当作完整会话删除");
-        assert_eq!(calls.get(), 0);
-        assert!(second.exists());
-    }
-}
-
-#[test]
-fn paginated_deletion_refuses_malformed_history_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("sessions");
-    let file = page(
-        &root,
-        "thread",
-        "thread",
-        0,
-        Some(json!({"thread_id":42})),
-        vec![],
-    );
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| {
-            panic!("不可把损坏的历史引用当作无历史引用")
-        })
-        .is_err()
-    );
-    assert!(file.exists());
-}
-
-#[test]
 fn real_paginated_history_is_unique_and_complete_if_present() {
     let requested = std::env::var("ASM_TEST_CODEX_SESSION").ok();
     let root = sessions_root();
@@ -548,12 +421,12 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
         None,
         vec![message(1, "user", "hello")],
     );
-    let scan = catalog::Scan::new(&root, &|| false).unwrap();
-    let quick = || scan.read(false, true, &|| false).unwrap();
+    let scan = catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap();
+    let quick = || scan.read(true, &|| false).unwrap();
     let preview = quick();
     assert!(preview.sessions[0].stats_pending);
     assert!(preview.warnings.is_empty());
-    let accurate = scan.read(false, false, &|| false).unwrap();
+    let accurate = scan.read(false, &|| false).unwrap();
     assert!(!accurate.sessions[0].stats_pending);
     assert_eq!(quick().sessions[0].real_user_count, 1);
     writeln!(
@@ -564,7 +437,7 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
     .unwrap();
     assert!(quick().sessions[0].stats_pending);
     assert_eq!(
-        scan.read(false, false, &|| false).unwrap().sessions[0].real_user_count,
+        scan.read(false, &|| false).unwrap().sessions[0].real_user_count,
         2
     );
     // 损坏尾部只有后台精确扫描才会接触，不能挡住有有效身份的首屏。
@@ -574,8 +447,8 @@ fn first_screen_never_scans_body_and_refinement_invalidates_after_append() {
     )
     .unwrap();
     assert!(quick().warnings.is_empty());
-    assert!(!scan.read(false, false, &|| false).unwrap().warnings.is_empty());
-    assert!(catalog::Scan::new(&root, &|| true).is_err());
+    assert!(!scan.read(false, &|| false).unwrap().warnings.is_empty());
+    assert!(catalog::Scan::new(&root, CatalogFilter::default(), &|| true).is_err());
 }
 
 #[test]
@@ -620,7 +493,7 @@ fn historical_model_reaches_refined_list_detail_and_cached_first_screen() {
         Some("historical-model-b")
     );
     assert_eq!(
-        catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false)
+        catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap().read(true, &|| false)
             .unwrap()
             .sessions[0]
             .model
@@ -649,7 +522,7 @@ fn old_empty_model_summaries_are_invalidated_without_scanning_the_first_screen_b
     old.real_user_count = 1;
     old.source_files = vec![path.clone()];
     super::super::catalog_cache::summary("codex-history", &[path], || Ok((old, vec![]))).unwrap();
-    let quick = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
+    let quick = catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap().read(true, &|| false).unwrap();
     assert!(
         quick.sessions[0].stats_pending,
         "an old empty-model cache cannot count as a complete new summary"
@@ -660,7 +533,7 @@ fn old_empty_model_summaries_are_invalidated_without_scanning_the_first_screen_b
             .as_deref(),
         Some("logged-model")
     );
-    let warm = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
+    let warm = catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap().read(true, &|| false).unwrap();
     assert!(!warm.sessions[0].stats_pending);
     assert_eq!(warm.sessions[0].model.as_deref(), Some("logged-model"));
 }

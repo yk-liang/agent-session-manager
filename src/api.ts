@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentInfo,
   Catalog,
+  CatalogFilter,
   CurrentConfig,
   ProfileSummary,
   SessionDetail,
@@ -34,13 +35,13 @@ export const collectorStatus = () => invoke<import("./types").CollectorStatus>("
 export const setCollectorEnabled = (enabled: boolean) => invoke<import("./types").CollectorStatus>("set_collector_enabled", { enabled });
 export const openCollectorSettings = () => invoke<void>("open_collector_settings");
 
-export const catalog = (agent: string, includeEmpty: boolean, generation: number, revision?: number) =>
-  invoke<Catalog | null>("catalog", { agent, includeEmpty, generation, revision });
+export const catalog = (agent: string, filter: CatalogFilter, generation: number, revision?: number) =>
+  invoke<Catalog | null>("catalog", { agent, ...filter, generation, revision });
 
 let catalogGeneration = Date.now();
 export const nextCatalogGeneration = () => ++catalogGeneration;
-export const refineCatalog = (agent: string, includeEmpty: boolean, generation: number, revision?: number) =>
-  invoke<Catalog | null>("refine_catalog", { agent, includeEmpty, generation, revision });
+export const refineCatalog = (agent: string, filter: CatalogFilter, generation: number, revision?: number) =>
+  invoke<Catalog | null>("refine_catalog", { agent, ...filter, generation, revision });
 export const cancelCatalog = () =>
   invoke<void>("cancel_catalog", { generation: nextCatalogGeneration() });
 export const readToolPayload = (token: string) => invoke<import("./types").ContentBlock>("read_tool_payload", { token });
@@ -67,6 +68,9 @@ export const deleteSession = (
   projectDir: string,
   sessionId: string,
 ) => invoke<void>("delete_session", { agent, projectDir, sessionId });
+
+export const setSessionArchived = (agent: string, session: SessionMeta, archived: boolean) =>
+  invoke<void>("set_session_archived", { agent, projectDir: session.projectDir, sessionId: session.sessionId, archived });
 
 export const resumeCommand = (agent: string, sessionId: string, fork = false) =>
   invoke<string | null>("resume_command", { agent, sessionId, fork });

@@ -1,4 +1,4 @@
-import { Copy, Terminal, Trash2, type LucideIcon } from "lucide-react";
+import { Archive, ArchiveRestore, Copy, Terminal, Trash2, type LucideIcon } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "../api";
 import type { AgentInfo, SessionMeta } from "../types";
@@ -8,15 +8,16 @@ interface Props {
   agent: AgentInfo;
   session: SessionMeta;
   onRequestDelete: (session: SessionMeta) => void;
+  onToggleArchive: (session: SessionMeta) => void;
   toast: (message: string, error?: boolean) => void;
   compact?: boolean;
   disabled: boolean;
 }
 
-export default function SessionActions({ agent, session, onRequestDelete, toast, compact = false, disabled }: Props) {
-  const canResume = session.hasTranscript && (!agent.resumeEntrypoint || session.entrypoint === agent.resumeEntrypoint);
+export default function SessionActions({ agent, session, onRequestDelete, onToggleArchive, toast, compact = false, disabled }: Props) {
+  const canResume = !session.archived && session.hasTranscript && (!agent.resumeEntrypoint || session.entrypoint === agent.resumeEntrypoint);
   const canDelete = agent.deletePolicy !== "readOnly";
-  if (!canResume && !canDelete) return null;
+  if (!canResume && !canDelete && !agent.supportsArchive) return null;
 
   const copyResume = async () => {
     try {
@@ -41,10 +42,12 @@ export default function SessionActions({ agent, session, onRequestDelete, toast,
     }
   };
 
-  const button = (label: string, icon: LucideIcon, onClick: () => void, danger = false) => (
+  const button = (label: string, icon: LucideIcon, onClick: () => void, { danger = false, showIcon = false } = {}) => (
     <button type="button" className={danger ? "danger" : undefined} disabled={disabled}
+      title={!compact && showIcon ? label : undefined}
       aria-label={compact ? `${label}（${session.title || session.sessionId}）` : undefined} onClick={onClick}>
-      {compact ? <><UiIcon icon={icon} /><span className="session-action-tooltip" aria-hidden="true">{label}</span></> : label}
+      {(compact || showIcon) && <UiIcon icon={icon} />}
+      {compact ? <span className="session-action-tooltip" aria-hidden="true">{label}</span> : label}
     </button>
   );
 
@@ -55,7 +58,9 @@ export default function SessionActions({ agent, session, onRequestDelete, toast,
       {canResume && !compact && agent.supportsFork && (
         <button type="button" disabled={disabled} onClick={() => resume(true)}>分叉会话</button>
       )}
-      {canDelete && button("删除", Trash2, () => onRequestDelete(session), true)}
+      {agent.supportsArchive && button(session.archived ? "取消归档" : "归档",
+        session.archived ? ArchiveRestore : Archive, () => onToggleArchive(session), { showIcon: true })}
+      {canDelete && button("删除", Trash2, () => onRequestDelete(session), { danger: true })}
     </>
   );
 

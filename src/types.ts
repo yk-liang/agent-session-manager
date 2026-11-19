@@ -3,6 +3,7 @@ export interface AgentInfo {
   displayName: string;
   installed: boolean;
   supportsFork: boolean;
+  supportsArchive: boolean;
   resumeEntrypoint?: string;
   dataDir: string | null;
   deletePolicy: "trash" | "permanent" | "readOnly";
@@ -25,9 +26,15 @@ export interface SessionMeta {
   assistantTextCount: number;
   sizeBytes?: number;
   hasTranscript: boolean;
+  archived?: boolean;
   statsPending?: boolean;
   /** 本次应用运行中实际打开正文失败的诊断；摘要刷新不能视为正文恢复。 */
   readError?: string;
+}
+
+export interface CatalogFilter {
+  includeEmpty: boolean;
+  includeArchived: boolean;
 }
 
 export interface SessionDeleteFailure {

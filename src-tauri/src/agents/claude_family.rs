@@ -116,6 +116,7 @@ fn parse_meta_with(
         assistant_text_count: 0,
         size_bytes: Some(size_bytes),
         has_transcript: true,
+        archived: false,
         stats_pending: false,
         source_files: vec![path.to_path_buf()],
     };
@@ -399,6 +400,7 @@ fn sessions_in_dir(
                     assistant_text_count: 0,
                     size_bytes: None,
                     has_transcript: false,
+                    archived: false,
                     stats_pending: false,
                     source_files: Vec::new(),
                 });
@@ -457,6 +459,7 @@ pub fn read_session(
                     assistant_text_count: 0,
                     size_bytes: None,
                     has_transcript: false,
+                    archived: false,
                     stats_pending: false,
                     source_files: Vec::new(),
                 },

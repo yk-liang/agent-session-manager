@@ -480,8 +480,15 @@ body.resizing-panels * {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.session-list-filters {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .batch-toolbar {

@@ -44,7 +44,8 @@ The release is not notarized by Apple. If macOS blocks the first launch, verify 
 Use a supported agent to create a local session, then select that agent in the app. First-time usage sync can take a few minutes. You can keep using the app while it runs.
 
 - To resume or fork a session in Terminal, install the corresponding CLI. Antigravity CLI sessions resume with `agy`. Forking is available for select agents.
-- Deleting a session usually moves it to the Trash. OpenCode deletes sessions permanently through its CLI. Antigravity sessions are read-only in the app.
+- Use **显示已归档 (Show Archived)** to browse archived Codex sessions. Session actions use the local Codex App Server available with the desktop app, VS Code extension, or CLI.
+- Deleting a session usually moves it to the Trash. Codex and OpenCode delete sessions permanently. Antigravity sessions are read-only in the app.
 - Usage is based on local logs. The app retains synced usage after you delete a session and displays costs recorded in the logs. Usage syncs automatically while the app is running.
 
 <details>
@@ -63,7 +64,7 @@ Use **打开数据目录 (Open Data Folder)** in the toolbar. If the list is emp
 
 Use `ANTIGRAVITY_DATA_DIR` for custom Antigravity locations. Separate multiple data or conversation directories with commas.
 
-For Codex, **会话 (Sessions)** shows active history and **用量 (Usage)** also includes archived logs.
+Codex usage includes archived logs.
 
 The app stores synced usage in `~/Library/Application Support/Agent Session Manager/` and configuration profiles and backups in `~/.agent-session-manager/`.
 

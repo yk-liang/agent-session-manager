@@ -54,10 +54,10 @@ impl AgentSource for ClaudeSource {
     }
     fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Catalog, String> {
-        claude_family::catalog(&projects_dir(), OPTS, include_empty, cancelled)
+        claude_family::catalog(&projects_dir(), OPTS, filter.include_empty, cancelled)
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
         claude_family::read_session(&projects_dir(), project_dir, session_id, OPTS)

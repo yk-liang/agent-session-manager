@@ -62,7 +62,7 @@ fn fork_root_can_reference_a_parents_compressed_physical_page() {
     );
     set_fork_parent(&child, "parent");
     compress(&parent_page);
-    let child = compress(&child);
+    compress(&child);
     let detail = read_session_in(&root, "child").unwrap();
     assert!(detail.warnings.is_empty(), "{:?}", detail.warnings);
     assert_eq!(detail.events.len(), 1);
@@ -71,11 +71,6 @@ fn fork_root_can_reference_a_parents_compressed_physical_page() {
         CodexSource.search_events(&detail.meta).unwrap(),
         detail.events
     );
-    delete_session_with(&root, &escape_cwd("/tmp/paged"), "child", |paths| {
-        assert_eq!(paths, vec![child.canonicalize().unwrap()]);
-        Ok(())
-    })
-    .unwrap();
 }
 
 #[test]
@@ -98,16 +93,10 @@ fn fork_later_page_still_reports_a_missing_page_of_its_own_thread() {
         .iter()
         .any(|warning| warning.contains("缺少历史分页")));
     assert!(CodexSource.search_events(&detail.meta).is_err());
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "child", |_| {
-            panic!("A fork marker cannot authorize partial deletion of its own pages")
-        })
-        .is_err()
-    );
 }
 
 #[test]
-fn mixed_pages_use_decoded_boundaries_and_keep_search_and_deletion_consistent() {
+fn mixed_pages_use_decoded_boundaries_for_detail_and_search() {
     check_mixed_pages(true);
 }
 
@@ -161,7 +150,7 @@ fn check_mixed_pages(compress_middle: bool) {
     };
     assert!(first.metadata().unwrap().len() < boundary);
 
-    let quick = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
+    let quick = catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap().read(true, &|| false).unwrap();
     assert_eq!(quick.sessions.len(), 1);
     let catalog = catalog_in(&root, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
@@ -184,21 +173,13 @@ fn check_mixed_pages(compress_middle: bool) {
         .unwrap()
         .contains("discarded tail"));
     assert_eq!(CodexSource.search_events(meta).unwrap(), detail.events);
-    let warm = catalog::Scan::new(&root, &|| false).unwrap().read(false, true, &|| false).unwrap();
+    let warm = catalog::Scan::new(&root, CatalogFilter::default(), &|| false).unwrap().read(true, &|| false).unwrap();
     assert!(!warm.sessions[0].stats_pending);
     assert_eq!(warm.sessions[0].real_user_count, 2);
-    delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |paths| {
-        assert_eq!(paths.len(), 3);
-        for path in [&first, &second, &third] {
-            assert!(paths.contains(&path.canonicalize().unwrap()));
-        }
-        Ok(())
-    })
-    .unwrap();
 }
 
 #[test]
-fn compression_transition_does_not_duplicate_messages_or_delete_only_one_copy() {
+fn compression_transition_does_not_duplicate_messages() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let plain = page(
@@ -219,21 +200,10 @@ fn compression_transition_does_not_duplicate_messages_or_delete_only_one_copy() 
     assert!(catalog.warnings.is_empty());
     assert_eq!(catalog.sessions[0].source_files, vec![plain.clone()]);
     assert_eq!(read_session_in(&root, "thread").unwrap().events.len(), 1);
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| {
-            panic!("Both storage variants must be resolved before deletion")
-        })
-        .is_err()
-    );
     fs::remove_file(&plain).unwrap();
     let after = catalog_in(&root, false).unwrap();
     assert_eq!(after.sessions.len(), 1);
-    assert_eq!(after.sessions[0].source_files, vec![compressed.clone()]);
-    delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |paths| {
-        assert_eq!(paths, vec![compressed.canonicalize().unwrap()]);
-        Ok(())
-    })
-    .unwrap();
+    assert_eq!(after.sessions[0].source_files, vec![compressed]);
 }
 
 #[test]
@@ -300,7 +270,7 @@ fn compressed_tools_use_decoded_offsets_validate_rewrites_and_allow_appended_fra
 }
 
 #[test]
-fn compressed_truncated_history_is_reported_and_never_partially_deleted() {
+fn compressed_truncated_history_is_reported() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let first = page(
@@ -334,12 +304,6 @@ fn compressed_truncated_history_is_reported_and_never_partially_deleted() {
     );
     let meta = catalog_in(&root, false).unwrap().sessions.remove(0);
     assert!(CodexSource.search_events(&meta).is_err());
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| {
-            panic!("Truncated history must not reach the remover")
-        })
-        .is_err()
-    );
 }
 
 #[test]
@@ -367,12 +331,6 @@ fn invalid_or_truncated_zstd_is_not_silently_ignored() {
             !catalog.warnings.is_empty(),
             "Unreadable compressed logs must produce a warning"
         );
-        assert!(
-            delete_session_with(&root, &escape_cwd("/tmp/paged"), "broken", |_| {
-                panic!("Unreadable compressed logs must not reach the remover")
-            })
-            .is_err()
-        );
     }
 }
 
@@ -386,7 +344,7 @@ fn compressed_empty_sessions_still_obey_the_empty_filter() {
 }
 
 #[test]
-fn compressed_symlink_is_readable_but_deletion_still_refuses_links() {
+fn compressed_symlink_is_readable() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let compressed = compress(&page(
@@ -402,12 +360,6 @@ fn compressed_symlink_is_readable_but_deletion_still_refuses_links() {
     std::os::unix::fs::symlink(&actual, &compressed).unwrap();
     assert_eq!(catalog_in(&root, false).unwrap().sessions.len(), 1);
     assert_eq!(read_session_in(&root, "thread").unwrap().events.len(), 1);
-    assert!(
-        delete_session_with(&root, &escape_cwd("/tmp/paged"), "thread", |_| {
-            panic!("Readable symlinks must still be rejected by deletion preflight")
-        })
-        .is_err()
-    );
 }
 
 #[test]
