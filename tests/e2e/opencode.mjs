@@ -40,9 +40,9 @@ try {
   await page.locator('.session-card .model-label').waitFor();
   assert.equal(await page.locator('.session-card .model-label').textContent(),'fixture/model-b');
   assert.ok(fixture.detail.meta.sizeBytes > 0);
-  assert.match(await page.locator('.session-card-sub').textContent(), / · [1-9]\d*(?:\.\d+)? (?:B|KB|MB)$/);
+  assert.match(await page.locator('.session-card-size').textContent(), /^[1-9]\d*(?:\.\d+)? (?:B|KB|MB)$/);
   await page.locator('.session-card').click();
-  await page.getByRole('button',{name:/^工具调用 · read.*已完成$/}).waitFor();
+  await page.getByRole('button',{name:/^工具调用 read.*已完成$/}).waitFor();
   const ids=await page.locator('.event-group').evaluateAll(rows=>rows.map(el=>Number(el.id.slice(3))));
   assert.deepEqual(ids,[...ids].sort((a,b)=>a-b));
   assert.ok(ids.indexOf(1)<ids.indexOf(2)&&ids.indexOf(2)<ids.indexOf(3)&&ids.indexOf(3)<ids.indexOf(5));
@@ -58,7 +58,7 @@ try {
   console.log(`PASS: latest model badge, provider-scoped history and per-message model hints (${engine})`);
   console.log(`PASS: source part order, grouped user prompt and folded tools/reasoning (${engine})`);
 
-  await page.getByRole('button',{name:/^工具调用 · read.*已完成$/}).click();
+  await page.getByRole('button',{name:/^工具调用 read.*已完成$/}).click();
   await page.getByText('Tool output',{exact:true}).waitFor();
   assert.ok((await page.locator('.collapsible.tool .code').first().textContent()).includes('/tmp/example'));
   assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
@@ -67,12 +67,12 @@ try {
   console.log(`PASS: input/output load only after expansion; stored reasoning expands (${engine})`);
 
   await page.locator('.detail-body').evaluate(el=>el.scrollTo(0,el.scrollHeight));
-  await page.getByRole('button',{name:/^工具调用 · bash.*失败$/}).click();
+  await page.getByRole('button',{name:/^工具调用 bash.*失败$/}).click();
   await page.getByText('Exit code 1',{exact:true}).waitFor();
-  assert.ok(await page.getByRole('button',{name:/^工具调用 · queued.*等待中$/}).count());
-  await page.getByRole('button',{name:/^工具调用 · streaming.*进行中$/}).click();
+  assert.ok(await page.getByRole('button',{name:/^工具调用 queued.*等待中$/}).count());
+  await page.getByRole('button',{name:/^工具调用 streaming.*进行中$/}).click();
   await page.getByText('partial output',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:/^工具调用 · streaming.*已完成$/}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/^工具调用 streaming.*已完成$/}).count(),0);
   await page.getByRole('checkbox',{name:'工具调用',exact:true}).uncheck();
   assert.equal(await page.locator('.collapsible.tool').count(),0);
   await page.getByRole('checkbox',{name:'思考过程',exact:true}).uncheck();
@@ -89,6 +89,6 @@ try {
   console.log(`PASS: search locates the correct body after interleaved tool/thinking parts (${engine})`);
   await page.goto(new URL('?no-size', baseURL).href);
   await page.locator('.session-card-sub').waitFor();
-  assert.match(await page.locator('.session-card-sub').textContent(), / · \d+ 条消息$/);
+  assert.match(await page.locator('.session-card-stats').textContent(), /^\d+ 条消息$/);
   console.log(`PASS: measured session sizes render and unavailable sizes are omitted (${engine})`);
 } finally {await browser?.close();rmSync(privateDir,{recursive:true,force:true});}

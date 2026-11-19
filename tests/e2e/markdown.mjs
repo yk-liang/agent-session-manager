@@ -71,7 +71,7 @@ try{
   assert.equal(await groupHeader.getAttribute('aria-expanded'), 'false');
   await page.getByText('样例助手正文', {exact:true}).waitFor();
   await groupHeader.click();
-  const tool = page.getByRole('button',{name:/^工具调用 · fixture.*查看运行日志.*已完成$/});
+  const tool = page.getByRole('button',{name:/^工具调用 fixture.*查看运行日志.*已完成$/});
   await tool.waitFor();
   assert.equal(await page.evaluate(()=>window.__MD__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
   await tool.click();

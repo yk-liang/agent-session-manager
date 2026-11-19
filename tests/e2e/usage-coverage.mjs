@@ -48,7 +48,8 @@ try {
   await page.goto(baseURL); await tab('用量');
   await page.waitForFunction(() => window.__COVERAGE__.release !== null);
   await waitTotal('110'); await waitLabel('已统计 Token');
-  await coverage.getByText('正在统计 · 已完成 4 / 5 个 Agent', { exact: true }).waitFor();
+  await coverage.getByText('正在统计', { exact: true }).waitFor();
+  await coverage.getByText('已完成 4 / 5 个 Agent', { exact: true }).waitFor();
   assert.match(await coverage.textContent(), /Codex/);
   assert.equal(await page.locator('.usage-models tfoot th').textContent(), '已统计小计');
   for (const width of [960, 1280, 1600]) {

@@ -116,28 +116,28 @@ export default function ConfigFileEditor({
   const displayedValidation = editing ? validation : file.validation;
   return (
     <article
-      className={`config-file${dirty ? " is-dirty" : ""}`}
+      className={`config-file${dirty ? " is-dirty" : ""}${!file.present && !editing ? " is-absent" : ""}`}
       data-file-key={file.key}
     >
       <div className="config-file-head">
         <button
-          className="collapsible-head"
+          className="config-file-toggle"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
           title={file.path}
         >
           <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
           <strong>{file.label}</strong>
-          {!file.present && (
-            <span className="config-badge muted">未创建</span>
+          {!file.present && !editing && (
+            <span className="status-tag muted">未创建</span>
           )}
-          {dirty && <span className="config-badge amber">未保存</span>}
-          <span className="config-line-count">
-            {file.present || editing ? `${lineCount} 行` : ""}
-          </span>
+          {dirty && <span className="status-tag amber">未保存</span>}
+          {(file.present || editing) && (
+            <span className="config-line-count">{lineCount} 行</span>
+          )}
         </button>
         {!editing && (
-          <button className="edit-btn" onClick={startEdit} disabled={disabled}>
+          <button className="config-file-action" onClick={startEdit} disabled={disabled}>
             {file.present ? "编辑" : "创建"}
           </button>
         )}

@@ -46,13 +46,14 @@ try {
   const errorPanel = page.locator('.session-read-error');
   const failedCards = page.locator('.session-card .read-error-badge');
   const copied = () => page.evaluate(() => window.__DIAGNOSTICS__.copied);
+  const recovered = id => page.locator('.detail-body').getByText(`Recovered ${id}`, { exact: true });
 
   await page.goto(baseURL);
   await card('aaaa').click();
   await errorPanel.waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   assert.equal(await failedCards.count(), 1);
-  assert.match(await errorPanel.textContent(), /阶段：open.*系统错误码：24/s);
+  assert.deepEqual(await errorPanel.locator('.read-error-fields dd').allTextContents(), ['open', 'Uncategorized', '24']);
   await errorPanel.getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: session_detail'));
   assert.equal(await copied(), await page.evaluate(() => window.__DIAGNOSTICS__.failure('session_detail')));
@@ -78,31 +79,31 @@ try {
   await errorPanel.waitFor();
   await page.evaluate(() => window.__DIAGNOSTICS__.readable.push('aaaa'));
   await errorPanel.getByRole('button', { name: '重试', exact: true }).click();
-  await page.getByText('Recovered aaaa', { exact: true }).waitFor();
+  await recovered('aaaa').waitFor();
   assert.equal(await failedCards.count(), 1, 'successful retry clears only its own failure');
   console.log(`PASS: cached summaries retain multiple body failures; scan warning count, exact copy, Agent isolation and retry are correct (${engine})`);
 
   await page.evaluate(() => { window.__DIAGNOSTICS__.contentBroken = 'bbbb'; });
   await card('bbbb').click();
   await errorPanel.getByText('无法解析会话正文', { exact: true }).waitFor();
-  assert.match(await errorPanel.textContent(), /阶段：parse_json.*系统错误码：none/s);
+  assert.deepEqual(await errorPanel.locator('.read-error-fields dd').allTextContents(), ['parse_json', 'JsonSyntax', 'none']);
   await page.evaluate(() => { const s = window.__DIAGNOSTICS__; s.contentBroken = null; s.readable.push('bbbb'); s.partial = true; });
   await errorPanel.getByRole('button', { name: '重试', exact: true }).click();
-  await page.getByText('Recovered bbbb', { exact: true }).waitFor();
+  await recovered('bbbb').waitFor();
   await page.locator('.detail-warnings').getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('stage: parse_json'));
   assert.match(await copied(), /line: 2/);
   await page.evaluate(() => { window.__DIAGNOSTICS__.partial = false; });
   await page.locator('.detail-warnings').getByRole('button', { name: '重试', exact: true }).click();
-  await page.getByText('Recovered bbbb', { exact: true }).waitFor();
+  await recovered('bbbb').waitFor();
   assert.equal(await page.locator('.detail-warnings').count(), 0);
   console.log(`PASS: invalid content has a distinct error; partial content keeps a copyable warning and can recover (${engine})`);
 
   await page.getByRole('button', { name: '用量', exact: true }).click();
   const usageError = page.locator('.usage-sync-error');
   await usageError.waitFor();
-  assert.match(await usageError.textContent(), /已保存记录仍可查看/);
-  assert.match(await usageError.textContent(), /阶段：open.*类型：PermissionDenied.*系统错误码：13/s);
+  assert.match(await usageError.textContent(), /已保存的用量仍可查看/);
+  assert.deepEqual(await usageError.locator('.read-error-fields dd').allTextContents(), ['open', 'PermissionDenied', '13']);
   await usageError.getByRole('button', { name: '复制诊断详情', exact: true }).click();
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: usage_sync'));
   assert.match(await copied(), /cause: Permission denied \(os error 13\)/);

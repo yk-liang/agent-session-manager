@@ -36,6 +36,8 @@ try {
   await page.locator(".config-status", { hasText: /^工作$/ }).waitFor();
   assert.equal(await page.locator(".config-file").count(), 3);
   assert.equal(await file(".models/default").getByRole("button", { name: "创建", exact: true }).count(), 1);
+  const heads = await page.locator(".config-file-head").evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+  assert.ok(heads.every((height) => height === heads[0]), `同级配置文件行应等高：${heads}`);
   assert.ok((await page.locator(".config-overview").textContent()).includes("work-model"));
   assert.equal(await page.locator('.config-overview strong[title="filesystem"]').textContent(), "1 个");
   assert.equal(await page.getByText("未显式设置", { exact: true }).count(), 0);
@@ -288,7 +290,7 @@ try {
 
   await page.evaluate((content) => { window.__CONFIG_TEST__.configs.claude[0].content = content; }, configFixtures.claude[0].content);
   await agent("Claude Code");
-  await file("settings.json").locator(".collapsible-head").click();
+  await file("settings.json").locator(".config-file-toggle").click();
   for (const mode of ["view", "edit"]) {
     if (mode === "edit") await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
     const code = file("settings.json").locator(mode === "edit" ? "textarea" : "pre.config-json");

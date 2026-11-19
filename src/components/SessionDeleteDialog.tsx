@@ -26,9 +26,8 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
       title={batch ? "批量删除会话" : "删除会话"}
       message={
         <>
-          <p>{batch
-            ? `${agent.displayName} · ${sessions.length} 个会话`
-            : `「${session.title || session.sessionId.slice(0, 8) + "…"}」`}</p>
+          {batch ? <p>将删除 {agent.displayName} 的 <strong className="deletion-count">{sessions.length} 个会话</strong>。</p>
+            : <p>「{session.title || session.sessionId.slice(0, 8) + "…"}」</p>}
           <p>{toTrash ? "会话文件将移入废纸篓，可在访达中还原。" : "会话将永久删除，无法恢复。"}</p>
           {(agent.id === "codex" || agent.id === "opencode") && <p>关联的子会话也会被删除。</p>}
           {batch && (
@@ -36,8 +35,8 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
               <ul className="batch-targets">
                 {sessions.map((target) => (
                   <li key={sessionKey(target)}>
-                    {target.title || target.sessionId}
-                    <small>{shortPath(target.cwd) || target.projectDir} · {target.sessionId}</small>
+                    <span>{target.title || target.sessionId}</span>
+                    <small className="session-location"><span>{shortPath(target.cwd) || target.projectDir}</span><code>{target.sessionId}</code></small>
                   </li>
                 ))}
               </ul>

@@ -49,7 +49,8 @@ export default function Sidebar({
           >
             <div className="project-path">{shortPath(p.displayPath) || p.dirName}</div>
             <div className="project-meta">
-              {p.sessionCount} 个会话 · {relativeTime(p.lastActivity)}
+              <span>{p.sessionCount} 个会话</span>
+              <time dateTime={p.lastActivity ?? undefined}>{relativeTime(p.lastActivity)}</time>
             </div>
           </button>
         ))}

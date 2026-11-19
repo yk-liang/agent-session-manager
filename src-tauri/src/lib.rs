@@ -102,6 +102,24 @@ async fn list_agents() -> Result<Vec<AgentInfo>, String> {
 }
 
 #[tauri::command]
+async fn count_sessions(
+    agent: String,
+    include_empty: bool,
+    include_archived: bool,
+) -> Result<Option<usize>, String> {
+    run_backend(move || {
+        let source = agents::find_source(&agent)?;
+        let filter = CatalogFilter {
+            include_empty,
+            include_archived: include_archived && source.supports_archive(),
+        };
+        let catalog = source.scan_catalog(filter, &|| false)?;
+        Ok(catalog.warnings.is_empty().then_some(catalog.sessions.len()))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn open_data_dir(agent: String) -> Result<(), String> {
     run_backend(move || {
         let path = agents::data_directory(&agent)?;
@@ -537,7 +555,7 @@ pub fn run() {
             list_agents,
             open_data_dir,
             catalog,
-            sync_request_events, read_usage_summary, cancel_usage_summary,
+            sync_request_events, read_usage_summary, cancel_usage_summary, count_sessions,
             read_request_events,
             cancel_request_events,
             cancel_usage,

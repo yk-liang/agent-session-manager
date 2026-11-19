@@ -28,6 +28,7 @@ pub struct SummaryQuery {
 pub struct SummaryRow {
     pub agent: String,
     pub bucket_start: Option<i64>,
+    pub record_count: u64,
     #[serde(flatten)]
     pub usage: UsageRow,
     #[serde(flatten)]
@@ -276,6 +277,7 @@ pub(super) fn read_at(
         .map_err(|_| "无法查询请求用量")?;
     #[derive(Default)]
     struct Group {
+        record_count: u64,
         tokens: Tokens,
         details: RecordedFields,
         partial: bool,
@@ -340,6 +342,7 @@ pub(super) fn read_at(
         let entry = grouped
             .entry((agent, model, date, bucket_start))
             .or_default();
+        entry.record_count += 1;
         // 无计量的失败请求参与次数/成本统计，不把缺失 usage 当作实测的 0。
         if measured {
             entry.tokens.add(&m.tokens);
@@ -368,6 +371,7 @@ pub(super) fn read_at(
         .map(|((agent, model, date, bucket_start), group)| SummaryRow {
             agent,
             bucket_start,
+            record_count: group.record_count,
             usage: UsageRow {
                 date,
                 model,

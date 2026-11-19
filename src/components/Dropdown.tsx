@@ -6,6 +6,7 @@ interface Option {
   id: string;
   name: string;
   icon?: ReactNode;
+  count?: number | null;
 }
 
 interface Props {
@@ -13,29 +14,34 @@ interface Props {
   options: Option[];
   value: string | null;
   onChange: (id: string) => void;
+  onOpen?: () => void;
+  countUnit?: string;
   disabled?: boolean;
   placeholder?: string;
   searchLabel?: string;
+  /** 由容器决定宽度并截断当前值；默认按最长选项定宽，切换时不跳动。 */
+  fill?: boolean;
   className?: string;
 }
 
 function positionMenu(button: HTMLButtonElement, menu: HTMLDivElement) {
   const anchor = button.getBoundingClientRect();
-  const gap = 6, margin = 8;
+  const gap = 4, margin = 8;
   const below = window.innerHeight - anchor.bottom - gap - margin;
   const above = anchor.top - gap - margin;
   menu.style.setProperty("--dropdown-anchor-width", `${anchor.width}px`);
   menu.style.removeProperty("--dropdown-available-height");
   const opensBelow = menu.offsetHeight <= below || below >= above;
   menu.style.setProperty("--dropdown-available-height", `${Math.max(0, opensBelow ? below : above)}px`);
-  const rightLimit = window.innerWidth - menu.offsetWidth - margin;
-  const left = anchor.left <= rightLimit ? anchor.left : Math.min(anchor.right - menu.offsetWidth, rightLimit);
+  const width = menu.getBoundingClientRect().width;
+  const rightLimit = window.innerWidth - width - margin;
+  const left = anchor.left <= rightLimit ? anchor.left : Math.min(anchor.right - width, rightLimit);
   menu.style.left = `${Math.max(margin, left)}px`;
   menu.style.top = `${opensBelow ? anchor.bottom + gap : anchor.top - gap - menu.offsetHeight}px`;
 }
 
-export default function Dropdown({ label, options, value, onChange, disabled = false,
-  placeholder, searchLabel, className }: Props) {
+export default function Dropdown({ label, options, value, onChange, onOpen, countUnit, disabled = false,
+  placeholder, searchLabel, fill = false, className }: Props) {
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
@@ -92,12 +98,13 @@ export default function Dropdown({ label, options, value, onChange, disabled = f
     document.addEventListener("scroll", onScroll, true);
     const observer = new ResizeObserver(position);
     observer.observe(button);
+    observer.observe(popup);
     return () => {
       window.removeEventListener("resize", position);
       document.removeEventListener("scroll", onScroll, true);
       observer.disconnect();
     };
-  }, [open, visible.length]);
+  }, [open]);
   useLayoutEffect(() => {
     if (open && searchLabel) search.current?.focus({ preventScroll: true });
   }, [open, searchLabel]);
@@ -117,6 +124,7 @@ export default function Dropdown({ label, options, value, onChange, disabled = f
     typeahead.current = { text: "", at: 0 };
     setActiveId(id ?? null);
     setOpen(true);
+    onOpen?.();
     trigger.current?.focus({ preventScroll: true });
   };
   const close = () => {
@@ -177,21 +185,33 @@ export default function Dropdown({ label, options, value, onChange, disabled = f
       onKeyDown={onKeyDown} onMouseDown={event => { if (open) event.preventDefault(); }}
       onClick={() => { if (open) close(); else show(); }}>
       {selected?.icon}
-      <span className="dropdown-label" title={selected?.name}>{selected?.name ?? placeholder}</span>
+      <span className="dropdown-value">
+        <span title={selected?.name}>{selected?.name ?? placeholder}</span>
+        {!fill && options.map(option => <span key={option.id} className="dropdown-sizer" aria-hidden="true">{option.name}</span>)}
+      </span>
       <UiIcon icon={ChevronDown} className="dropdown-chevron" />
     </button>
     {open && <div ref={menu} className="dropdown-menu">
-      {searchLabel && <input ref={search} className="dropdown-search" type="search" role="combobox" tabIndex={-1}
+      {searchLabel && <input ref={search} className="control-input dropdown-search" type="search" role="combobox" tabIndex={-1}
         aria-label={searchLabel} placeholder={searchLabel} autoComplete="off" value={query}
         aria-autocomplete="list" aria-expanded="true" aria-controls={listId} aria-activedescendant={activeDescendant}
         onKeyDown={onKeyDown} onChange={event => { setQuery(event.target.value); setActiveId(null); }} />}
       <div ref={list} id={listId} className="dropdown-options" role="listbox" aria-label={label}>
         {visible.map(option => <button key={option.id} type="button" role="option" id={optionId(option.id)} value={option.id}
           className="dropdown-option" tabIndex={-1} aria-selected={option.id === value} data-active={option.id === active?.id}
+          aria-label={countUnit ? option.name : undefined}
+          aria-description={countUnit ? option.count == null ? "数量暂不可用" : `${option.count} ${countUnit}` : undefined}
           onMouseDown={event => event.preventDefault()} onPointerMove={() => setActiveId(option.id)} onClick={() => choose(option.id)}>
           {option.icon}
-          <span className="dropdown-label" title={option.name}>{option.name}</span>
-          {option.id === value && <UiIcon icon={Check} className="dropdown-check" />}
+          <span className="dropdown-option-label" onMouseEnter={({ currentTarget }) => {
+            const { scrollWidth, clientWidth } = currentTarget;
+            if (scrollWidth > clientWidth) currentTarget.title = option.name;
+            else currentTarget.removeAttribute("title");
+          }}>{option.name}</span>
+          {countUnit && <span className="dropdown-count" aria-hidden="true">
+            {option.count == null ? "—" : option.count.toLocaleString("zh-CN")}
+          </span>}
+          <span className="dropdown-check">{option.id === value && <UiIcon icon={Check} />}</span>
         </button>)}
       </div>
       {!visible.length && <p className="dropdown-empty" role="status">没有匹配项</p>}

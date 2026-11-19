@@ -111,7 +111,7 @@ export function installScreenshotFixture(fixture) {
           rows: fixture.events.filter(e => (from == null || e.time >= from) && (to == null || e.time < to)).map(e => ({
             ...e, date: new Date(e.time).toISOString().slice(0, 10),
             bucketStart: bounds.find((start, i) => e.time >= start && e.time < bounds[i + 1]) ?? null,
-            totalTokens: e.inputTokens + e.outputTokens, requestCount: 1, requestCountIncomplete: false,
+            totalTokens: e.inputTokens + e.outputTokens, recordCount: 1, requestCount: 1, requestCountIncomplete: false,
             costUsd: e.request.costUsd, costIncomplete: e.request.costUsd == null,
             cacheReadIncomplete: false, cacheRateUnavailable: false,
           })),

@@ -94,18 +94,24 @@ test("refresh failures preserve the previous list and allow a subsequent retry",
 
 test("late scans cannot revive deleted sessions or touch another Agent", async () => {
   const scan = deferred();
+  const count = deferred();
   let hold = false;
   const row = meta("same", "mode-id");
   const cache = new AgentCatalogCache(async () => hold ? scan.promise : catalog(row));
   for (const agent of ["qoder", "claude"]) for (const filter of [active, allActive]) await cache.load(agent, filter, generation);
+  const refreshCount = () => cache.refreshCount("qoder", active, () => count.promise);
+  const staleCount = refreshCount();
+  assert.equal(refreshCount(), staleCount);
   hold = true;
   const stale = cache.load("qoder", active, generation);
   cache.remove("qoder", [row]);
   scan.resolve(catalog(row));
-  await stale;
+  count.resolve(1);
+  await Promise.all([stale, staleCount]);
   assert.equal(cache.peek("qoder", active).sessions.length, 0);
   assert.equal(cache.peek("qoder", allActive).projects.length, 0);
   assert.equal(cache.peek("claude", active).sessions.length, 1);
+  assert.equal(cache.count("qoder", active), 0);
 });
 
 test("background statistics cannot replace a newer refresh or revive deleted sessions", async () => {

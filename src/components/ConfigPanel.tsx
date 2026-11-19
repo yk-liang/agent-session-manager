@@ -383,6 +383,7 @@ export default function ConfigPanel({
             }}
           >
             <input
+              className="control-input"
               autoFocus
               placeholder="例如：工作"
               value={profileName}
@@ -415,13 +416,13 @@ export default function ConfigPanel({
                 title={profile.files
                   .filter((file) => file.present)
                   .map((file) => file.label)
-                  .join(" · ")}
+                  .join("、")}
               >
                 <div className="profile-info">
                   <div className="profile-name">
                     {profile.name}
                     {matching.includes(profile.name) && (
-                      <span className="config-badge green">当前</span>
+                      <span className="status-tag green">当前</span>
                     )}
                   </div>
                   <div className="profile-meta">
@@ -460,7 +461,7 @@ export default function ConfigPanel({
               格式错误或外部修改会阻止保存，草稿会保留。
             </HelpTip>
           </div>
-          {!validFiles && <span className="config-badge amber">格式有误</span>}
+          {!validFiles && <span className="status-tag amber">格式有误</span>}
         </div>
         {workspace.files.length === 0 && (
           <div className="config-empty">暂无配置文件</div>
@@ -512,12 +513,13 @@ export default function ConfigPanel({
               <article className="backup-row" key={backup.id}>
                 <div className="backup-marker" />
                 <div className="backup-info">
-                  <strong>{backup.label}</strong>
-                  <p>
-                    {dateLabel(backup.createdAt)} · {backup.files.join("、")}
-                    {backup.legacy ? " · 单文件" : ""}
-                  </p>
+                  <div className="backup-title">
+                    <strong>{backup.label}</strong>
+                    {backup.legacy && <span className="status-tag muted">单文件</span>}
+                  </div>
+                  <p>{backup.files.join("、")}</p>
                 </div>
+                <span className="backup-time">{dateLabel(backup.createdAt)}</span>
                 <button
                   disabled={disabled || dirty}
                   onClick={() => void startPreview("backup", backup.id)}

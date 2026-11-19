@@ -68,7 +68,7 @@ try {
   await developer.click();
   await page.locator('.collapsible.context .collapsible-body').getByText('Runtime instructions: runtime-only-needle', { exact: true }).waitFor();
   await developer.click();
-  const pageState = page.locator('.collapsible.context').filter({ has: page.getByRole('button', { name: '页面上下文 · 未打开页面', exact: true }) }).first();
+  const pageState = page.locator('.collapsible.context').filter({ has: page.getByRole('button', { name: '页面上下文 未打开页面', exact: true }) }).first();
   await pageState.getByRole('button').click();
   assert.equal(await pageState.locator('.code').textContent(), '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>');
   await page.getByRole('checkbox', { name: 'Markdown', exact: true }).check();
@@ -112,11 +112,13 @@ try {
   const archiveBounds = await showArchived.boundingBox();
   assert.ok(archiveBounds.x > emptyBounds.x && archiveBounds.y === emptyBounds.y);
   assert.equal(await showArchived.isChecked(), false);
-  await page.locator('.detail-actions').getByRole('button', { name: '归档', exact: true }).click();
-  const archivedCard = page.locator('.session-card').filter({ hasText: '已归档' });
+  const archive = page.locator('.detail-actions').getByRole('button', { name: '归档', exact: true });
+  assert.equal(await archive.locator('svg').count(), 0, '详情工具栏的归档按钮与同排文本按钮一致');
+  await archive.click();
+  const archivedCard = page.locator('.session-card.archived');
   await page.locator('.placeholder').waitFor();
   await showArchived.check();
-  await archivedCard.waitFor();
+  await archivedCard.locator('.archived-ribbon').getByText('已归档', { exact: true }).waitFor();
   await showEmpty.uncheck();
   await archivedCard.waitFor({ state: 'hidden' });
   await showEmpty.check();

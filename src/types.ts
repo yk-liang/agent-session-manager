@@ -263,7 +263,11 @@ export interface UsageRequestMetrics {
   cacheReadIncomplete: boolean;
   cacheRateUnavailable: boolean;
 }
-export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics { agent: string; bucketStart: number | null }
+export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics {
+  agent: string;
+  bucketStart: number | null;
+  recordCount: number;
+}
 export interface UsageSummary {
   rows: UsageSummaryRow[];
   health: Record<string, { partial: boolean; warnings: string[] }>;

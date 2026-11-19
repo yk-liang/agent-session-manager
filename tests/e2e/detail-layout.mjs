@@ -24,6 +24,20 @@ const compact=async()=>{
   const wrong=values.filter(v=>v.gap<9||v.gap>11);
   assert.deepEqual(wrong,[],'相邻消息必须保持 10px 间距');
 };
+const alignedActivity=async()=>{
+  const { count, misaligned }=await page.evaluate(()=>{
+    const cards=[...document.querySelectorAll('.event-group > .collapsible')];
+    const assistant=document.querySelector('.event-group > .msg.assistant');
+    const width=assistant && getComputedStyle(assistant).maxWidth;
+    return { count:cards.length, misaligned:cards.flatMap(card=>{
+      const bounds=card.getBoundingClientRect(), row=card.parentElement.getBoundingClientRect();
+      return getComputedStyle(card).maxWidth===width && Math.abs(bounds.left-row.left)<1 &&
+        bounds.width<row.width ? [] : [card.className];
+    }) };
+  });
+  assert.ok(count>0,'需要展开或收起的活动卡片验证宽度');
+  assert.deepEqual(misaligned,[],'活动卡片应与助手消息左对齐，并共用宽度上限');
+};
 try{
   let detail;
   if(process.env.ASM_LAYOUT_USE_REAL==='1') {
@@ -63,16 +77,17 @@ try{
     await markdown.uncheck();await compact();await markdown.check();await page.waitForFunction(()=>!document.querySelector('[data-markdown-pending]'));await compact();
   }
   const tool=page.locator('.collapsible.tool .collapsible-head').first();
-  await tool.click();await page.locator('.collapsible-body').first().waitFor();await compact();
+  await tool.click();await page.locator('.collapsible-body').first().waitFor();await compact();await alignedActivity();
   await tool.click();await compact();
   for(const name of ['工具调用','思考过程']){await page.getByRole('checkbox',{name,exact:true}).uncheck();await compact();await page.getByRole('checkbox',{name,exact:true}).check();await compact();}
-  await page.setViewportSize({width:1100,height:760});await compact();
+  await page.setViewportSize({width:1100,height:760});await compact();await alignedActivity();
   console.log(`PASS: scroll, repeated toggling, tool expansion/filter changes and resize have no stale gaps (${engine})`);
-  const style=()=>Array.from(document.querySelectorAll('.view-toggles input')).map(input=>{const css=getComputedStyle(input);return{appearance:css.getPropertyValue('appearance')||css.getPropertyValue('-webkit-appearance'),background:css.backgroundColor,border:css.borderColor};});
+  const style=()=>Array.from(document.querySelectorAll('.checkbox-label input')).map(input=>{const css=getComputedStyle(input);return{appearance:css.getPropertyValue('appearance')||css.getPropertyValue('-webkit-appearance'),background:css.backgroundColor,border:css.borderColor,width:css.width,height:css.height};});
   const active=await page.evaluate(style);assert.ok(active.every(s=>s.appearance==='none'),'复选框不能使用会随系统焦点变化的原生外观');
+  assert.ok(active.every(s=>s.width===active[0].width&&s.height===active[0].height));
   await page.evaluate(()=>window.dispatchEvent(new Event('blur')));assert.deepEqual(await page.evaluate(style),active);
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));assert.deepEqual(await page.evaluate(style),active);
-  for(const name of ['工具调用','思考过程','Markdown']){
+  for(const name of ['显示空会话','工具调用','思考过程','Markdown']){
     const box=page.getByRole('checkbox',{name,exact:true});await box.focus();const before=await box.isChecked();await box.press('Space');assert.equal(await box.isChecked(),!before);await box.press('Space');assert.equal(await box.isChecked(),before);
   }
   console.log(`PASS: explicit checkbox colors survive focus events and retain Space-key/accessibility behavior (${engine})`);

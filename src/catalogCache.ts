@@ -3,6 +3,10 @@ import { sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
 export const DEFAULT_CATALOG_FILTER: CatalogFilter = { includeEmpty: false, includeArchived: false };
+export function catalogFilterFor({ includeEmpty, includeArchived }: CatalogFilter, supportsArchive = false): CatalogFilter {
+  return { includeEmpty, includeArchived: includeArchived && supportsArchive };
+}
+
 type CatalogLoader = (agent: string, filter: CatalogFilter, generation: number, revision?: number) => Promise<Catalog | null>;
 const scopeKey = (agent: string, { includeEmpty, includeArchived }: CatalogFilter) =>
   JSON.stringify([agent, includeEmpty, includeArchived]);
@@ -39,6 +43,8 @@ interface CatalogScope {
   filter: CatalogFilter;
   sequence: number;
   snapshot?: Catalog;
+  count?: number | null;
+  countRequest?: Promise<void>;
   pending?: { generation: number; request: Promise<Catalog> };
 }
 
@@ -46,6 +52,7 @@ export class AgentCatalogCache {
   private scopes = new Map<string, CatalogScope>();
   private readFailures = new Map<string, Map<string, SessionMeta>>();
   private listeners = new Set<() => void>();
+  private countRevision = 0;
   private loader: CatalogLoader;
 
   constructor(loader: CatalogLoader) {
@@ -66,6 +73,26 @@ export class AgentCatalogCache {
     return this.scopes.get(scopeKey(agent, filter))?.snapshot;
   }
 
+  count(agent: string, filter: CatalogFilter) {
+    return this.scopes.get(scopeKey(agent, filter))?.count;
+  }
+
+  countVersion = () => this.countRevision;
+
+  refreshCount(agent: string, filter: CatalogFilter, load: () => Promise<number | null>): Promise<void> {
+    const scope = this.scope(agent, filter);
+    if (scope.countRequest) return scope.countRequest;
+    const { sequence, snapshot } = scope;
+    const request = load().catch(() => null).then(count => {
+      if (scope.sequence !== sequence || scope.snapshot !== snapshot) return;
+      if (this.setCount(scope, count)) this.notify();
+    }).finally(() => {
+      if (scope.countRequest === request) scope.countRequest = undefined;
+    });
+    scope.countRequest = request;
+    return request;
+  }
+
   visible(agent: string, filter: CatalogFilter) {
     return this.peek(agent, filter)
       ?? (filter.includeEmpty ? this.peek(agent, { ...filter, includeEmpty: false }) : undefined)
@@ -78,11 +105,24 @@ export class AgentCatalogCache {
     return () => { this.listeners.delete(listener); };
   };
 
-  private publish(scope: CatalogScope, catalog: Catalog) {
+  private setCount(scope: CatalogScope, count: number | null) {
+    if (scope.count === count) return false;
+    scope.count = count;
+    this.countRevision++;
+    return true;
+  }
+
+  private notify() {
+    for (const listener of this.listeners) listener();
+  }
+
+  private publish(scope: CatalogScope, catalog: Catalog, updateCount = true) {
+    const countChanged = updateCount && !catalog.sessions.some(session => session.statsPending)
+      && this.setCount(scope, catalog.warnings.length ? null : catalog.sessions.length);
     if (scope.snapshot !== catalog) {
       scope.snapshot = catalog;
-      for (const listener of this.listeners) listener();
-    }
+      this.notify();
+    } else if (countChanged) this.notify();
     return catalog;
   }
 
@@ -129,7 +169,7 @@ export class AgentCatalogCache {
     else failures.delete(sessionKey(session));
     this.readFailures.set(agent, failures);
     for (const scope of this.scopes.values()) {
-      if (scope.agent === agent && scope.snapshot) this.publish(scope, this.decorate(scope, scope.snapshot));
+      if (scope.agent === agent && scope.snapshot) this.publish(scope, this.decorate(scope, scope.snapshot), false);
     }
   }
 
@@ -187,6 +227,7 @@ export class AgentCatalogCache {
       if (scope.agent !== agent) continue;
       scope.sequence++;
       scope.pending = undefined;
+      scope.countRequest = undefined;
       if (!scope.snapshot) continue;
       const updated = update(scope.snapshot, scope.filter);
       if (updated !== scope.snapshot) this.publish(scope, { ...updated, revision: undefined });

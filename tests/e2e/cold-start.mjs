@@ -55,7 +55,7 @@ try {
   await page.getByText('正在读取历史请求…', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '开启后台采集', exact: true }).count(), 0);
   await page.getByRole('button', { name: '用量同步说明', exact: true }).click();
-  assert.ok((await page.getByRole('tooltip').textContent()).includes('此版本不支持退出后的后台采集'));
+  assert.ok((await page.getByRole('tooltip').textContent()).includes('此版本仅在应用运行时同步用量。'));
   await page.keyboard.press('Escape');
   const emitProgress = (phase, done, total) => page.evaluate(({ phase, done, total }) => {
     const s = window.__COLD__;

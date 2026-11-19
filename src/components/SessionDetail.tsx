@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import CopyButton from "./CopyButton";
-import ViewToggle from "./ViewToggle";
+import { CheckboxField } from "./Checkbox";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
@@ -120,7 +120,7 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
       <div className="detail-header">
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
-          {meta.archived && <span className="badge">已归档</span>}
+          {meta.archived && <span className="status-tag muted">已归档</span>}
           <CopyButton key={`copy:${sessionKey(meta)}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
@@ -128,18 +128,22 @@ export default function SessionDetailView({ detail, agent, onRequestDelete, onTo
           {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${fullTime(meta.firstTs)} ~ ${fullTime(meta.lastTs)}`}>
             {fullTime(meta.lastTs)}
           </time>}
-          <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
+          <div className="detail-meta-actions">
+            <SessionInfo key={`info:${sessionKey(meta)}`} meta={meta} models={models} />
+          </div>
         </div>
-        <div className="detail-actions">
-          <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete}
-            onToggleArchive={onToggleArchive} toast={toast} disabled={actionsDisabled} />
+        <div className="detail-toolbar">
+          <div className="detail-actions">
+            <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete}
+              onToggleArchive={onToggleArchive} toast={toast} disabled={actionsDisabled} />
+          </div>
           {meta.hasTranscript && (
-            <span className="view-toggles">
-              <ViewToggle label="工具调用" checked={showTools} onChange={setShowTools} />
-              <ViewToggle label="思考过程" checked={showThinking} onChange={setShowThinking} />
-              {hasContext && <ViewToggle label="上下文" checked={showContext} onChange={setShowContext} title="查看系统指令、环境信息和压缩摘要" />}
-              <ViewToggle label="Markdown" checked={renderMarkdown} onChange={changeMarkdown} />
-            </span>
+            <div className="view-toggles" role="group" aria-label="对话显示选项">
+              <CheckboxField label="工具调用" checked={showTools} onChange={setShowTools} />
+              <CheckboxField label="思考过程" checked={showThinking} onChange={setShowThinking} />
+              {hasContext && <CheckboxField label="上下文" checked={showContext} onChange={setShowContext} title="查看系统指令、环境信息和压缩摘要" />}
+              <CheckboxField label="Markdown" checked={renderMarkdown} onChange={changeMarkdown} />
+            </div>
           )}
         </div>
       </div>

@@ -16,6 +16,8 @@ import type {
 } from "./types";
 
 export const listAgents = () => invoke<AgentInfo[]>("list_agents");
+export const countSessions = (agent: string, filter: CatalogFilter) =>
+  invoke<number | null>("count_sessions", { agent, ...filter });
 export const openDataDir = (agent: string) => invoke<void>("open_data_dir", { agent });
 
 let usageGeneration = Date.now();

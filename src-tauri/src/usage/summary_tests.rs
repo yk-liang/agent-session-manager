@@ -537,6 +537,7 @@ fn model_metrics_do_not_count_cumulative_deltas_as_single_requests() {
     let result = read(&mut store, vec![]);
     assert_eq!(sum(&result), 110);
     assert_eq!(result.rows[0].metrics.request_count, 0);
+    assert_eq!(result.rows[0].record_count, 1);
     assert!(result.rows[0].metrics.request_count_incomplete);
 }
 

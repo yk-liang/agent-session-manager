@@ -42,12 +42,14 @@ export default function SessionActions({ agent, session, onRequestDelete, onTogg
     }
   };
 
-  const button = (label: string, icon: LucideIcon, onClick: () => void, { danger = false, showIcon = false } = {}) => (
+  // 卡片上是纯图标快捷操作，详情工具栏与同排按钮一样只用文字。
+  const button = (label: string, icon: LucideIcon, onClick: () => void, danger = false) => (
     <button type="button" className={danger ? "danger" : undefined} disabled={disabled}
-      title={!compact && showIcon ? label : undefined}
       aria-label={compact ? `${label}（${session.title || session.sessionId}）` : undefined} onClick={onClick}>
-      {(compact || showIcon) && <UiIcon icon={icon} />}
-      {compact ? <span className="session-action-tooltip" aria-hidden="true">{label}</span> : label}
+      {compact ? <>
+        <UiIcon icon={icon} />
+        <span className="session-action-tooltip" aria-hidden="true">{label}</span>
+      </> : label}
     </button>
   );
 
@@ -59,8 +61,8 @@ export default function SessionActions({ agent, session, onRequestDelete, onTogg
         <button type="button" disabled={disabled} onClick={() => resume(true)}>分叉会话</button>
       )}
       {agent.supportsArchive && button(session.archived ? "取消归档" : "归档",
-        session.archived ? ArchiveRestore : Archive, () => onToggleArchive(session), { showIcon: true })}
-      {canDelete && button("删除", Trash2, () => onRequestDelete(session), { danger: true })}
+        session.archived ? ArchiveRestore : Archive, () => onToggleArchive(session))}
+      {canDelete && button("删除", Trash2, () => onRequestDelete(session), true)}
     </>
   );
 

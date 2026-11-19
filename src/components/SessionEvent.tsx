@@ -82,6 +82,8 @@ function ToolContent({ block, input = false }: { block: ContentBlock; input?: bo
 
 function Collapsible({
   label,
+  name,
+  summary,
   preview,
   trailing,
   icon,
@@ -91,8 +93,10 @@ function Collapsible({
   persistKey,
 }: {
   label: string;
+  name?: string;
+  summary?: string | null;
   preview?: string;
-  trailing?: string;
+  trailing?: ReactNode;
   icon?: LucideIcon;
   children: ReactNode;
   error?: boolean;
@@ -103,14 +107,16 @@ function Collapsible({
   const rowKey = useContext(RowKey);
   const key = `${rowKey}:${persistKey}`;
   const [open, setOpen] = useState(() => expanded.has(key));
+  const description = summary ?? (open ? undefined : preview);
   const toggle = () => { if (open) expanded.delete(key); else expanded.add(key); setOpen(!open); };
   return (
     <div className={`collapsible ${kind}${error ? " error" : ""}`}>
       <button className="collapsible-head" aria-expanded={open} onClick={toggle}>
         <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
         {icon && <UiIcon icon={icon} className="response-group-icon" />}
-        <span className="collapsible-label" title={kind === "tool" ? label : undefined}>{label}</span>
-        {!open && preview && <span className="collapsible-preview" title={preview}>{preview}</span>}
+        <span className="collapsible-label">{label}</span>
+        {name && <code className="collapsible-name" title={name}>{name}</code>}
+        {description && <span className="collapsible-preview" title={description}>{description}</span>}
         {trailing && <span className="collapsible-status">{trailing}</span>}
       </button>
       {open && <div className="collapsible-body">{children}</div>}
@@ -138,9 +144,10 @@ function ToolCard({ block, result, index }: { block: ContentBlock; result?: Cont
       kind="tool"
       error={status === "error"}
       persistKey={`block:${index}`}
-      label={`工具调用 · ${block.name ?? "未知工具"}`}
+      label="工具调用"
+      name={block.name || "未知工具"}
       preview={toolDescription(block)}
-      trailing={status && toolStatusLabels[status]}
+      trailing={status && <span className={`tool-status ${status}`}>{toolStatusLabels[status]}</span>}
     >
       <div className="tool-section-title">输入</div>
       <ToolContent key={block.deferred} block={block} input />
@@ -164,7 +171,7 @@ function ActivityCard({ part, markdown }: { part: SessionBlock; markdown: boolea
   }
   if (block.type === "tool_result") {
     return <Collapsible persistKey={`block:${index}`} kind="tool" label="工具结果"
-      error={block.is_error} trailing={block.is_error ? "失败" : undefined}>
+      error={block.is_error} trailing={block.is_error && <span className="tool-status error">失败</span>}>
       <ToolContent key={block.deferred} block={block} />
     </Collapsible>;
   }
@@ -188,13 +195,15 @@ function ResponseGroup({ parts, visibility, markdown }: {
   const label = thinkingCount && toolCount + resultCount ? "思考与工具调用"
     : thinkingCount ? "思考过程" : toolCount ? "工具调用" : "工具结果";
   const counts = [
-    thinkingCount ? `${thinkingCount} 段思考` : "",
-    toolCount ? `${toolCount} 次调用` : "",
-    resultCount ? `${resultCount} 条结果` : "",
-    failureCount ? `${failureCount} 次失败` : "",
-  ].filter(Boolean).join(" · ");
+    [thinkingCount, "段思考"],
+    [toolCount, "次调用"],
+    [resultCount, "条结果"],
+    [failureCount, "次失败"],
+  ] as const;
   return <Collapsible kind="response-group" persistKey={`group:${parts[0].index}`}
-    label={label} trailing={counts} error={failureCount > 0} icon={Layers}>{rows}</Collapsible>;
+    label={label} trailing={counts.map(([count, unit]) => count > 0 && <span key={unit}
+      className={unit === "次失败" ? "collapsible-count failed" : "collapsible-count"}><strong>{count}</strong> {unit}</span>)}
+    error={failureCount > 0} icon={Layers}>{rows}</Collapsible>;
 }
 
 export function EventView({ row, visibility, renderMarkdown, highlightQuery = "" }: {
@@ -207,8 +216,8 @@ export function EventView({ row, visibility, renderMarkdown, highlightQuery = ""
   if (event.type === "context") {
     const text = event.message?.content;
     if (typeof text !== "string" || !text.trim()) return null;
-    const label = [event.context?.label ?? "运行上下文", event.context?.summary].filter(Boolean).join(" · ");
-    return <Collapsible kind="context" persistKey="context" label={label}><LongText text={text} code /></Collapsible>;
+    return <Collapsible kind="context" persistKey="context" label={event.context?.label ?? "运行上下文"}
+      summary={event.context?.summary}><LongText text={text} code /></Collapsible>;
   }
   if (event.type === "system") {
     const text = String(event.content ?? event.subtype ?? "").trim();

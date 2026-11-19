@@ -12,10 +12,12 @@ try {
   await page.addInitScript(() => {
     const names = { qoder: 'Qoder', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
     const calls = window.__NAVIGATION__ = [];
+    window.__CLAUDE_COUNT__ = 1200;
     window.__TAURI_INTERNALS__ = { transformCallback: callback => callback, invoke: async (command, args = {}) => {
       calls.push({ command, args });
       if (command === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: !location.search.includes('empty') && id !== 'pi', supportsFork: false, dataDir: `/Users/demo/.${id}`, deletePolicy: 'trash' }));
       if (command === 'catalog') return { sessions: [], projects: [], warnings: [] };
+      if (command === 'count_sessions') return args.agent === 'claude' ? window.__CLAUDE_COUNT__ : null;
       if (command === 'collector_status') return { desired: false, running: false, authorization: 'disabled' };
       if (command === 'sync_request_events') return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
       if (command === 'read_usage_summary') return { rows: [], health: {}, syncedAgents: Object.keys(names), revision: '1' };
@@ -32,11 +34,21 @@ try {
   await switcher.click();
   assert.equal(await page.locator('[role="option"][value="all"]').count(), 0);
   assert.equal(await menu.locator('[value="pi"]').count(), 0);
-  assert.equal(await menu.locator('[value="qoder"]').textContent(), 'Qoder');
+  assert.equal(await menu.locator('[value="qoder"] .dropdown-option-label').textContent(), 'Qoder');
+  await menu.locator('[value="claude"] .dropdown-count').getByText('1,200').waitFor();
+  assert.equal(await menu.locator('[value="qoder"] .dropdown-count').textContent(), '0');
+  assert.equal(await switcher.locator('.dropdown-count').count(), 0);
   assert.match(decodeURIComponent(await menu.locator('[value="claude"] img').getAttribute('src')), /<title>Claude Code<\/title>|claudecode-color/);
   await switcher.click();
   assert.equal(await switcher.getAttribute('aria-expanded'), 'false', 'the same trigger click must close the menu');
   assert.equal(await menu.count(), 0);
+  await chooseAgent(page, 'claude');
+  await page.waitForFunction(() => window.__NAVIGATION__.some(call => call.command === 'catalog' && call.args.agent === 'claude'));
+  await chooseAgent(page, 'qoder');
+  await page.evaluate(() => { window.__CLAUDE_COUNT__ = 1201; });
+  await switcher.click();
+  await menu.locator('[value="claude"] .dropdown-count').getByText('1,201').waitFor();
+  await page.keyboard.press('Escape');
   await chooseAgent(page, 'claude');
   await tab('配置');
   await page.getByText('claude-demo', { exact: true }).waitFor();
@@ -178,7 +190,7 @@ try {
   assert.equal(await page.getByRole('button', { name: '配置', exact: true }).count(), 0);
   await tab('用量');
   await switcher.click();
-  assert.deepEqual(await menu.getByRole('option').allTextContents(), ['全部 Agent']);
+  assert.deepEqual(await menu.locator('.dropdown-option-label').allTextContents(), ['全部 Agent']);
   await tab('会话');
   assert.equal(await switcher.getAttribute("value"), '');
   assert.deepEqual(errors, []);

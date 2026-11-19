@@ -27,6 +27,20 @@ export function selectRows(report: UsageReport | undefined, period: UsagePeriod,
   return (report?.rows ?? []).filter(row => (period === "all" || !!row.date && row.date >= start && row.date <= end) && (model === "all" || row.model === model));
 }
 export function sumTokens(rows: UsageTokens[]): UsageTokens { return rows.reduce(addTokens, emptyTokens()); }
+
+export function requestRecordCounts(rows: UsageSummaryRow[], groupBy: "agent" | "model") {
+  const counts = new Map<string, number | null>();
+  let total: number | null = 0;
+  for (const row of rows) {
+    const key = row[groupBy];
+    const previous = counts.get(key);
+    const count = row.recordCount;
+    counts.set(key, count == null || previous === null ? null : (previous ?? 0) + count);
+    total = count == null || total === null ? null : total + count;
+  }
+  return { counts, total };
+}
+
 export function dailySeries(rows: UsageRow[], period: UsagePeriod, now: Date): (UsageTokens & { date: string })[] {
   const dates = rows.map(r => r.date).filter(Boolean).sort();
   const start = firstDate(period, now) || dates[0] || dateKey(now);

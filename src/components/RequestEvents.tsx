@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LoaderCircle } from "lucide-react";
+import { ChevronDown, ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { useDelayedBusy } from "../useDelayedBusy";
 import * as api from "../api";
@@ -133,7 +133,7 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
         <p>“≈”表示估算值，“—”表示未记录。</p>
       </HelpTip><span className="request-count">{syncing && !page?.total ? "同步中" : `${page ? formatTokens(page.total) : "—"} 条`}</span></div>
       <div className="request-filters">
-        <Dropdown className="usage-select" label="请求结果" value={status} options={statusOptions} onChange={setStatus} />
+        <Dropdown label="请求结果" value={status} options={statusOptions} onChange={setStatus} />
         {status !== "all" && <button className="request-clear" onClick={() => setStatus("all")}>清除筛选</button>}
       </div>
     </div>
@@ -155,7 +155,9 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
           const output = event.outputRecorded ? `${event.outputIncomplete ? "≥ " : ""}${formatTokens(event.outputTokens)}` : "—";
           const cachePercent = event.cacheReadRecorded && event.inputRecorded && !event.inputIncomplete && event.inputTokens > 0 && event.cacheReadTokens <= event.inputTokens && event.agent !== "qoder" ? `${(event.cacheReadTokens / event.inputTokens * 100).toFixed(1)}%` : null;
           return <Fragment key={event.id}><tr data-event-id={event.id} className={expandedRequestId === event.id ? "request-selected" : undefined}>
-            <td><button className="request-expand" aria-label={`查看请求详情 ${event.id}`} aria-expanded={expandedRequestId === event.id} onClick={() => setExpandedRequestId(expandedRequestId === event.id ? null : event.id)}><UiIcon icon={ChevronDown} /></button></td>
+            <td><button className="request-expand" aria-label={`查看请求详情 ${event.id}`} title={expandedRequestId === event.id ? "收起详情" : "查看详情"} aria-expanded={expandedRequestId === event.id} onClick={() => setExpandedRequestId(expandedRequestId === event.id ? null : event.id)}>
+              <UiIcon icon={expandedRequestId === event.id ? ChevronDown : ChevronRight} />
+            </button></td>
             <td>{date ? <><span>{date.toLocaleTimeString("zh-CN", { hour12: false })}</span><small>{dateKey(date).replace(/-/g, "/")}</small></> : "未记录"}</td>
             <td className="request-model"><ModelLabel model={event.model} />{request.provider && <small title={request.provider}><ProviderIcon provider={request.provider} />{request.provider}</small>}</td>
             <td><span>{request.effort ?? "—"}</span><small>{request.tier ?? "—"}</small></td>
@@ -178,15 +180,17 @@ export default function RequestEvents({ agents, period, now, agent, model, revis
     <div className="request-footer">
       <span className="request-range" role="status">{showLoading && <UiIcon icon={LoaderCircle} className="usage-spin" />}{page && (!syncing || page.total > 0) && (page.total ? `第 ${formatTokens((page.page - 1) * page.pageSize + 1)}–${formatTokens((page.page - 1) * page.pageSize + page.events.length)} 条，共 ${formatTokens(page.total)} 条` : "共 0 条")}</span>
       {page && <nav className="request-pagination" aria-label="请求记录分页">
-        <Dropdown className="usage-select" label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
+        <Dropdown label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
           disabled={navigating} onChange={id => setPageSize(Number(id))} />
-        <button aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => goTo(1)}><UiIcon icon={ChevronsLeft} /></button>
-        <button aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => goTo(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>
-        <span className="request-page-number">第 {formatTokens(page.page)} / {formatTokens(pageCount)} 页</span>
-        <button aria-label="下一页" title="下一页" disabled={navigating || page.page >= pageCount} onClick={() => goTo(page.page + 1)}><UiIcon icon={ChevronRight} /></button>
-        <button aria-label="末页" title="末页" disabled={navigating || page.page >= pageCount} onClick={() => goTo(pageCount)}><UiIcon icon={ChevronsRight} /></button>
+        <div className="request-page-controls">
+          <button aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => goTo(1)}><UiIcon icon={ChevronFirst} /></button>
+          <button aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => goTo(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>
+          <span className="request-page-number">第 {formatTokens(page.page)} / {formatTokens(pageCount)} 页</span>
+          <button aria-label="下一页" title="下一页" disabled={navigating || page.page >= pageCount} onClick={() => goTo(page.page + 1)}><UiIcon icon={ChevronRight} /></button>
+          <button aria-label="末页" title="末页" disabled={navigating || page.page >= pageCount} onClick={() => goTo(pageCount)}><UiIcon icon={ChevronLast} /></button>
+        </div>
         <form className="request-jump" noValidate onSubmit={e => { e.preventDefault(); goTo(jump.trim() ? Number(jump) : page.page); }}>
-          <label>前往<input ref={jumpInput} aria-label="请求页码" type="number" inputMode="numeric" min={1} max={pageCount} value={jump} disabled={navigating} onChange={e => setJump(e.target.value)} /></label>
+          <label>前往<input ref={jumpInput} className="control-input" aria-label="请求页码" type="number" inputMode="numeric" min={1} max={pageCount} value={jump} disabled={navigating} onChange={e => setJump(e.target.value)} /></label>
           <button type="submit" disabled={navigating}>跳转</button>
         </form>
       </nav>}

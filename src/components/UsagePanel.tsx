@@ -1,11 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ChevronDown, LoaderCircle } from "lucide-react";
+import { ChevronDown, ChevronUp, LoaderCircle } from "lucide-react";
 import * as api from "../api";
 import { AutoRefreshScheduler } from "../autoRefresh";
 import { useDelayedBusy } from "../useDelayedBusy";
 import { observeSessionChanges } from "../sessionWatch";
-import { dateKey, formatTokens, formatUsageField, modelTotals, modelUsageCells, sumModelUsage, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
+import { dateKey, formatTokens, formatUsageField, modelTotals, modelUsageCells, requestRecordCounts, sumModelUsage, sumTokens, summaryQuery, usageSeries, type UsagePeriod, type UsagePoint } from "../usageView";
 import type { AgentInfo, UsageSummary, UsageSyncProgress } from "../types";
 import CollectorControl from "./CollectorControl";
 import RequestEvents from "./RequestEvents";
@@ -18,12 +18,15 @@ import Dropdown from "./Dropdown";
 import ReadDiagnostics from "./ReadDiagnostics";
 
 const snapshots = new Map<string, UsageSummary>();
+const noSummaryRows: UsageSummary["rows"] = [];
 const periods: [UsagePeriod, string][] = [["today", "今日"], ["week", "近 7 天"], ["month", "近 30 天"], ["all", "全部"]];
 
-export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; agent: string }) {
-  const [summary, setSummary] = useState<UsageSummary | null>(null);
-  const [queryError, setQueryError] = useState("");
-  const [queryLoading, setQueryLoading] = useState(true);
+export default function UsagePanel({ agents, agent, onRequestCounts }: {
+  agents: AgentInfo[];
+  agent: string;
+  onRequestCounts: (counts: ReadonlyMap<string, number | null>) => void;
+}) {
+  const [summaryRequest, setSummaryRequest] = useState<{ key: string; loading: boolean; error?: string }>();
   const [retryKey, setRetryKey] = useState(0);
   const [syncingAgentIds, setSyncingAgentIds] = useState<Set<string>>(() => new Set(agents.map(a => a.id)));
   const [syncErrors, setSyncErrors] = useState<Map<string, string>>(new Map());
@@ -105,21 +108,40 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
   }, [ids, retryKey]);
 
   const queryKey = JSON.stringify(summaryQuery(period, now));
+  const summary = snapshots.get(queryKey) ?? null;
+  const queryLoading = summaryRequest?.key !== queryKey || summaryRequest.loading;
+  const queryError = summaryRequest?.key === queryKey ? summaryRequest.error : undefined;
   useEffect(() => {
     let disposed = false;
-    setSummary(snapshots.get(queryKey) ?? null); setQueryError(""); setQueryLoading(true);
+    setSummaryRequest({ key: queryKey, loading: true });
     const generation = api.nextSummaryGeneration();
     void api.readUsageSummary(JSON.parse(queryKey), generation).then(value => {
       if (disposed) return;
       const normalized = { ...value, rows: value.rows.map(row => ({ ...row, date: row.bucketStart == null ? row.date : dateKey(new Date(row.bucketStart)) })) };
       snapshots.set(queryKey, normalized);
       while (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value!);
-      setSummary(normalized);
-    }).catch(error => { if (!disposed) setQueryError(String(error)); })
-      .finally(() => { if (!disposed) setQueryLoading(false); });
+      setSummaryRequest({ key: queryKey, loading: false });
+    }).catch(error => {
+      if (!disposed) setSummaryRequest({ key: queryKey, loading: false, error: String(error) });
+    });
     return () => { disposed = true; void api.cancelUsageSummary().catch(() => {}); };
   }, [queryKey, eventsRevision]);
-  const scopedRows = (summary?.rows ?? []).filter(row => agent === "all" || row.agent === agent);
+  const agentCounts = useMemo(() => {
+    if (!summary) return new Map<string, number | null>();
+    const { counts, total } = requestRecordCounts(summary.rows, "agent");
+    for (const id of summary.syncedAgents) {
+      if (!counts.has(id)) counts.set(id, 0);
+    }
+    if (counts.size || !agents.length) counts.set("all", total);
+    return counts;
+  }, [summary, agents.length]);
+  useLayoutEffect(() => { onRequestCounts(agentCounts); }, [onRequestCounts, agentCounts]);
+  const scopedRows = useMemo(() => {
+    const rows = summary?.rows ?? noSummaryRows;
+    return agent === "all" ? rows : rows.filter(row => row.agent === agent);
+  }, [summary, agent]);
+  const { counts: modelCounts } = useMemo(() => requestRecordCounts(scopedRows, "model"), [scopedRows]);
+  const scopedCount = agentCounts.get(agent);
   const rows = scopedRows.filter(r => model === "all" || r.model === model);
   const totals = sumTokens(rows);
   const selectedAgents = agents.filter(a => agent === "all" || a.id === agent);
@@ -136,16 +158,17 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
   const allModels = modelTotals(scopedRows);
   const modelIds = allModels.map(row => row.model);
   if (model !== "all" && !modelIds.includes(model)) modelIds.unshift(model);
-  const options = [{ id: "all", name: "全部模型" },
-    ...modelIds.map(id => ({ id, name: modelText(id), icon: <ModelIcon id={id} /> })),
+  const options = [{ id: "all", name: "全部模型", count: scopedCount },
+    ...modelIds.map(id => ({ id, name: modelText(id), icon: <ModelIcon id={id} />,
+      count: modelCounts.has(id) ? modelCounts.get(id) : scopedCount == null ? undefined : 0 })),
   ];
   const models = model === "all" ? allModels : modelTotals(rows);
   const series = usageSeries(rows, period, now);
   const value = (number: number) => canShowUsage ? formatTokens(number) : "—";
   const showImportProgress = useDelayedBusy(importing, 300, 0);
-  const activeImport = unsyncedAgents.find(a => a.id === progress?.agent);
+  const importingAgent = unsyncedAgents.find(a => a.id === progress?.agent);
   const waitingNames = unsyncedAgents.map(a => a.displayName).join("、");
-  const coverageTitle = syncingSelection ? `正在统计 · 已完成 ${selectedAgents.length - unsyncedAgents.length} / ${selectedAgents.length} 个 Agent`
+  const coverageTitle = syncingSelection ? "正在统计"
     : queryLoading ? "正在汇总用量…" : "统计尚未完整";
   const phaseNames = { waiting: "等待同步", discovering: "查找历史日志", reading: "读取历史日志", indexing: "整理请求记录", complete: "同步完成" };
   return <main className="usage-page">
@@ -156,7 +179,7 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
           <p>“≥”表示已记录用量的下限。</p>
           {partial && <p>部分用量未记录。</p>}
           {watchError && <p>暂时无法自动更新。切回应用时会重试。</p>}
-        </HelpTip>{partial && canShowUsage && !incomplete && <span className="usage-partial">记录不完整</span>}</div>
+        </HelpTip>{partial && canShowUsage && !incomplete && <span className="status-tag amber">记录不完整</span>}</div>
         <div className="usage-heading-status"><CollectorControl /></div>
       </div>
       {queryError && <ReadDiagnostics className="usage-query-error" title="无法查询用量" errors={[queryError]} retry={() => setEventsRevision(n => n + 1)} retryLabel="重试查询" />}
@@ -169,23 +192,33 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
       />}
       <div className="usage-filters">
         <div className="usage-periods" role="group" aria-label="时间范围">
-          {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} className={period === id ? "active" : ""} onClick={() => setPeriod(id)}>{label}</button>)}
+          {periods.map(([id, label]) => <button key={id} aria-pressed={period === id} onClick={() => setPeriod(id)}>{label}</button>)}
         </div>
-        <Dropdown className="usage-select usage-model-select" label="模型" searchLabel="搜索模型" value={model}
+        <Dropdown className="usage-model-select" fill label="模型" searchLabel="搜索模型" countUnit="条请求记录" value={model}
           options={options} onChange={id => { setModel(id); setExpanded(false); }} />
       </div>
       {incomplete && (canShowUsage || showImportProgress || (!importing && summary !== null)) && <div className="usage-sync-status usage-coverage" role="status">
-        <span>{showImportProgress && <UiIcon icon={LoaderCircle} className="usage-spin" />}<strong>{coverageTitle}</strong>
-          {activeImport ? <span>{activeImport.displayName} · {phaseNames[progress!.phase]}</span>
-            : syncingSelection ? <span>等待读取 {waitingNames}</span> : !queryLoading && <span>尚未完成：{waitingNames}</span>}
-          {activeImport && progress?.totalFiles != null && <span>已检查 {formatTokens(progress.checkedFiles)} / {formatTokens(progress.totalFiles)} 个文件</span>}
-          {showImportProgress && syncingSelection && <span>用时 {elapsed} 秒</span>}</span>
+        <div className="usage-sync-row">
+          <span>{showImportProgress && <UiIcon icon={LoaderCircle} className="usage-spin" />}<strong>{coverageTitle}</strong></span>
+          {syncingSelection && <span className="usage-sync-metrics">已完成 {selectedAgents.length - unsyncedAgents.length} / {selectedAgents.length} 个 Agent</span>}
+        </div>
+        {(importingAgent || !queryLoading || syncingSelection) && <div className="usage-sync-row">
+          {importingAgent && progress ? <span><strong>{importingAgent.displayName}</strong>{phaseNames[progress.phase]}</span>
+            : <span>{syncingSelection ? `等待读取 ${waitingNames}` : `尚未完成：${waitingNames}`}</span>}
+          <span className="usage-sync-metrics">
+            {importingAgent && progress?.totalFiles != null && <span>已检查 {formatTokens(progress.checkedFiles)} / {formatTokens(progress.totalFiles)} 个文件</span>}
+            {showImportProgress && syncingSelection && <span>用时 {elapsed} 秒</span>}
+          </span>
+        </div>}
         <p>{canShowUsage ? "下方仅显示已同步的用量。" : importing ? "首次同步期间可继续浏览。" : "暂无用量。请重试同步。"}</p>
       </div>}
       <section className="usage-cards" aria-label="Token 概览">
         {([[incomplete ? "已统计 Token" : "总 Token", value(totals.totalTokens)], [incomplete ? "已统计输入 Token" : "输入 Token", canShowUsage ? rows.length ? formatUsageField(totals, "input") : "0" : "—"], [incomplete ? "已统计输出 Token" : "输出 Token", canShowUsage ? rows.length ? formatUsageField(totals, "output") : "0" : "—"]] as const).map(([label, display]) => <div className="usage-stat" key={label}><span>{label}</span><strong title={canShowUsage ? display === "未记录" ? "日志未记录此项" : display.startsWith("≥") ? "部分记录缺少该分项，显示已记录下限" : `已记录 ${display} Token` : undefined}>{display}</strong></div>)}
       </section>
-      <section className="usage-section usage-trend"><h2>{period === "today" ? "每小时趋势" : "每日趋势"}<small className="usage-time-basis">{incomplete && "已统计 · "}请求时间 · 本地时区</small></h2>
+      <section className="usage-section usage-trend"><div className="usage-trend-heading">
+        <h2>{period === "today" ? "每小时趋势" : "每日趋势"}</h2>
+        <span className="usage-time-basis">按请求时间统计（本地时区）</span>
+      </div>
         {canShowUsage ? <UsageChart points={series} hourly={period === "today"} /> : <div className="usage-chart-empty">{queryError ? "无法读取趋势" : importing ? "正在同步历史用量…" : incomplete ? "用量尚未统计完成" : "所选时段暂无记录"}</div>}
       </section>
       <RequestEvents agents={agents} period={period} now={now} agent={agent} model={model} revision={eventsRevision} syncing={importing} />
@@ -199,7 +232,9 @@ export default function UsagePanel({ agents, agent }: { agents: AgentInfo[]; age
             <thead><tr>{["模型", "请求", "输入", "输出", "缓存读取", "缓存率", "成本 (USD)"].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead><tbody>
               {(expanded ? models : models.slice(0, 8)).map(m => <tr key={m.model}><th scope="row"><ModelLabel model={m.model} /></th>{modelUsageCells(m).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr>)}
             </tbody><tfoot><tr><th scope="row">{incomplete ? "已统计小计" : "合计"}</th>{modelUsageCells(sumModelUsage(rows)).map((cell, i) => <td key={i} title={cell.title}>{cell.text}</td>)}</tr></tfoot>
-          </table></div>{models.length > 8 && <button className="usage-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={ChevronDown} /></button>}</> : <div className="usage-empty">{queryError ? "无法读取模型用量" : importing ? "等待历史用量同步" : incomplete ? "模型用量尚未统计完成" : "暂无模型用量"}</div>}
+          </table></div>{models.length > 8 && <button className="usage-more" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+            {expanded ? "收起" : `显示全部 ${models.length} 个模型`}<UiIcon icon={expanded ? ChevronUp : ChevronDown} />
+          </button>}</> : <div className="usage-empty">{queryError ? "无法读取模型用量" : importing ? "等待历史用量同步" : incomplete ? "模型用量尚未统计完成" : "暂无模型用量"}</div>}
         </section>
       </div>
     </div>
@@ -233,7 +268,7 @@ function UsageChart({ points, hourly }: { points: UsagePoint[]; hourly: boolean 
         <rect x={x} y={y(p.inputTokens)} width={barWidth} height={height * p.inputTokens / max} className="usage-area-input" />
         <rect x={x} y={y(p.inputTokens + p.outputTokens)} width={barWidth} height={height * p.outputTokens / max} className="usage-area-output" />
         {p.unclassifiedTokens > 0 && <rect x={x} y={y(p.totalTokens)} width={barWidth} height={height * p.unclassifiedTokens / max} className="usage-area-unknown" />}
-        <rect x={left + i * step} y={0} width={step} height={base} className="usage-chart-hit"><title>{`${p.title}\n${formatTokens(p.totalTokens)} Token\n输入 ${p.totalTokens ? formatUsageField(p, "input") : "0"} · 输出 ${p.totalTokens ? formatUsageField(p, "output") : "0"}`}</title></rect>
+        <rect x={left + i * step} y={0} width={step} height={base} className="usage-chart-hit"><title>{`${p.title}\n${formatTokens(p.totalTokens)} Token\n输入 ${p.totalTokens ? formatUsageField(p, "input") : "0"}\n输出 ${p.totalTokens ? formatUsageField(p, "output") : "0"}`}</title></rect>
       </g>;
     })}
     {ticks.map(i => <text key={i} x={left + (i + .5) * step} y={195} textAnchor="middle">{points[i].label}</text>)}

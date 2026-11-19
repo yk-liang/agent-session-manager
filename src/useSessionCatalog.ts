@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as api from "./api";
 import { AutoRefreshScheduler } from "./autoRefresh";
-import { AgentCatalogCache, EMPTY_CATALOG } from "./catalogCache";
+import { AgentCatalogCache, catalogFilterFor, EMPTY_CATALOG } from "./catalogCache";
 import { observeSessionChanges } from "./sessionWatch";
 import type { AgentInfo, CatalogFilter } from "./types";
+
+export function useSessionCounts(agents: AgentInfo[], filter: CatalogFilter, cache: AgentCatalogCache, activeAgent: string | null) {
+  useSyncExternalStore(cache.subscribe, cache.countVersion);
+  const scopes = agents.map(agent => ({ id: agent.id, filter: catalogFilterFor(filter, agent.supportsArchive) }));
+  return {
+    counts: new Map(scopes.map(({ id, filter }) => [id, cache.count(id, filter) ?? null] as const)),
+    refresh() {
+      for (const { id, filter } of scopes) {
+        if (id !== activeAgent) void cache.refreshCount(id, filter, () => api.countSessions(id, filter));
+      }
+    },
+  };
+}
 
 export function useSessionCatalog(
   agent: AgentInfo | undefined,

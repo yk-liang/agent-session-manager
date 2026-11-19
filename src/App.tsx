@@ -17,8 +17,8 @@ import * as api from "./api";
 import { sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
-import { useSessionCatalog } from "./useSessionCatalog";
-import { DEFAULT_CATALOG_FILTER } from "./catalogCache";
+import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
+import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
 import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
@@ -115,12 +115,15 @@ export default function App() {
 
   const availableAgents = agents.filter((agent) => agent.installed);
   const currentAgent = availableAgents.find((agent) => agent.id === selectedAgent);
-  const includeArchived = filter.includeArchived && !!currentAgent?.supportsArchive;
-  const catalogFilter = useMemo(() => ({ includeEmpty: filter.includeEmpty, includeArchived }), [filter.includeEmpty, includeArchived]);
+  const supportsArchive = currentAgent?.supportsArchive;
+  const catalogFilter = useMemo(() => catalogFilterFor(filter, supportsArchive), [filter, supportsArchive]);
+  const { includeArchived } = catalogFilter;
   const onWatchError = useCallback(() => showToast("暂时无法监测会话更新。切回应用时会重试。", true), [showToast]);
   const { cache: catalogCache, catalog, loading, refreshing, error: catalogError, refresh: refreshCatalog } = useSessionCatalog(
     currentAgent, catalogFilter, tab === "sessions", sessionActionsBusy || batchMode, onWatchError,
   );
+  const sessionCounts = useSessionCounts(availableAgents, filter, catalogCache, selectedAgent);
+  const [requestCounts, setRequestCounts] = useState<ReadonlyMap<string, number | null>>(() => new Map());
   const catalogWarnings = catalog.warnings;
   const batchBusy = loading || refreshing;
 
@@ -131,7 +134,12 @@ export default function App() {
 
   const changeTab = (next: Tab) => {
     if (next === tab || sessionActionsBusy || mutationRunning.current) return;
-    protectConfig(() => { clearBatchSelection(); setBatchMode(false); setTab(next); }, "切换标签页");
+    protectConfig(() => {
+      clearBatchSelection();
+      setBatchMode(false);
+      if (tab === "usage") setRequestCounts(new Map());
+      setTab(next);
+    }, "切换标签页");
   };
 
   const changeSearch = (next: string) => {
@@ -344,6 +352,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <AgentSwitcher agents={availableAgents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
+          counts={tab === "usage" ? requestCounts : tab === "sessions" ? sessionCounts.counts : undefined}
+          onOpen={tab === "sessions" ? sessionCounts.refresh : undefined}
           disabled={sessionActionsBusy || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
           <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={sessionActionsBusy}>
@@ -460,7 +470,7 @@ export default function App() {
             <div className="placeholder">选择 Agent 查看配置</div>
           )}
         </main>
-      ) : <UsagePanel agents={agents} agent={usageAgent} />}
+      ) : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}会丢失未保存的修改。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

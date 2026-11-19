@@ -3,11 +3,12 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight, Search, X } from "lucide-react";
 import UiIcon from "./UiIcon";
-import { formatSize, relativeTime, sessionKey, shortPath } from "../utils";
+import { formatSize, fullTime, relativeTime, sessionKey, shortPath } from "../utils";
 import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
+import { Checkbox, CheckboxField } from "./Checkbox";
 
 interface Props {
   scopeKey: string;
@@ -101,6 +102,7 @@ export default function SessionList({
           <UiIcon icon={Search} size={16} className="search-icon" />
           <input
             type="search"
+            className="control-input"
             placeholder="搜索会话或正文…"
             aria-label="搜索会话或正文"
             maxLength={256}
@@ -121,17 +123,11 @@ export default function SessionList({
         {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title={`${warnings.length} 条读取提示`} errors={warnings} description="部分会话未能读取。" retry={onRetryLoad} busy={disabled || busy} />}
         <div className="session-list-options">
           <div className="session-list-filters">
-            <label className="toggle show-empty-toggle">
-              <input type="checkbox" checked={filter.includeEmpty}
-                onChange={(e) => onFilterChange({ ...filter, includeEmpty: e.target.checked })} disabled={disabled} />
-              显示空会话
-            </label>
+            <CheckboxField label="显示空会话" checked={filter.includeEmpty} disabled={disabled}
+              onChange={includeEmpty => onFilterChange({ ...filter, includeEmpty })} />
             {agent?.supportsArchive && (
-              <label className="toggle">
-                <input type="checkbox" checked={filter.includeArchived}
-                  onChange={(e) => onFilterChange({ ...filter, includeArchived: e.target.checked })} disabled={disabled} />
-                显示已归档
-              </label>
+              <CheckboxField label="显示已归档" checked={filter.includeArchived} disabled={disabled}
+                onChange={includeArchived => onFilterChange({ ...filter, includeArchived })} />
             )}
           </div>
           {agent && agent.deletePolicy !== "readOnly" && (
@@ -164,7 +160,7 @@ export default function SessionList({
             {failures.map(({ session, error }) => (
               <li key={sessionKey(session)}>
                 <strong>{session.title || session.sessionId}</strong>
-                <div>{shortPath(session.cwd) || session.projectDir} · {session.sessionId}</div>
+                <div className="session-location"><span>{shortPath(session.cwd) || session.projectDir}</span><code>{session.sessionId}</code></div>
                 <div>{error}</div>
               </li>
             ))}
@@ -175,7 +171,8 @@ export default function SessionList({
         <div className="session-card-list" style={{ height: sessions.length ? list.getTotalSize() : undefined }}>
           {list.getVirtualItems().map(item => {
             const s = sessions[item.index];
-            const isEmpty = !s.statsPending && s.realUserCount === 0;
+            const statsKnown = !s.statsPending;
+            const isEmpty = statsKnown && s.realUserCount === 0;
             const key = sessionKey(s);
             const hit = searchHits.get(key);
             const checked = checkedSessionKeys.has(key);
@@ -187,26 +184,27 @@ export default function SessionList({
                 <span className="session-card-title">{title}</span>
                 {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
-                  {relativeTime(s.lastTs)}
-                  {!s.statsPending && <> · {s.realUserCount + s.assistantTextCount} 条消息</>}
-                  {s.sizeBytes != null && ` · ${formatSize(s.sizeBytes)}`}
+                  <span className="session-card-stats">
+                    {statsKnown && <span>{s.realUserCount + s.assistantTextCount} 条消息</span>}
+                    {s.sizeBytes != null && <span className="session-card-size">{formatSize(s.sizeBytes)}</span>}
+                  </span>
+                  <time dateTime={s.lastTs ?? undefined} title={fullTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
                 </span>
                 <span className="session-card-badges">
                   {s.readError && <span className="badge read-error-badge" title="打开会话可查看诊断或重试。">正文不可读</span>}
                   {isEmpty && <span className="badge empty-badge">空会话</span>}
-                  {s.archived && <span className="badge">已归档</span>}
                   <ModelLabel model={s.model} badge />
                   {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
                 </span>
+                {s.archived && <span className="archived-ribbon"><span>已归档</span></span>}
               </>
             );
             return (
               <div className="session-card-row" key={item.key} data-index={item.index}
                 ref={list.measureElement} style={{ top: item.start }}>
                 {batchMode ? (
-                  <label className={`session-card selectable ${checked ? "active" : ""}`} title={hidePath ? s.cwd ?? undefined : undefined}>
-                    <input
-                      type="checkbox"
+                  <label className={`session-card selectable${checked ? " active" : ""}${s.archived ? " archived" : ""}`} title={hidePath ? s.cwd ?? undefined : undefined}>
+                    <Checkbox
                       checked={checked}
                       onChange={() => onToggleSession(s)}
                       disabled={disabled || busy || searchPending}
@@ -217,7 +215,7 @@ export default function SessionList({
                 ) : (
                   <div
                     title={hidePath ? s.cwd ?? undefined : undefined}
-                    className={`session-card ${selectedSessionKey === key ? "active" : ""} ${isEmpty ? "empty" : ""}`}
+                    className={`session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}`}
                   >
                     <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
                       {content}

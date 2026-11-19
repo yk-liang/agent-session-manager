@@ -43,7 +43,7 @@ try {
     await toggle.waitFor();
     assert.equal(await toggle.isChecked(), false);
     assert.equal(await page.locator('.collapsible.context').count(), 0);
-    assert.equal(await page.locator('.toc-item').count(), fixture.detail.meta.realUserCount > 1 ? fixture.detail.meta.realUserCount : 0);
+    assert.equal(await page.locator('.toc-item').count(), fixture.detail.meta.realUserCount);
     assert.ok(!(await page.locator('.detail-body').textContent()).includes(fixture.hidden));
     if (name === 'claude.json' || name === 'qoder.json') {
       assert.ok((await page.locator('.detail-body').textContent()).includes('literal instructions'));

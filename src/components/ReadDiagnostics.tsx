@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { ChevronRight } from "lucide-react";
 import CopyButton from "./CopyButton";
+import UiIcon from "./UiIcon";
 
 interface Props {
   title: string;
@@ -18,18 +20,21 @@ export default function ReadDiagnostics({ title, errors, description, retry, ret
   const diagnosticFields = [["阶段", "stage"], ["类型", "error_kind"], ["系统错误码", "os_code"], ["数据库错误码", "sqlite_code"]]
     .flatMap(([label, field]) => {
       const value = errors[0]?.match(new RegExp(`^${field}: (.+)$`, "m"))?.[1];
-      return value ? [`${label}：${value}`] : [];
+      return value ? [{ label, value }] : [];
     });
   return <section className={`read-diagnostics ${className}`} role="alert" aria-label={title}>
     <strong>{title}</strong>
     {description && <p>{description}</p>}
     {errors.length === 1 && <p className="read-error-summary">{errors[0].split("\n")[0]}</p>}
-    {diagnosticFields.length > 0 && <p className="read-error-fields">{errors.length > 1 && "首条诊断 · "}{diagnosticFields.join(" · ")}</p>}
+    {errors.length > 1 && diagnosticFields.length > 0 && <p className="read-error-summary">首条诊断</p>}
+    {diagnosticFields.length > 0 && <dl className="read-error-fields">
+      {diagnosticFields.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+    </dl>}
     <div className="read-error-actions">
       {retry && <button disabled={busy} onClick={retry}>{busy ? "正在重试…" : retryLabel}</button>}
       <CopyButton value={details} label="复制诊断详情" className="copy-diagnostics" onError={e => setCopyError(`复制失败：${String(e)}`)} onCopied={() => setCopyError("")}>复制诊断详情</CopyButton>
     </div>
-    <details><summary>诊断详情{errors.length > 1 ? `（${errors.length} 条）` : ""}</summary>
+    <details><summary><UiIcon icon={ChevronRight} className="details-caret" />诊断详情{errors.length > 1 ? `（${errors.length} 条）` : ""}</summary>
       <p className="diagnostic-privacy">分享前请检查本机路径和进程信息。</p>
       <pre>{details}</pre>
     </details>
