@@ -154,7 +154,7 @@ fn start(id: &str, time: i64) -> Value {
 }
 
 #[test]
-fn request_events_append_refine_restart_and_delete_preserve_one_response() {
+fn request_events_refine_survive_session_deletion_and_can_be_cleaned() {
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");
     let path = logs.join("a.jsonl");
@@ -209,13 +209,50 @@ fn request_events_append_refine_restart_and_delete_preserve_one_response() {
         "unchanged pages must not rewrite index"
     );
     drop(store);
-    fs::remove_file(path).unwrap();
+    let original = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
     let mut store = Store::open_with_ledger(None, Some(&ledger));
     scan("claude", &logs, &mut store);
     assert_eq!(
         page(&mut store, EventQuery::default()).events[0].output_tps,
         Some(50.0)
     );
+
+    let live = logs.join("project/bbbb.jsonl");
+    let untimed = logs.join("project/cccc.jsonl");
+    let other = dir.path().join("qoder");
+    let mut live_request = claude("live", t, 1, true);
+    live_request["sessionId"] = json!("bbbb");
+    let mut untimed_request = claude("untimed", 0, 1, true);
+    untimed_request["sessionId"] = json!("cccc");
+    write(&live, &[live_request]);
+    write(&untimed, &[untimed_request]);
+    write(&other.join("qoder.jsonl"), &[claude("other-agent", t, 1, true)]);
+    scan("claude", &logs, &mut store);
+    scan("qoder", &other, &mut store);
+    fs::remove_file(untimed).unwrap();
+    fs::remove_dir_all(other).unwrap();
+    let agent_scope = BTreeSet::from(["claude".into()]);
+    let roots = |_: &str| Ok(vec![logs.clone()]);
+    assert_eq!(page(&mut store, EventQuery::default()).total, 4);
+    let db = &mut store.ledger().unwrap().db;
+    assert_eq!(events::clear_orphans_at(db, &agent_scope, Some(t), roots).unwrap(), 0);
+    assert_eq!(events::clear_orphans_at(db, &agent_scope, Some(t + 1), roots).unwrap(), 1);
+    assert_eq!(events::clear_orphans_at(db, &agent_scope, None, roots).unwrap(), 1);
+    assert_eq!(events::clear_orphans_at(db, &agent_scope, None, roots).unwrap(), 0);
+
+    drop(store);
+    fs::write(&path, original).unwrap();
+    append(&path, claude("new", t + 3000, 1, true));
+    let mut store = Store::open_with_ledger(None, Some(&ledger));
+    scan("claude", &logs, &mut store);
+    let cleaned = page(&mut store, EventQuery::default());
+    assert_eq!(cleaned.total, 3);
+    assert!(cleaned.events.iter().all(|event| event.id != e.id));
+    assert!(cleaned.events.iter().any(|event| event.session == "bbbb"));
+    assert!(cleaned.events.iter().any(|event| event.agent == "qoder"));
+    assert_eq!(cleaned.events.iter().filter(|event| event.session == "session-one" && event.agent == "claude").count(), 1);
+
     let bytes = fs::read(ledger).unwrap();
     for secret in [
         "PRIVATE_PROMPT",

@@ -33,10 +33,12 @@ export default function UsagePanel({
   agents,
   agent,
   onRequestCounts,
+  showToast,
 }: {
   agents: AgentInfo[];
   agent: string;
   onRequestCounts: (counts: ReadonlyMap<string, number | null>) => void;
+  showToast: (message: string) => void;
 }) {
   const [subTab, setSubTab] = useState<UsageTab>("analysis");
   const [pricesVisited, setPricesVisited] = useState(false);
@@ -161,6 +163,7 @@ export default function UsagePanel({
             revision={revision}
             selection={requestSelection.agent === agent ? requestSelection.filters : defaultRequestSelection}
             onSelectionChange={selectRequests}
+            showToast={showToast}
             syncing={loadingHistory}
           />
         )}

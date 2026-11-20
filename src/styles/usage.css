@@ -507,6 +507,26 @@
 .request-filters { justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .request-filter { width: clamp(140px, 17vw, 260px); }
 
+.orphan-cleanup-fields { display: grid; gap: 14px; }
+.orphan-cleanup-fields fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.orphan-cleanup-fields legend { margin-bottom: 6px; }
+.orphan-cleanup-range { display: grid; gap: 6px; }
+.orphan-cleanup-range-controls, .orphan-cleanup-custom { display: flex; align-items: center; gap: 8px; }
+.orphan-cleanup-range-controls { flex-wrap: wrap; }
+.orphan-cleanup-range-controls .dropdown { width: 128px; }
+.orphan-cleanup-custom input { width: 88px; font-variant-numeric: tabular-nums; }
+.orphan-cleanup-agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr)); gap: 8px; }
+.orphan-cleanup-agents .checkbox-label {
+  min-height: var(--control-height);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  user-select: none;
+}
+.orphan-cleanup-agents .checkbox-label:hover:not(:has(input:disabled)) { border-color: var(--border-raised); }
+.orphan-cleanup-agents .checkbox-label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+
 .request-table-wrap {
   flex: 1;
   min-height: 88px;

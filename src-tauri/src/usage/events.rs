@@ -89,8 +89,12 @@ pub(super) const DISTINCT_REQUESTS: &str = "NOT (
           AND (json_extract(native.data,'$.inputTokens')>0 OR json_extract(native.data,'$.outputTokens')>0)
     ))";
 
+mod cleanup;
 mod index;
 
+pub use cleanup::{clear_orphans, CleanupQuery};
+#[cfg(test)]
+pub(super) use cleanup::clear_orphans_at;
 #[cfg(test)]
 pub(super) use index::from_sample;
 pub(super) use index::{refresh, schema};

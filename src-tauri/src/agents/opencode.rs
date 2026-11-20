@@ -65,6 +65,16 @@ pub(crate) fn open_db(path: &Path) -> Result<Connection, String> {
     open_db_scoped(path, None)
 }
 
+pub(crate) fn session_ids(path: &Path) -> Result<Vec<String>, String> {
+    let db = open_db(path)?;
+    let read = || -> rusqlite::Result<Vec<String>> {
+        let mut stmt = db.prepare("SELECT id FROM session")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    };
+    read().map_err(|error| format!("无法确认 OpenCode 会话 {}：{error}", path.display()))
+}
+
 fn open_db_scoped(path: &Path, session: Option<&str>) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(
         path,

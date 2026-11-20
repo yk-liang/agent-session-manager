@@ -61,6 +61,13 @@ fn delete_session_in(root: &Path, project_dir: &str, session_id: &str) -> Result
     })
 }
 
+pub(crate) fn transcript_session_id(path: &Path) -> Result<String, String> {
+    let (header, _, _) = storage::open(path)?;
+    storage::session_id(&header, path)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("Pi 会话 ID 无效：{}", path.display()))
+}
+
 pub struct PiSource;
 
 impl AgentSource for PiSource {

@@ -56,6 +56,7 @@ struct Inbox {
     changes: BTreeMap<String, Changes>,
     check: bool,
     manual: bool,
+    ledger_changed: bool,
 }
 fn wake(sender: &SyncSender<()>) {
     let _ = sender.try_send(());
@@ -391,6 +392,11 @@ impl Queue {
         wake(&self.sender);
     }
 
+    fn ledger_changed(&self) {
+        self.inbox.lock().unwrap_or_else(|e| e.into_inner()).ledger_changed = true;
+        wake(&self.sender);
+    }
+
     fn take(&self) -> Inbox {
         std::mem::take(&mut *self.inbox.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -415,6 +421,14 @@ struct Publication {
 }
 
 impl Publication {
+    fn update(&mut self, next: Self, status: &mut SyncStatus) {
+        if next.indexed != self.indexed || next.completed != self.completed {
+            status.updated_at = status.updated_at.max(next.updated_at);
+            status.revision += 1;
+        }
+        *self = next;
+    }
+
     fn read(store: &mut Store) -> Result<Self, String> {
         store
             .ledger()?
@@ -521,6 +535,9 @@ impl Collection<'_> {
             }
             {
                 let mut state = status.borrow_mut();
+                if queued.ledger_changed {
+                    publication.update(Publication::read(&mut store)?, &mut state);
+                }
                 state.syncing = pending.syncing();
                 publish(&mut state);
             }
@@ -573,11 +590,7 @@ impl Collection<'_> {
                 let elapsed = started.elapsed();
                 let next = Publication::read(&mut store)?;
                 let mut state = status.borrow_mut();
-                if next.indexed != publication.indexed || next.completed != publication.completed {
-                    state.updated_at = state.updated_at.max(next.updated_at);
-                    state.revision += 1;
-                }
-                publication = next;
+                publication.update(next, &mut state);
                 if collected.is_err() {
                     state.failed_agents.insert(id.clone());
                     pending.retry(id.clone(), job, Instant::now());

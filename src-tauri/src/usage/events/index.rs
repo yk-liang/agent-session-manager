@@ -14,6 +14,7 @@ pub(in crate::usage) fn schema(db: &Connection) -> Result<(), String> {
         INSERT OR IGNORE INTO usage_request_index SELECT DISTINCT agent,1,0 FROM usage_ledger_sources;
         CREATE TABLE IF NOT EXISTS usage_request_events(
             id TEXT PRIMARY KEY,agent TEXT NOT NULL,time INTEGER NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,source INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE usage_removed_requests(id TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS usage_requests_time ON usage_request_events(time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_agent ON usage_request_events(agent,time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_model ON usage_request_events(model,time DESC,id DESC);
@@ -219,7 +220,8 @@ fn update_sources(
         .map_err(|_| "无法完成请求来源更新")?;
     }
     {
-        let mut insert = tx.prepare("INSERT INTO usage_request_events VALUES (?1,?2,?3,?4,?5,?6,?7)
+        let mut insert = tx.prepare("INSERT INTO usage_request_events
+            SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE NOT EXISTS (SELECT 1 FROM usage_removed_requests WHERE id=?1)
             ON CONFLICT(id) DO UPDATE SET time=excluded.time,model=excluded.model,status=excluded.status,data=excluded.data,source=excluded.source
             WHERE usage_request_events.data != excluded.data OR usage_request_events.source != excluded.source").map_err(|_| "无法保存请求记录")?;
         for sample in samples.into_iter().filter(|s| {

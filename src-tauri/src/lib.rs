@@ -167,6 +167,18 @@ fn cancel_request_events(generation: u64) {
 }
 
 #[tauri::command]
+async fn clear_orphan_requests(
+    query: usage::events::CleanupQuery,
+    collector: tauri::State<'_, usage::collector::Desktop>,
+) -> Result<usize, String> {
+    let removed = run_backend(move || usage::events::clear_orphans(query)).await?;
+    if removed > 0 {
+        collector.ledger_changed();
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
 async fn get_model_prices(
     agent: Option<String>,
 ) -> Result<usage::pricing::ModelPricesResponse, String> {
@@ -570,6 +582,7 @@ pub fn run() {
             usage_sync_status, check_usage_now, read_usage_summary, cancel_usage_summary, count_sessions,
             read_request_events,
             cancel_request_events,
+            clear_orphan_requests,
             get_model_prices,
             set_custom_price,
             delete_custom_price,

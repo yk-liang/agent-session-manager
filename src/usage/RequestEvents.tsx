@@ -14,6 +14,7 @@ import Dropdown from "../components/Dropdown";
 import { useRequestPage } from "./useRequestPage";
 import RequestTable from "./RequestTable";
 import RequestTimeline from "./RequestTimeline";
+import OrphanCleanupDialog from "./OrphanCleanupDialog";
 
 interface Props {
   agents: AgentInfo[];
@@ -23,6 +24,7 @@ interface Props {
   revision: string;
   selection: RequestSelection;
   onSelectionChange: (selection: RequestSelection) => void;
+  showToast: (message: string) => void;
   syncing?: boolean;
 }
 
@@ -57,10 +59,15 @@ function filterOptions(
   ];
 }
 
-export default function RequestEvents({ agents, period, now, agent, revision, selection, onSelectionChange, syncing = false }: Props) {
+export default function RequestEvents({ agents, period, now, agent, revision, selection, onSelectionChange, showToast, syncing = false }: Props) {
   const { model, project, status } = selection;
   const [pageSize, setPageSize] = useState(50);
   const [copyError, setCopyError] = useState("");
+  const [showCleanup, setShowCleanup] = useState(false);
+  const finishCleanup = (removed: number) => {
+    setShowCleanup(false);
+    showToast(removed ? `已清理 ${formatCount(removed)} 条孤儿记录` : "没有符合条件的孤儿记录");
+  };
   const { from, to } = summaryQuery(period, now);
   const query: EventQuery = {
     agent: agent === "all" ? undefined : agent,
@@ -98,6 +105,7 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
         <Dropdown label="请求结果" value={filterKey(status)} options={resultOptions} countUnit="条请求记录"
           onChange={status => onSelectionChange({ ...selection, status: filterValue(status) as RequestSelection["status"] })} />
         {filtered && <button type="button" className="btn-ghost btn-accent" onClick={() => onSelectionChange(defaultRequestSelection)}>清除筛选</button>}
+        <button type="button" className="btn-ghost" onClick={() => setShowCleanup(true)} disabled={!agents.length}>清理孤儿记录</button>
       </div>
     </div>
     <div className="request-table-wrap" ref={table} onScroll={onTableScroll} tabIndex={0} role="region" aria-label="请求记录表" aria-busy={loading}>
@@ -139,5 +147,7 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
         </nav>}
       </div>
     </div>
+    {showCleanup && <OrphanCleanupDialog agents={agents} agent={agent} onCancel={() => setShowCleanup(false)}
+      onComplete={finishCleanup} />}
   </section>;
 }

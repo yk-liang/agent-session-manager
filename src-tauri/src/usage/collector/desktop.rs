@@ -78,6 +78,10 @@ impl Desktop {
         self.queue.check_now();
     }
 
+    pub fn ledger_changed(&self) {
+        self.queue.ledger_changed();
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         wake(&self.queue.sender);

@@ -7,6 +7,7 @@ use std::{
 };
 
 pub(super) mod jsonl;
+pub(super) mod sessions;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct Stamp {

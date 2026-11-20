@@ -48,22 +48,25 @@ impl EventDedup {
     }
 }
 
+pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<String>), String> {
+    static HEADERS: OnceLock<FileCache<(Option<ParsedRollout>, Vec<String>)>> = OnceLock::new();
+    HEADERS.get_or_init(|| FileCache::new(4096)).load(
+        "codex-header",
+        std::slice::from_ref(path),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
+        |(header, warnings)| header.is_some() && warnings.is_empty(),
+    )
+}
+
 pub(super) fn read_headers(
     paths: &[PathBuf],
     warnings: &mut Vec<String>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Page>, String> {
-    static HEADERS: OnceLock<FileCache<(Option<ParsedRollout>, Vec<String>)>> = OnceLock::new();
-    let cache = HEADERS.get_or_init(|| FileCache::new(4096));
     let mut pages = Vec::new();
     for path in paths {
         check_catalog_cancelled(cancelled)?;
-        let (header, ws) = cache.load(
-            "codex-header",
-            std::slice::from_ref(path),
-            || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
-            |(header, warnings)| header.is_some() && warnings.is_empty(),
-        )?;
+        let (header, ws) = read_header(path)?;
         warnings.extend(ws);
         if let Some(header) = header {
             pages.push(Page {

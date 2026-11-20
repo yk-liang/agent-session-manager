@@ -31,6 +31,8 @@ export const nextEventGeneration = () => ++eventGeneration;
 export const readRequestEvents = (query: import("./usage/types").EventQuery, generation: number) =>
   invoke<import("./usage/types").EventPage>("read_request_events", { query, generation });
 export const cancelRequestEvents = () => invoke<void>("cancel_request_events", { generation: nextEventGeneration() });
+export const clearOrphanRequests = (agents: string[], olderThanDays: number | null) =>
+  invoke<number>("clear_orphan_requests", { query: { agents, olderThanDays } });
 export const getModelPrices = (agent?: string) =>
   invoke<import("./usage/types").ModelPricesResponse>("get_model_prices", {
     agent: agent && agent !== "all" ? agent : null,

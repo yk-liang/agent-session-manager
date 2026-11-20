@@ -532,7 +532,7 @@ export default function App() {
             <div className="placeholder">选择 Agent 以查看配置</div>
           )}
         </main>
-      ) : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} />}
+      ) : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} showToast={showToast} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}后，未保存的配置将丢失。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

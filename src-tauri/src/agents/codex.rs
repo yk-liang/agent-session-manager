@@ -641,6 +641,21 @@ fn same_rollout_identity(a: &ParsedRollout, b: &ParsedRollout) -> bool {
         && a.thread_source == b.thread_source
 }
 
+pub(crate) fn transcript_session_id(path: &PathBuf) -> Result<Option<String>, String> {
+    if std::fs::metadata(path)
+        .map_err(|error| format!("无法读取 rollout {path:?}：{error}"))?
+        .len() == 0
+    {
+        return Ok(None);
+    }
+    let (header, warnings) = history::read_header(path)?;
+    match header {
+        Some(header) => Ok(Some(header.session_id)),
+        None => Err(warnings.into_iter().next()
+            .unwrap_or_else(|| format!("无法确认 rollout {path:?} 的会话 ID"))),
+    }
+}
+
 pub struct CodexSource;
 
 impl AgentSource for CodexSource {
