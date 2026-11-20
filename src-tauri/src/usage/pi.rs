@@ -102,16 +102,17 @@ pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut File
         return;
     }
 
-    let source = match kind {
+    let (source, request_kind) = match kind {
         "message"
             if matches!(
                 value["message"]["role"].as_str(),
                 Some("assistant" | "toolResult")
             ) =>
         {
-            &value["message"]
+            (&value["message"], None)
         }
-        "usage" | "compaction" | "branch_summary" => value,
+        "usage" => (value, string(&value["kind"])),
+        "compaction" | "branch_summary" => (value, Some(kind.into())),
         _ => return,
     };
     let assistant = source["role"] == "assistant";
@@ -147,13 +148,23 @@ pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut File
             string(&value["id"]).unwrap_or_else(|| offset.to_string())
         )
     };
-    let finished_at =
-        timestamp(source.get("timestamp")).or_else(|| timestamp(value.get("timestamp")));
+    let source_time = timestamp(source.get("timestamp"));
+    let event_time = source_time.or_else(|| timestamp(value.get("timestamp")));
+    // Pi 在消息内记录请求开始时间，在外层记录会话写入时间。
+    let (started_at, finished_at, latency_ms) = if assistant {
+        let latency = source["durationMs"].as_i64().filter(|&ms| ms > 0);
+        let end = source_time
+            .zip(latency)
+            .and_then(|(start, ms)| start.checked_add(ms));
+        (source_time, end, latency)
+    } else {
+        (None, event_time, None)
+    };
     let mut sample = Sample::unmeasured(
         key,
         &state.session,
         model,
-        finished_at.or(state.created_at).unwrap_or_default(),
+        event_time.or(state.created_at).unwrap_or_default(),
         offset,
     );
     if let Some((tokens, partial)) = measurement {
@@ -166,14 +177,17 @@ pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut File
         provider,
         project: string(&value["cwd"]).or_else(|| state.pi.project.clone()),
         effort: string(&value["effort"]).or_else(|| state.pi.effort.clone()),
-        kind: matches!(kind, "compaction" | "branch_summary").then(|| kind.into()),
+        kind: request_kind,
         status: failed.then_some(RequestOutcome::Failed),
         error: failed
             .then(|| RequestError::new(None, source["errorMessage"].as_str()))
             .flatten(),
         stop,
         source: Some(path.to_string_lossy().into_owned()),
+        started_at,
         finished_at,
+        latency_ms,
+        timing: latency_ms.map(|_| "recorded".into()),
         scope: Some("request".into()),
         ..Default::default()
     };

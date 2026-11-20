@@ -1722,21 +1722,25 @@ fn missing_codex_base_uses_last_request_instead_of_inherited_total() {
 }
 
 #[test]
-fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_ids() {
+fn pi_collects_request_metadata_and_dedupes_fork_history() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
     let time = "2026-10-20T00:00:00Z";
     let response_time = "2026-10-20T00:00:01Z";
-    let mut assistant = json!({"type":"message","id":"a","timestamp":time,"message":{"role":"assistant","modelId":"m","provider":"p","timestamp":response_time,"usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"cacheWrite1h":2,"reasoning":2,"totalTokens":16}}});
+    let mut assistant = json!({"type":"message","id":"a","timestamp":"2026-10-20T00:00:04Z","message":{
+        "role":"assistant","modelId":"m","provider":"p","api":"openai-completions",
+        "timestamp":response_time,"durationMs":2500,
+        "usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"cacheWrite1h":2,"reasoning":2,"totalTokens":16}
+    }});
     let values = vec![
         json!({"type":"session","id":"parent","cwd":"/tmp/pi-project"}),
         json!({"type":"custom","customType":"model-snapshot","data":{"provider":"p","model":"selected"}}),
         json!({"type":"thinking_level_change","thinkingLevel":"high"}),
         assistant.clone(),
-        json!({"type":"usage","id":"b","timestamp":time,"provider":"p","model":"m","usage":{"input":1,"output":0,"cacheRead":2}}),
+        json!({"type":"usage","id":"b","timestamp":time,"kind":"cache_warm","provider":"p","model":"m","usage":{"input":1,"output":0,"cacheRead":2}}),
         json!({"type":"compaction","id":"c","timestamp":time,"usage":{"input":7,"output":8}}),
         json!({"type":"branch_summary","id":"d","timestamp":time,"usage":{"input":1,"output":2}}),
-        json!({"type":"message","id":"e","timestamp":time,"message":{"role":"toolResult","usage":{"input":1,"output":1}}}),
+        json!({"type":"message","id":"e","timestamp":time,"message":{"role":"toolResult","durationMs":900,"usage":{"input":1,"output":1}}}),
     ];
     let mut values = values;
     values[1]["id"] = json!("model");
@@ -1758,6 +1762,7 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
             json!({"type":"usage","id":"new","parentId":"regenerated","timestamp":time,"provider":"p","model":"m","usage":{"input":1,"output":0,"cacheRead":2}}),
         ],
     );
+    assistant["message"].as_object_mut().unwrap().remove("durationMs");
     write(
         &dir.path().join("unrelated.jsonl"),
         &[json!({"type":"session","id":"other"}), assistant],
@@ -1784,10 +1789,27 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         Some("/tmp/pi-project")
     );
     assert_eq!(parent_request.request.effort.as_deref(), Some("high"));
-    assert_eq!(
-        Some(parent_request.time),
-        parse::timestamp(Some(&json!(response_time)))
-    );
+    let started_at = parse::timestamp(Some(&json!(response_time))).unwrap();
+    assert_eq!(parent_request.time, started_at);
+    assert_eq!(parent_request.request.started_at, Some(started_at));
+    assert_eq!(parent_request.request.finished_at, Some(started_at + 2500));
+    assert_eq!(parent_request.request.latency_ms, Some(2500));
+    assert_eq!(parent_request.request.timing.as_deref(), Some("recorded"));
+    assert_eq!(parent_request.output_tps, Some(2.0));
+    assert!(parent_request.request.ttft_ms.is_none());
+    assert!(parent_request.request.client.is_none());
+    assert!(parent_request.request.kind.is_none());
+    let legacy = reqs.events.iter().find(|event| event.session == "other").unwrap();
+    assert_eq!(legacy.request.started_at, Some(started_at));
+    assert!(legacy.request.finished_at.is_none());
+    assert!(legacy.request.latency_ms.is_none());
+    assert!(legacy.output_tps.is_none());
+    let tool = reqs.events.iter().find(|event| event.tokens.output_tokens == 1).unwrap();
+    assert!(tool.request.started_at.is_none());
+    assert!(tool.request.latency_ms.is_none());
+    assert!(tool.output_tps.is_none());
+    let kinds: BTreeSet<_> = reqs.events.iter().filter_map(|event| event.request.kind.as_deref()).collect();
+    assert_eq!(kinds, BTreeSet::from(["cache_warm", "compaction", "branch_summary"]));
 }
 
 #[test]
