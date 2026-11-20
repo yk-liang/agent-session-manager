@@ -1,5 +1,10 @@
 # Repository Conventions
 
+## Commits and Release Notes
+
+- **Commit messages:** Follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Every commit you create must start with a type, using `<type>: <summary>` or `<type>(<scope>): <summary>`. Use `feat` for new features, `fix` for bug fixes, and a fitting type such as `chore`, `docs`, `refactor`, or `test` for other changes.
+- **Release notes:** Include only user-facing new features and bug fixes. Keep test results, platform checks, packaging verification, and checksum reports in internal records, not in the release notes. Keep installation instructions in the README.
+
 ## Data Versioning
 
 Only official releases are compatibility milestones—never dev commits, local installs, or test ledgers. Check release history and commits before changing any version.
