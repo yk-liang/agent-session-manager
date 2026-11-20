@@ -2,7 +2,6 @@
 use super::{codex, parse::timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,8 +59,14 @@ pub struct RequestMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_session: Option<String>,
     pub project: Option<String>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub absolute_project_path: Option<String>,
     pub client: Option<String>,
     pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub effort: Option<String>,
     pub tier: Option<String>,
     pub version: Option<String>,
@@ -83,6 +88,19 @@ pub struct RequestMeta {
 }
 
 impl RequestMeta {
+    pub(super) fn expand_project_path(&mut self) {
+        if let Some(project) = self
+            .project
+            .as_deref()
+            .filter(|p| *p == "~" || p.starts_with("~/"))
+        {
+            let path = crate::agents::expand_tilde(project);
+            if path.is_absolute() {
+                self.absolute_project_path = Some(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
     pub(super) fn failed(&self) -> bool {
         self.status == Some(RequestOutcome::Failed)
     }
@@ -110,6 +128,8 @@ impl RequestMeta {
             project,
             client,
             kind,
+            subagent_id,
+            parent_session_id,
             effort,
             tier,
             version,
@@ -166,6 +186,12 @@ impl RequestMeta {
     pub(super) fn merge_claude_start(&mut self, earlier: &Self) {
         self.effort = self.effort.take().or_else(|| earlier.effort.clone());
         self.kind = self.kind.take().or_else(|| earlier.kind.clone());
+        if self.subagent_id.is_none() {
+            self.subagent_id.clone_from(&earlier.subagent_id);
+        }
+        if self.parent_session_id.is_none() {
+            self.parent_session_id.clone_from(&earlier.parent_session_id);
+        }
         self.request_id = self
             .request_id
             .take()
@@ -226,7 +252,7 @@ impl RequestMeta {
     }
 }
 
-fn elapsed_ms(start: i64, end: i64) -> Option<i64> {
+pub(super) fn elapsed_ms(start: i64, end: i64) -> Option<i64> {
     end.checked_sub(start).filter(|&ms| start > 0 && ms > 0)
 }
 
@@ -237,59 +263,4 @@ pub(super) fn string(v: &Value) -> Option<String> {
 }
 pub(super) fn at(v: &Value) -> Option<i64> {
     timestamp(Some(v))
-}
-
-pub(super) fn opencode(v: &Value, path: &Path, time: i64) -> RequestMeta {
-    let started_at = at(&v["created"]).or_else(|| at(&Value::from(time)));
-    let finished_at = ["streamed", "completed"]
-        .into_iter()
-        .filter_map(|key| at(&v[key]))
-        .find(|end| started_at.is_none_or(|start| *end > start));
-    let ttft_ms = at(&v["firstToken"])
-        .filter(|first| finished_at.is_none_or(|end| *first <= end))
-        .zip(started_at)
-        .and_then(|(first, start)| elapsed_ms(start, first));
-    let provider = string(&v["model"]["providerID"]).or_else(|| string(&v["providerID"]));
-    let native_session = (provider.as_deref() == Some("claude-agent"))
-        .then(|| super::parse::text(v.get("nativeSession")).map(str::to_owned))
-        .flatten();
-    let mut meta = RequestMeta {
-        provider,
-        native_session,
-        project: string(&v["directory"]).or_else(|| string(&v["path"]["cwd"])),
-        client: string(&v["agent"]).or_else(|| string(&v["mode"])),
-        kind: Some(
-            if v["role"] == "compaction" {
-                "compaction"
-            } else if string(&v["parent"]).is_some() {
-                "subagent"
-            } else {
-                "main"
-            }
-            .into(),
-        ),
-        version: string(&v["version"]),
-        effort: string(&v["model"]["variant"]).or_else(|| string(&v["variant"])),
-        tier: string(&v["model"]["serviceTier"])
-            .or_else(|| string(&v["model"]["service_tier"]))
-            .or_else(|| string(&v["model"]["tier"]))
-            .or_else(|| string(&v["tier"])),
-        http_status: v["httpStatus"]
-            .as_u64()
-            .or_else(|| v["error"]["status"].as_u64())
-            .and_then(|value| u16::try_from(value).ok()),
-        error: RequestError::new(v["error"]["kind"].as_str(), v["error"]["message"].as_str()),
-        started_at,
-        finished_at,
-        ttft_ms,
-        ttft_scope: ttft_ms.map(|_| "request".into()),
-        stop: string(&v["finish"]),
-        scope: Some("request".into()),
-        source: Some(path.to_string_lossy().into_owned()),
-        status: (v["failed"] == true || v["failed"] == 1).then_some(RequestOutcome::Failed),
-        ..Default::default()
-    };
-    meta.duration();
-    meta.timing = meta.latency_ms.or(ttft_ms).map(|_| "recorded".into());
-    meta
 }

@@ -4,14 +4,13 @@ import type { AgentInfo } from "../types";
 import type { UsageSummary, UsageSummaryRow } from "./types";
 import { display, formatTokens, formatCount, formatPercent, formatUsd, type Display } from "./format";
 import { cacheRateDisplay, costDisplay, dimensionTotals, distributionSlices, groupUsageBy, groupUsageCells, OTHERS_KEY, requestDisplay, successRateDisplay, sumModelUsage, tokenDisplay, uncachedInputOf, type AnalysisDimension, type GroupedUsage, type ModelUsage, type TrendMetric } from "./metrics";
-import { buildTrendSeries, entityColors, OTHER_COLOR, usageSeries, type TrendGroup } from "./trend";
+import { buildTrendSeries, entityColors, OTHER_COLOR, TREND_METRIC_NAMES, usageSeries, type TrendGroup } from "./trend";
 import { type UsagePeriod } from "./range";
-import { modelText } from "../models";
 import { projectName, shortPath } from "../utils";
 import AgentIcon from "../components/AgentIcon";
 import { ProviderIcon } from "../components/BrandIcon";
 import ChartLegend from "./ChartLegend";
-import { anchorOf, useTooltip } from "./ChartTooltip";
+import { anchorOf, useTooltip } from "./UsageTooltip";
 import ModelLabel from "../components/ModelLabel";
 import UiIcon from "../components/UiIcon";
 import UsageNumber from "./UsageNumber";
@@ -29,11 +28,8 @@ interface Props {
   canShowUsage: boolean;
 }
 
-const METRICS: [TrendMetric, string][] = [
-  ["tokens", "Token"],
-  ["requests", "请求"],
-  ["cost", "费用"],
-];
+const TREND_METRIC_OPTIONS = Object.entries(TREND_METRIC_NAMES) as [TrendMetric, string][];
+const SHARE_METRIC_OPTIONS = TREND_METRIC_OPTIONS.map(([id, name]): [TrendMetric, string] => [id, `${name}占比`]);
 const DIMENSIONS: Record<AnalysisDimension, string> = { models: "模型", agents: "Agent", projects: "项目", providers: "提供商" };
 const TABLE_ROWS = 8;
 
@@ -63,13 +59,13 @@ function highestCost(rows: GroupedUsage[]): GroupedUsage | null {
   null);
 }
 
-function CostLeader({ leader, label }: { leader: GroupedUsage | null; label: (key: string) => string }) {
+function CostLeader({ leader, label }: { leader: GroupedUsage | null; label?: (key: string) => string }) {
   if (!leader || leader.costUsd == null) return "—";
   return (
-    <span className="usage-cost-leader">
-      <span title={leader.key}>{label(leader.key)}</span>
+    <>
+      <span className="usage-stat-value-detail" title={leader.key}>{label ? label(leader.key) : leader.key}</span>
       <span>{formatUsd(leader.costUsd)}</span>
-    </span>
+    </>
   );
 }
 
@@ -100,7 +96,7 @@ function StatCard({ metric, label, value, rawValue, meta, notes }: {
         {meta.map(([name, content]) => (
           <div key={name}>
             <span>{name}</span>
-            <b>{content}</b>
+            <b className="usage-stat-value">{content}</b>
           </div>
         ))}
       </div>
@@ -132,7 +128,7 @@ export default function UsageAnalysis({
   const projects = useMemo(() => dimensionTotals(summary?.projects, agent), [summary?.projects, agent]);
   const points = useMemo(() => usageSeries(rows, period, now), [rows, period, now]);
   const trendLabel = useCallback(
-    (kind: "models" | "agents", key: string) => kind === "agents" ? agentNames.get(key) ?? key : modelText(key),
+    (kind: "models" | "agents", key: string) => kind === "agents" ? agentNames.get(key) ?? key : key,
     [agentNames],
   );
 
@@ -157,7 +153,7 @@ export default function UsageAnalysis({
 
   const sliceLabel = (key: string, othersCount?: number) => {
     if (othersCount) return `其他 ${othersCount} 项`;
-    if (groupBy === "models") return modelText(key);
+    if (groupBy === "models") return key;
     if (groupBy === "agents") return agentNames.get(key) ?? key;
     if (groupBy === "projects") return projectName(key);
     return key || "提供商未记录";
@@ -258,7 +254,7 @@ export default function UsageAnalysis({
           label={incomplete ? "已统计费用" : "总费用"}
           value={hasRows ? cost : canShowUsage ? display(0, { kind: "usd" }) : shown(cost)}
           meta={[
-            ["模型第一", <CostLeader leader={topModel} label={modelText} />],
+            ["模型第一", <CostLeader leader={topModel} />],
             ["项目第一", <CostLeader leader={topProject} label={projectName} />],
           ]}
         />
@@ -270,7 +266,7 @@ export default function UsageAnalysis({
             <h2>{period === "today" ? "每小时趋势" : "每日趋势"}</h2>
           </div>
           <div className="usage-controls">
-            <Segmented label="趋势指标" options={METRICS} value={trendMetric} onChange={setTrendMetric} />
+            <Segmented label="趋势指标" options={TREND_METRIC_OPTIONS} value={trendMetric} onChange={setTrendMetric} />
             <Segmented<TrendGroup>
               label="趋势分组"
               options={agent === "all" ? [["category", "按类别"], ["models", "按模型"], ["agents", "按 Agent"]] : [["category", "按类别"], ["models", "按模型"]]}
@@ -302,7 +298,7 @@ export default function UsageAnalysis({
             />
             <Segmented
               label="占比指标"
-              options={METRICS.map(([id, text]): [TrendMetric, string] => [id, `${text}占比`])}
+              options={SHARE_METRIC_OPTIONS}
               value={shareMetric}
               onChange={setShareMetric}
             />
@@ -311,7 +307,7 @@ export default function UsageAnalysis({
 
         {slices.some(slice => slice.value > 0) && (
           <div className="usage-distribution">
-            <div className="usage-dist-bar" role="img" aria-label={`${DIMENSIONS[groupBy]}${METRICS.find(([id]) => id === shareMetric)?.[1]}占比`}>
+            <div className="usage-dist-bar" role="img" aria-label={`${DIMENSIONS[groupBy]}${TREND_METRIC_NAMES[shareMetric]}占比`}>
               {slices.map(slice => {
                 const color = slice.othersCount ? OTHER_COLOR : colors.get(slice.key) ?? OTHER_COLOR;
                 const label = sliceLabel(slice.key, slice.othersCount);

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEve
 import type { RequestTimelineData } from "./types";
 import { formatCount, formatHourMinute, formatMonthDay, formatSpan } from "./format";
 import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
-import { anchorOf, useTooltip } from "./ChartTooltip";
+import { anchorOf, useTooltip } from "./UsageTooltip";
 
 const DAY = 86_400_000;
 const TICK_MINUTES = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080, 20160, 43200, 131040, 525600];

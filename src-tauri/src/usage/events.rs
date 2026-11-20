@@ -409,6 +409,7 @@ pub(super) fn page_with_pricer(
             let mut event: RequestEvent =
                 serde_json::from_str(&row.map_err(|_| "无法读取请求记录")?)
                     .map_err(|_| "请求索引损坏，请重试同步")?;
+            event.request.expand_project_path();
             if event.agent == "codex" {
                 event.request.normalize_codex_kind();
                 if event.request.timing.as_deref() == Some(LEGACY_ESTIMATE) {

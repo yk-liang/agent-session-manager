@@ -19,7 +19,7 @@ try {
  assert.match(run.stdout, /1 passed/);
  const fixture = JSON.parse(readFileSync(exported, 'utf8'));
  browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ channel: 'chrome', headless: true });
- const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }), errors = [];
+ const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 2 }), errors = [];
  page.on('pageerror', e => errors.push(e.message));
  await addUsageInitScript(page, (fixture, createCollector) => {
   const NativeDate = Date;
@@ -290,6 +290,27 @@ try {
 
  const syncChip = page.locator('.usage-sync-trigger');
  await syncChip.filter({ hasText: /\d{2}:\d{2}:\d{2} 更新/ }).waitFor();
+ const syncDot = syncChip.locator('.usage-sync-dot');
+ const syncBurst = syncDot.locator('.usage-sync-pulse');
+ const pulseAnimation = () => syncDot.evaluate(dot => getComputedStyle(dot, '::before').animationName);
+ assert.equal(await pulseAnimation(), 'usage-sync-ping');
+ assert.equal(await syncBurst.count(), 0);
+ const updateUsageTimestamp = () => page.evaluate(() => {
+  const { fixture, collector } = window.__USAGE__;
+  fixture.now += 1000;
+  collector.changed();
+ });
+ await updateUsageTimestamp();
+ await syncBurst.waitFor({ state: 'attached' });
+ assert.equal(await syncBurst.evaluate(ring => getComputedStyle(ring).animationName), 'usage-sync-burst');
+ await syncBurst.waitFor({ state: 'detached' });
+ await page.emulateMedia({ reducedMotion: 'reduce' });
+ assert.equal(await pulseAnimation(), 'none');
+ const previousSyncLabel = await syncChip.textContent();
+ await updateUsageTimestamp();
+ await syncChip.filter({ hasNotText: previousSyncLabel }).waitFor();
+ assert.equal(await syncBurst.count(), 0);
+ await page.emulateMedia({ reducedMotion: 'no-preference' });
  await syncChip.click();
  await page.getByRole('dialog', { name: '用量同步状态' }).locator('time').waitFor();
  assert.equal(await page.getByText('后台采集未开启', { exact: true }).count(), 0);
@@ -356,7 +377,7 @@ try {
  assert.deepEqual(await cardValues('requests'), ['4,950 / 550', '90.00%']);
  assert.equal((await cardLabels('cache'))[0], '缓存读取 / 写入');
  assert.equal((await cardValues('cache'))[0], '4.95B / 100');
- assert.deepEqual(await cardMeta('cost').locator('.usage-cost-leader > span').allTextContents(), [
+ assert.deepEqual(await cardMeta('cost').locator('.usage-stat-value > span').allTextContents(), [
   'provider/model-10-with-a-long-name-for-layout-check', '$5.00',
   'long-project-name-for-layout-check', '$5.25',
  ]);
@@ -369,12 +390,75 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
   const overflow = await page.locator('.usage-models td').evaluateAll(cells => cells.filter(c => c.scrollWidth > c.clientWidth + 1).map(c => c.textContent));
   assert.deepEqual(overflow, [], `large model values overlap at ${width}`);
-  assert.ok(await cardMeta('cost').locator('.usage-cost-leader').evaluateAll(leaders =>
-   leaders.every(leader => leader.lastElementChild.getBoundingClientRect().right <= leader.getBoundingClientRect().right + 1)),
-   `cost amounts fit at ${width}`);
+  assert.ok(await cardMeta('cost').evaluateAll(rows => rows.every(row =>
+   getComputedStyle(row, '::before').content === 'none'
+   && Math.abs(row.querySelector('.usage-stat-value > span:last-child').getBoundingClientRect().right
+    - row.getBoundingClientRect().right) < 1)),
+   `cost amounts align without leaders at ${width}`);
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models-large.png') });
+ await page.evaluate(() => {
+  const summary = window.__USAGE__.fixture.summaries.today;
+  const inputTokens = 141_906_000, outputTokens = 734_000, cacheReadTokens = 138_850_000;
+  summary.rows = [{ ...summary.rows[0], model: `provider/${'very-long-model-id-'.repeat(10)}v1`,
+   inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens: 0,
+   totalTokens: inputTokens + outputTokens }];
+  window.__USAGE__.collector.changed();
+ });
+ await waitTotal('142640000');
+ const populatedBucket = page.locator('.usage-bucket[data-total="142640000"]');
+ for (const width of [960, 1600]) {
+  await page.setViewportSize({ width, height: 900 });
+  await page.mouse.move(0, 0);
+  await populatedBucket.hover();
+  await assertTooltipValues(chartTip, ['734K', '138.85M', '3.06M', '142.64M']);
+  assert.equal(await chartTip.locator('.usage-tooltip-note').count(), 0);
+ }
+ const trendGrouping = page.getByRole('group', { name: '趋势分组' });
+ await trendGrouping.getByRole('button', { name: '按模型' }).click();
+ await populatedBucket.hover();
+ await assertTooltipValues(chartTip, ['142.64M', '142.64M']);
+ const longLabel = chartTip.locator('dt.usage-tooltip-label');
+ assert.ok(await longLabel.evaluate(label => {
+  const style = getComputedStyle(label);
+  return style.textOverflow === 'ellipsis' && style.whiteSpace === 'nowrap' && label.scrollWidth > label.clientWidth;
+ }));
+ await trendGrouping.getByRole('button', { name: '按类别' }).click();
+ // 两组截图数据覆盖首次悬浮和切换不同长度的数值。
+ await page.evaluate(() => {
+  const summary = window.__USAGE__.fixture.summaries.today, row = summary.rows[0];
+  const bucket = (bucketStart, successCount, failedCount) => ({ ...row, model: 'gpt-fixture', bucketStart,
+   inputTokens: successCount + failedCount, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: successCount + failedCount,
+   requestCount: successCount + failedCount, successCount, failedCount, costUsd: null, referenceCostUsd: null });
+  summary.rows = [bucket(row.bucketStart, 1694, 3), bucket(row.bucketStart + 3_600_000, 1139, 0)];
+  window.__USAGE__.collector.changed();
+ });
+ await waitTotal('2836');
+ await page.getByRole('group', { name: '趋势指标' }).getByRole('button', { name: '请求', exact: true }).click();
+ const requestBuckets = { busy: page.locator('.usage-bucket[data-total="1697"]'), quiet: page.locator('.usage-bucket[data-total="1139"]') };
+ const requestValues = { busy: ['3', '1,694', '1,697'], quiet: ['1,139', '1,139'] };
+ const waitTip = values => page.waitForFunction(text => [...document.querySelectorAll('[role="tooltip"] dd')].map(dd => dd.textContent).join('|') === text, values.join('|'));
+ for (const width of [960, 1600]) {
+  await page.setViewportSize({ width, height: 900 });
+  await page.mouse.move(0, 0);
+  await chartTip.waitFor({ state: 'hidden' });
+  for (const key of ['busy', 'quiet', 'busy']) {
+   await requestBuckets[key].hover();
+   await waitTip(requestValues[key]);
+   await assertTooltipValues(chartTip, requestValues[key]);
+  }
+  assert.equal(await chartTip.locator('.usage-tooltip-note').count(), 0);
+ }
+ const requestPlot = page.getByRole('slider', { name: /每小时请求趋势/ });
+ await requestPlot.focus();
+ await page.keyboard.press('ArrowRight');
+ await waitTip(requestValues.quiet);
+ await assertTooltipValues(chartTip, requestValues.quiet);
+ await page.keyboard.press('Escape');
+ await chartTip.locator('dd').first().waitFor({ state: 'detached' });
+ await page.getByRole('group', { name: '趋势指标' }).getByRole('button', { name: 'Token', exact: true }).click();
+ await page.setViewportSize({ width: 1280, height: 900 });
  const syncBeforePrices = await page.evaluate(() => window.__USAGE__.collector.scans.length);
  await page.getByRole('button', { name: '近 7 天', exact: true }).click(); await waitTotal('1100');
  await page.getByRole('tab', { name: '模型价格', exact: true }).click();

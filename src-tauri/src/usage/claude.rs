@@ -65,15 +65,20 @@ pub(super) fn read_line(
         return;
     }
 
-    let parent = path.ancestors().find(|dir| dir.ends_with("subagents"));
+    let parent_session_id = path
+        .ancestors()
+        .find(|dir| dir.ends_with("subagents"))
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|id| id.to_str())
+        .map(str::to_owned)
+        .or_else(|| nested.and_then(|_| string(&outer["sessionId"])));
     if let Some(id) = string(&outer["sessionId"]) {
         file.state.session = id;
     } else if file.state.session.is_empty() {
-        file.state.session = parent
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .or_else(|| path.file_stem())
-            .map(|id| id.to_string_lossy().into_owned())
+        file.state.session = parent_session_id
+            .clone()
+            .or_else(|| path.file_stem().map(|id| id.to_string_lossy().into_owned()))
             .unwrap_or_default();
     }
     let session = field("sessionId").unwrap_or_else(|| file.state.session.clone());
@@ -109,7 +114,24 @@ pub(super) fn read_line(
     let started_at = start
         .and_then(|start| start.at)
         .filter(|at| finished_at.is_some_and(|end| *at <= end));
-    let sidechain = nested.is_some() || line["isSidechain"] == true || parent.is_some();
+    let sidechain = nested.is_some() || line["isSidechain"] == true || parent_session_id.is_some();
+    let subagent_id = if sidechain {
+        // 子代理日志中的 sessionId 可能仍指向主会话。
+        parent_session_id
+            .as_deref()
+            .filter(|parent| *parent != session)
+            .map(|_| session.clone())
+            .or_else(|| field("agentId"))
+            .or_else(|| string(&outer["data"]["agentId"]))
+            .or_else(|| {
+                path.file_stem()?
+                    .to_str()?
+                    .strip_prefix("agent-")
+                    .map(str::to_owned)
+            })
+    } else {
+        None
+    };
     let error = if line["isApiErrorMessage"] == true {
         let content = &message["content"];
         let message = content
@@ -131,6 +153,12 @@ pub(super) fn read_line(
     } else {
         None
     };
+    let speed = string(&usage["speed"]);
+    let tier = if speed.as_deref().is_some_and(|value| value != "standard") {
+        speed
+    } else {
+        string(&usage["service_tier"]).or(speed)
+    };
     let mut request = RequestMeta {
         request_id: request_ref,
         provider: string(&message["provider"]),
@@ -140,10 +168,10 @@ pub(super) fn read_line(
         kind: start
             .and_then(|start| start.kind.clone())
             .or_else(|| sidechain.then(|| "sidechain".into())),
+        subagent_id,
+        parent_session_id,
         effort: field("effort").or_else(|| start.and_then(|start| start.effort.clone())),
-        tier: string(&usage["speed"])
-            .filter(|s| s != "standard")
-            .or_else(|| string(&usage["service_tier"]).filter(|s| s != "standard")),
+        tier,
         status: failed.then_some(RequestOutcome::Failed),
         error,
         stop,

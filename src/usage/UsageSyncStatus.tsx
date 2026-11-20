@@ -28,6 +28,8 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
   onRetry: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [pulseAt, setPulseAt] = useState<number | null>(null);
+  const lastUpdate = useRef<number | null | undefined>(undefined);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panelId = useId();
@@ -57,6 +59,20 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
   const updatedTimeLabel = updatedAt == null ? null : formatDateTime(updatedAt);
   const syncFailed = unavailable || !!status?.failedAgents.length;
   const state = syncFailed ? "error" : showBusy || !status ? "busy" : "live";
+  useEffect(() => {
+    if (updatedAt === undefined) return;
+    const previous = lastUpdate.current;
+    if (state !== "live") {
+      if (previous === undefined) lastUpdate.current = updatedAt;
+      setPulseAt(null);
+      return;
+    }
+    lastUpdate.current = updatedAt;
+    const changed = previous !== undefined && updatedAt !== null && (previous === null || updatedAt > previous);
+    if (changed && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setPulseAt(updatedAt);
+    }
+  }, [updatedAt, state]);
   const label = unavailable ? "同步暂不可用"
     : syncFailed ? "同步失败"
     : showBusy ? (readingHistory ? "同步历史用量…" : "正在更新…")
@@ -82,7 +98,13 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
         title={state === "live" && updatedTimeLabel ? `最近更新 ${updatedTimeLabel}` : undefined}
         onClick={() => setOpen(!open)}
       >
-        {state === "live" ? <span className="usage-sync-dot" aria-hidden="true" /> :
+        {state === "live" ? (
+          <span className="usage-sync-dot" aria-hidden="true">
+            {pulseAt !== null && (
+              <span key={pulseAt} className="usage-sync-pulse" onAnimationEnd={() => setPulseAt(null)} />
+            )}
+          </span>
+        ) :
           <UiIcon icon={state === "error" ? CircleAlert : LoaderCircle} className={state === "busy" ? "usage-spin" : undefined} />}
         <span>{label}</span>
       </button>

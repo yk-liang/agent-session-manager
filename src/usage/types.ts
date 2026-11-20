@@ -89,8 +89,11 @@ export interface RequestMetadata {
   requestId: string | null;
   provider: string | null;
   project: string | null;
+  absoluteProjectPath?: string;
   client: string | null;
   kind: string | null;
+  subagentId?: string;
+  parentSessionId?: string;
   effort: string | null;
   tier: string | null;
   version: string | null;

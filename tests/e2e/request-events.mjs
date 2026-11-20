@@ -23,10 +23,12 @@ try {
   assert.equal(fixture.total, 110);
   const longProject = `/Users/demo/Workspace/${'nested/'.repeat(24)}example-project`;
   const successes = fixture.events.filter(e => e.agent === 'claude' && e.status === 'success');
-  successes[0].request.project = longProject;
+  successes[0].request.project = '~/Workspace/agent-session-manager';
+  successes[0].request.absoluteProjectPath = longProject;
   successes[1].request.project = '/Users/demo/.codex';
   successes[0].request.latencyMs = 3530;
   successes[0].request.ttftMs = 1670;
+  successes[0].request.client = null;
   successes[1].request.latencyMs = 3530;
   successes[1].request.ttftMs = null;
   for (const event of fixture.events.slice(0, -1)) event.cacheWriteTokens = 0;
@@ -39,9 +41,10 @@ try {
   codexEvent.cost = {
     source: 'models.dev', totalUsd: 0.02,
     inputRate: 20, inputUsd: 0.02, outputRate: 0, outputUsd: 0,
+    serviceTier: 'flex',
   };
   browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ channel: 'chrome', headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1080 } });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1080 }, deviceScaleFactor: 2 });
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await addUsageInitScript(page, (fixture, createCollector) => {
     Object.defineProperty(document, 'hasFocus', { value: () => false });
@@ -118,7 +121,7 @@ try {
   assert.equal(await amount.evaluate(el => getComputedStyle(el.parentElement).textDecorationStyle), 'dotted');
   await amount.hover();
   const feeTip = page.getByRole('tooltip');
-  await feeTip.getByText('Models.dev 参考价', { exact: true }).waitFor();
+  await feeTip.getByText('Models.dev 参考价 · flex 档', { exact: true }).waitFor();
   assert.doesNotMatch(await feeTip.textContent(), /含推理/);
   await assertTooltipValues(feeTip);
   await page.keyboard.press('Escape');
@@ -138,30 +141,49 @@ try {
   const beforeExpand = await table.locator('th').nth(5).boundingBox();
   await codex.locator('.request-expand').click();
   const detail = table.locator('.request-detail');
-  assert.deepEqual(await detail.locator('dt').allTextContents(), ['请求 ID', '请求时间', '计时说明', '结束原因', '客户端', '项目']);
-  const detailValue = label => detail.locator('dl > div').filter({ has: page.getByText(label, { exact: true }) }).locator('dd');
+  assert.deepEqual(await detail.locator('dt').allTextContents(), ['请求 ID', '会话', '类型', '请求时间', '计时说明', '结束原因', '客户端', '项目']);
+  const detailValue = label => detail.locator(':scope > div').filter({ has: page.getByText(label, { exact: true }) }).locator('dd');
+  assert.equal(await detailValue('会话').locator('code').textContent(), 'codex-session');
+  assert.equal(await detailValue('类型').textContent(), 'vscode');
   assert.match(await detailValue('请求时间').textContent(), /\d{2}:\d{2}:\d{2}\.\d{3} – .+\d{2}:\d{2}:\d{2}\.\d{3}$/);
   assert.equal(await detailValue('计时说明').textContent(), '耗时根据日志估算');
-  assert.equal(await detailValue('结束原因').textContent(), '达到输出上限');
+  assert.equal(await detailValue('结束原因').textContent(), 'length');
   assert.equal(await detailValue('客户端').textContent(), 'Codex Desktop 0.99.0');
-  assert.ok(await detail.locator('dl > div').evaluateAll(rows => {
+  assert.ok(await detail.locator(':scope > div').evaluateAll(rows => {
     const boxes = rows.map(row => row.getBoundingClientRect());
     const leftEdges = rows.map(row => row.querySelector('dd').getBoundingClientRect().left);
     return boxes.every((box, i) => i === 0 || box.top >= boxes[i - 1].bottom)
-      && leftEdges.every(left => Math.abs(left - leftEdges[0]) < 1);
+      && leftEdges.every(left => Math.abs(left - leftEdges[0]) < 1)
+      && rows.every(row => getComputedStyle(row).borderTopWidth === '0px');
   }), 'request details are stacked with a shared value column');
   const afterExpand = await table.locator('th').nth(5).boundingBox();
   assert.equal(afterExpand.width, beforeExpand.width, 'expanded metadata must not resize status columns');
-  for (const [label, value] of [['请求 ID', 'response-one'], ['项目路径', '/fixture/codex']]) {
+  for (const [label, value] of [['请求 ID', 'response-one'], ['会话 ID', 'codex-session']]) {
     await detail.getByRole('button', { name: `复制${label}` }).click();
     await page.waitForFunction(value => window.__EVENTS__.calls.some(call => call.cmd.includes('clipboard') && call.args.text === value), value);
   }
   await codex.locator('.request-expand').click();
+  const worker = table.locator(`tr[data-event-id=${JSON.stringify(successes[0].id)}]`);
+  assert.equal(await worker.locator('.request-session-id code').textContent(), 'worker');
+  assert.equal(await worker.locator('.request-tier').textContent(), 'standard');
+  assert.equal(await worker.locator('.request-source > small').textContent(), '未记录');
+  await worker.locator('.request-expand').click();
+  assert.deepEqual((await detail.locator('dt').allTextContents()).slice(0, 4), ['请求 ID', '会话', '类型', '父会话']);
+  assert.equal(await detailValue('会话').locator('code').textContent(), 'worker');
+  assert.equal(await detailValue('类型').textContent(), 'agent:builtin:web-fetch');
+  assert.equal(await detailValue('客户端').textContent(), '2.1.309');
+  assert.equal(await detailValue('父会话').locator('code').textContent(), 'session-one');
+  assert.equal(await detailValue('项目').locator('code').textContent(), longProject);
+  for (const [label, value] of [['父会话 ID', 'session-one'], ['项目路径', longProject]]) {
+    await detail.getByRole('button', { name: `复制${label}` }).click();
+    await page.waitForFunction(value => window.__EVENTS__.calls.some(call => call.cmd.includes('clipboard') && call.args.text === value), value);
+  }
+  await worker.locator('.request-expand').click();
   const project = table.locator('.request-project > small').filter({ hasText: 'example-project' });
   assert.equal(await project.getAttribute('title'), longProject);
   assert.ok((await project.textContent()).startsWith('~/Workspace/'));
   assert.equal(await table.locator('.request-project > span').filter({ hasText: /^\.codex$/ }).count(), 1);
-  console.log(`PASS: request details stack in order and support copying the request ID and project path (${engine})`);
+  console.log(`PASS: request details stack without dividers and support copying IDs and absolute project paths (${engine})`);
   const rowIds = () => table.locator('tbody > tr:not(.request-detail-row)').evaluateAll(rows => rows.map(row => row.dataset.eventId));
   const firstIds = await rowIds();
   await chooseOption(page, '项目', { label: '/fixture/codex' });
@@ -175,6 +197,7 @@ try {
   const timeline = table.getByRole('slider', { name: /请求时间分布/ });
   const populatedBuckets = timeline.locator('.request-timeline-bucket:has(i)');
   const tip = page.getByRole('tooltip');
+  await page.mouse.move(0, 0);
   for (const bucket of [populatedBuckets.last(), populatedBuckets.first()]) {
     await bucket.hover();
     await assertTooltipValues(tip);
@@ -187,7 +210,9 @@ try {
   await timeline.press('Enter');
   await page.getByText('第 101–110 条，共 110 条', { exact: true }).waitFor();
   assert.equal(await cacheWriteColumn.count(), 1);
-  const freeCost = table.locator('tbody tr').filter({ hasText: 'demo:free' }).locator('.request-cost');
+  const freeRequest = table.locator('tbody tr').filter({ hasText: 'demo:free' });
+  assert.equal(await freeRequest.locator('.request-tier').textContent(), 'priority');
+  const freeCost = freeRequest.locator('.request-cost');
   assert.equal(await freeCost.locator('.usage-num').textContent(), '$0.00');
   assert.equal(await freeCost.locator('small').textContent(), '内置');
   await table.getByRole('button', { name: '首页', exact: true }).click();

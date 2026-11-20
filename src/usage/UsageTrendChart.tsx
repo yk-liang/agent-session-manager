@@ -1,15 +1,10 @@
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { formatTokens, formatCount, formatUsd } from "./format";
 import { costGapNotes, type TrendMetric } from "./metrics";
-import { type StackedSeries, type UsagePoint } from "./trend";
+import { TREND_METRIC_NAMES, type StackedSeries, type UsagePoint } from "./trend";
 import ChartLegend from "./ChartLegend";
-import { useTooltip, type TooltipContent } from "./ChartTooltip";
+import { useTooltip, type TooltipContent } from "./UsageTooltip";
 
-const UNITS: Record<TrendMetric, { name: string; note: string }> = {
-  tokens: { name: "Token", note: "单位：Token" },
-  requests: { name: "请求", note: "单位：次" },
-  cost: { name: "费用", note: "单位：USD" },
-};
 const LEFT = 64;
 const RIGHT = 24;
 const TOP = 14;
@@ -77,16 +72,16 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
       .filter(row => row.value > 0)
       .reverse()
       .map(row => ({ ...row, value: formatValue(metric, row.value) }));
-    const gaps = metric === "cost"
-      ? costGapNotes(point)
+    const note = metric === "cost"
+      ? costGapNotes(point).join("；")
       : metric === "requests" && point.requestCountIncomplete
-        ? ["仅含可确认的请求次数"]
-        : [];
+        ? "仅含可确认的请求次数"
+        : undefined;
     return {
       title: point.title,
       rows,
       total: { label: hidden.size ? "显示项合计" : "合计", value: metric === "cost" && point.costUsd == null && point.recordCount > 0 ? "—" : formatValue(metric, totals[index]) },
-      note: [UNITS[metric].note, ...gaps].join("；"),
+      note,
     };
   };
   const showAt = (index: number) => {
@@ -131,8 +126,9 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
   if (!series.length) {
     return <div className="usage-chart-empty">{metric === "cost" ? "所选范围暂无可估算的费用" : "所选范围暂无记录"}</div>;
   }
+  const metricName = TREND_METRIC_NAMES[metric];
   const activeText = active != null && points[active]
-    ? `${points[active].title}，${UNITS[metric].name}${formatValue(metric, totals[active])}`
+    ? `${points[active].title}，${metricName}${formatValue(metric, totals[active])}`
     : undefined;
   return (
     <div className="usage-chart" ref={container}>
@@ -140,7 +136,7 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
         className="usage-chart-plot"
         role="slider"
         tabIndex={0}
-        aria-label={`${hourly ? "每小时" : "每日"}${UNITS[metric].name}趋势，左右方向键逐个时段查看`}
+        aria-label={`${hourly ? "每小时" : "每日"}${metricName}趋势，左右方向键逐个时段查看`}
         aria-valuemin={0}
         aria-valuemax={Math.max(0, points.length - 1)}
         aria-valuenow={active ?? points.length - 1}
@@ -195,7 +191,7 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
       </div>
       {tip.tooltip}
       <ChartLegend
-        label={`${UNITS[metric].name}序列`}
+        label={`${metricName}序列`}
         items={series.map(item => ({ key: item.key, label: item.label, color: item.color }))}
         hidden={series.length > 1 ? hidden : undefined}
         onToggle={series.length > 1 ? toggle : undefined}

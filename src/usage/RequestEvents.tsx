@@ -6,7 +6,6 @@ import type { EventQuery, RequestFilters, RequestOutcome } from "./types";
 import { formatCount } from "./format";
 import { summaryQuery, type UsagePeriod } from "./range";
 import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
-import { modelText } from "../models";
 import { shortPath } from "../utils";
 import UiIcon from "../components/UiIcon";
 import { ModelIcon } from "../components/BrandIcon";
@@ -45,7 +44,7 @@ function filterOptions(
   counts: Record<string, number>,
   selected: string | null,
   allLabel: string,
-  label: (id: string) => string,
+  label: (id: string) => string = id => id,
   knownIds = Object.keys(counts),
 ) {
   const ids = new Set(knownIds);
@@ -82,7 +81,7 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
     goToPage(target);
   };
   const { models, projects, results } = filters ?? EMPTY_FILTERS;
-  const modelOptions = filterOptions(models, model, "全部模型", modelText)
+  const modelOptions = filterOptions(models, model, "全部模型")
     .map(option => ({ ...option, icon: option.id !== "all" ? <ModelIcon id={filterValue(option.id) ?? ""} /> : undefined }));
   const projectOptions = filterOptions(projects, project, "全部项目", id => shortPath(id) || "项目未记录");
   const resultOptions = filterOptions(results, status, "全部结果", id => REQUEST_OUTCOMES[id as RequestOutcome].label, REQUEST_OUTCOME_IDS);

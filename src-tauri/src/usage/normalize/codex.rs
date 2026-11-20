@@ -1,7 +1,7 @@
 use super::{parent_path, physical_id, prefer, unique};
 use crate::usage::{
     cache::FileCache,
-    codex::COUNTER_BASELINE,
+    codex::{COUNTER_BASELINE, FORK_METADATA_VERSION},
     ledger,
     types::{Sample, Tokens},
 };
@@ -12,7 +12,7 @@ use std::{
 
 fn codex_parent(file: &FileCache) -> Option<&str> {
     file.state.forked_from.as_deref().or_else(|| {
-        (file.parser_version < crate::usage::cache::jsonl_parser_version("codex"))
+        (file.parser_version < FORK_METADATA_VERSION)
             .then_some(file.state.parent_session.as_deref())
             .flatten()
     })

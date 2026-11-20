@@ -257,7 +257,7 @@ fn codex_lines(t: i64) -> Vec<Value> {
         codex(
             t,
             "event_msg",
-            json!({"type":"thread_settings_applied","thread_settings":{"model_provider_id":"openai","service_tier":"priority"}}),
+            json!({"type":"thread_settings_applied","thread_settings":{"model_provider_id":"openai","service_tier":"fast"}}),
         ),
         codex(
             t + 2000,
@@ -316,7 +316,7 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
     );
     assert_eq!(e.request.ttft_ms, Some(100));
     assert_eq!(e.request.ttft_scope.as_deref(), Some("request"));
-    assert_eq!(e.request.tier.as_deref(), Some("priority"));
+    assert_eq!(e.request.tier.as_deref(), Some("fast"));
     append(
         &p,
         codex(
@@ -500,7 +500,7 @@ fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
     assert_eq!(recalculated.total, 2);
     assert_eq!(recalculated.events[0].request.latency_ms, Some(11_950));
     for event in recalculated.events {
-        assert_eq!(event.request.tier.as_deref(), Some("priority"));
+        assert_eq!(event.request.tier.as_deref(), Some("fast"));
         assert_eq!(event.session, "codex-session");
         let previous = before
             .events
@@ -806,7 +806,19 @@ fn export_request_events_fixture_if_requested() {
             response["message"]["model"] = json!("demo:free");
             response["message"]["usage"]["service_tier"] = json!("priority");
         }
-        lines.extend([start(&id, time), response]);
+        if i == 0 {
+            response["sessionId"] = json!("session-one");
+            response["agentId"] = json!("worker");
+            response["cwd"] = json!("~/Workspace/agent-session-manager");
+            let mut subagent_start = start(&id, time);
+            subagent_start["querySource"] = json!("agent:builtin:web-fetch");
+            write(
+                &dir.path().join("claude/session-one/subagents/agent-worker.jsonl"),
+                &[subagent_start, response],
+            );
+        } else {
+            lines.extend([start(&id, time), response]);
+        }
     }
     let mut failure = claude("failed", t + 3000, 0, true);
     failure["isApiErrorMessage"] = json!(true);
@@ -828,6 +840,24 @@ fn export_request_events_fixture_if_requested() {
             limit: Some(200),
             ..Default::default()
         },
+    );
+    let worker = events
+        .events
+        .iter()
+        .find(|event| event.request.subagent_id.as_deref() == Some("worker"))
+        .unwrap();
+    assert_eq!(
+        worker.request.parent_session_id.as_deref(),
+        Some("session-one")
+    );
+    assert_eq!(
+        worker.request.kind.as_deref(),
+        Some("agent:builtin:web-fetch")
+    );
+    assert_eq!(worker.request.tier.as_deref(), Some("standard"));
+    assert_eq!(
+        worker.request.absolute_project_path.as_deref(),
+        crate::agents::expand_tilde("~/Workspace/agent-session-manager").to_str()
     );
     fs::write(export, serde_json::to_vec(&events).unwrap()).unwrap();
 }
@@ -928,7 +958,12 @@ fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
     )))
     .unwrap();
     let t = 1_790_000_000_000i64;
-    db.execute("INSERT INTO session_v2(id,directory,version,time_created,time_updated) VALUES ('ses_a','/fixture','2.2.0',?1,?1)",[t-1000]).unwrap();
+    db.execute(
+        "INSERT INTO session_v2(id,directory,version,parent_id,time_created,time_updated)
+         VALUES ('ses_a','/fixture','2.2.0','ses_parent',?1,?1)",
+        [t - 1000],
+    )
+    .unwrap();
     let data = json!({"model":{"id":"live","providerID":"local","variant":"high","serviceTier":"flex"},"agent":"build","time":{"created":t,"firstToken":t+450,"streamed":t+2000,"completed":t+6000},"tokens":{"input":100,"output":100,"reasoning":20,"cache":{"read":50,"write":0}},"finish":"stop","content":[{"type":"text","text":"PRIVATE_V2_BODY"}]});
     db.execute(
         "INSERT INTO session_message VALUES ('msg_a','ses_a','assistant',0,?1,?1,?2)",
@@ -945,6 +980,8 @@ fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
     assert_eq!(e.request.effort.as_deref(), Some("high"));
     assert_eq!(e.request.tier.as_deref(), Some("flex"));
     assert_eq!(e.request.version.as_deref(), Some("2.2.0"));
+    assert_eq!(e.request.kind.as_deref(), Some("subagent"));
+    assert_eq!(e.request.parent_session_id.as_deref(), Some("ses_parent"));
     assert_eq!(e.output_tps, Some(60.0));
     assert_eq!(e.request.ttft_ms, Some(450));
     assert!(result.has_service_tiers);

@@ -4,7 +4,7 @@ import * as api from "../api";
 import type { AgentInfo } from "../types";
 import type { ModelPriceRow, ModelPricesResponse, ResolvedPrice } from "./types";
 import { CNY_PER_USD, formatTokens, formatCount, formatDateTime, formatRate } from "./format";
-import { sourceName, tierName } from "./metrics";
+import { sourceName } from "./metrics";
 import ConfirmDialog from "../components/ConfirmDialog";
 import HelpTip from "../components/HelpTip";
 import ModelLabel from "../components/ModelLabel";
@@ -45,7 +45,7 @@ function variantNotes(price: ResolvedPrice): string[] {
   return [
     rates.cacheWrite1h != null && `1 小时缓存写入 ${formatRate(rates.cacheWrite1h)}`,
     ...Object.entries(rates.serviceTiers ?? {}).map(
-      ([tier, tierRates]) => `${tierName(tier)} ${formatRate(tierRates.input)} / ${formatRate(tierRates.output)}`,
+      ([tier, tierRates]) => `${tier} ${formatRate(tierRates.input)} / ${formatRate(tierRates.output)}`,
     ),
   ].filter((note): note is string => !!note);
 }

@@ -11,6 +11,7 @@ use std::path::Path;
 pub(in crate::usage) const BOUNDARY_ESTIMATE: &str = "codex_boundary";
 pub(super) const COUNTER_BASELINE: &str = "counter_baseline";
 pub(in crate::usage) const LEGACY_ESTIMATE: &str = "estimated";
+pub(super) const FORK_METADATA_VERSION: u8 = 9;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -57,6 +58,7 @@ fn read_header(state: &mut ParserState, p: &Value, time: Option<i64>) {
             .find(|key| source.get(*key).is_some())
             .map(str::to_owned)
     });
+    context.parent_session_id.clone_from(&state.parent_session);
     context.normalize_codex_kind();
 }
 
@@ -124,11 +126,7 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                 state.context.provider =
                     string(&s["model_provider_id"]).or(state.context.provider.clone());
                 if let Some(tier) = string(&s["service_tier"]) {
-                    state.context.tier = Some(if tier == "fast" {
-                        "priority".into()
-                    } else {
-                        tier
-                    });
+                    state.context.tier = Some(tier);
                 }
             }
             Some("task_complete") if p["turn_id"].as_str() == Some(state.turn_id.as_str()) => {

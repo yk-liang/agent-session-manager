@@ -73,7 +73,7 @@ try {
   await page.getByRole('button', { name: '用量', exact: true }).click();
   const summaryLabels = page.locator('.usage-models tbody .model-label');
   await summaryLabels.first().waitFor();
-  const labels = [opus, gemini, '未知模型', ...extraModels].sort();
+  const labels = [opus, gemini, 'unknown', ...extraModels].sort();
   const count = (list, name) => list.getByRole('option', { name, exact: true }).locator('.dropdown-count');
   const picker = await openDropdown(page, '当前 Agent');
   await count(picker, '全部 Agent').getByText(String(labels.length + 1), { exact: true }).waitFor();

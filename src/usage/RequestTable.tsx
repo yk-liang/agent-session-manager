@@ -3,12 +3,12 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentInfo } from "../types";
 import type { EventPage, RequestEvent } from "./types";
 import { formatClock, formatCount, formatDate, formatDuration, formatPercent, formatRate, formatTps, formatUsd } from "./format";
-import { costBreakdown, eventCostDisplay, requestErrorText, tierName, tokenDisplay, uncachedInputOf } from "./metrics";
+import { costBreakdown, eventCostDisplay, requestErrorText, tokenDisplay, uncachedInputOf } from "./metrics";
 import { REQUEST_OUTCOMES } from "./trend";
 import { projectName, shortPath } from "../utils";
 import AgentIcon from "../components/AgentIcon";
 import { ProviderIcon } from "../components/BrandIcon";
-import { TipTrigger, type TooltipContent } from "./ChartTooltip";
+import { TipTrigger, type TooltipContent } from "./UsageTooltip";
 import CopyButton from "../components/CopyButton";
 import ModelLabel from "../components/ModelLabel";
 import RequestDetail from "./RequestDetail";
@@ -73,7 +73,9 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
             const tier = request.tier?.trim();
             const estimated = request.timing === "codex_boundary" && latencyMs != null;
             const expanded = expandedRequestId === event.id;
-            const client = request.client?.trim() || request.kind?.trim() || "未记录";
+            const session = request.subagentId || event.session;
+            const project = request.absoluteProjectPath ?? request.project;
+            const client = request.client?.trim();
             const cachePercent = event.cacheReadRecorded && event.inputRecorded && !event.inputIncomplete && event.inputTokens > 0 &&
               event.cacheReadTokens <= event.inputTokens && event.agent !== "qoder" ? (event.cacheReadTokens / event.inputTokens) * 100 : null;
             const uncached = event.agent === "qoder" ? null : uncachedInputOf(event);
@@ -86,8 +88,8 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
               </button></td>
               <td>{event.time > 0 ? <><span>{formatClock(event.time)}</span><small>{formatDate(event.time)}</small></> : <span className="request-missing">未记录</span>}</td>
               <td className="request-model"><ModelLabel model={event.model} />{request.provider && <small title={request.provider}><ProviderIcon provider={request.provider} />{request.provider}</small>}</td>
-              <td><span>{request.effort ?? "—"}</span>{tier && <small className="request-tier">{tierName(tier)}</small>}</td>
-              <td className="request-source"><span><AgentIcon agent={event.agent} inline />{agentName}</span><small title={request.client ? `客户端：${request.client}` : request.kind ? `日志类型：${request.kind}` : "未记录客户端"}>{client}</small></td>
+              <td><span>{request.effort ?? "—"}</span>{tier && <small className="request-tier">{tier}</small>}</td>
+              <td className="request-source"><span><AgentIcon agent={event.agent} inline />{agentName}</span><small title={client}>{client || "未记录"}</small></td>
               <td>
                 {event.status === "failed" ? (
                   <TipTrigger content={() => ({ title: "错误信息", rows: [], detail: requestErrorText(request) || "未记录错误信息" })}>
@@ -115,16 +117,24 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
                 <small>{cost.note}</small>
               </td>
               <td className="request-project">
-                <span title={request.project ?? undefined}>{request.project ? projectName(request.project) : "未记录"}</span>
-                {request.project && <small title={request.project}>{shortPath(request.project)}</small>}
+                <span title={project ?? undefined}>{project ? projectName(project) : "未记录"}</span>
+                {project && <small title={project}>{shortPath(project)}</small>}
               </td>
               <td>
                 <div className="request-session-id">
-                  <code title={event.session}>{event.session}</code>
-                  <CopyButton className="request-copy request-session" value={event.session} label={`复制会话 ID ${event.session}`} {...copyFeedback} />
+                  <code title={session}>{session}</code>
+                  <CopyButton className="request-copy request-session" value={session} label={`复制会话 ID ${session}`} {...copyFeedback} />
                 </div>
               </td>
-            </tr>{expanded && <tr className="request-detail-row" data-event-id={event.id}><td colSpan={columns.length}><RequestDetail event={event} agentName={agentName} copyFeedback={copyFeedback} /></td></tr>}</Fragment>;
+            </tr>
+              {expanded && (
+                <tr className="request-detail-row" data-event-id={event.id}>
+                  <td colSpan={columns.length}>
+                    <RequestDetail event={event} session={session} project={project} copyFeedback={copyFeedback} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>;
           })}
         </tbody>
       </table>

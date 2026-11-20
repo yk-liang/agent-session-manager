@@ -5,6 +5,12 @@ import { addModelUsage, emptyModelUsage, groupUsageBy, metricValue, OTHERS_KEY, 
 
 export type TrendGroup = "category" | "models" | "agents";
 
+export const TREND_METRIC_NAMES: Record<TrendMetric, string> = {
+  tokens: "Token",
+  requests: "请求",
+  cost: "费用",
+};
+
 export function dailySeries(
   rows: (ModelUsageRow & { date: string })[],
   period: UsagePeriod,

@@ -333,9 +333,6 @@ export const PRICING_ISSUES: Record<PricingIssue, { label: string; detail: strin
   unsupported_component: { label: "分项未定价", detail: "部分计费项没有可用价格" },
 };
 
-const TIER_NAMES: Record<string, string> = { priority: "优先处理", flex: "Flex", batch: "批处理" };
-export const tierName = (tier: string) => TIER_NAMES[tier] ?? tier;
-
 export function eventCostDisplay(event: RequestEvent): Display & { note: string } {
   const cost = event.cost;
   if (!cost || !Number.isFinite(cost.totalUsd)) {
@@ -361,7 +358,7 @@ function priceSourceText(cost: Pick<EventCost, "source" | "currency">): string {
 function costNotes(cost: EventCost): string[] {
   return [
     cost.longContext ? "长上下文" : "",
-    cost.serviceTier ? `${tierName(cost.serviceTier)} 档` : "",
+    cost.serviceTier ? `${cost.serviceTier} 档` : "",
     cost.multiplier && cost.multiplier !== 1 ? `标准价 × ${cost.multiplier}` : "",
   ].filter(Boolean);
 }

@@ -1688,7 +1688,9 @@ fn codex_rewritten_prefix_requires_parent_evidence() {
     let file = cache::read_file(&log, "codex", None, false, &|| false).unwrap().0;
     assert_eq!(file.state.session, "guardian");
     assert!(file.samples.iter().all(|sample| {
-        sample.session == "guardian" && sample.request.kind.as_deref() == Some("subagent")
+        sample.session == "guardian"
+            && sample.request.kind.as_deref() == Some("subagent")
+            && sample.request.parent_session_id.as_deref() == Some("parent")
     }));
 }
 

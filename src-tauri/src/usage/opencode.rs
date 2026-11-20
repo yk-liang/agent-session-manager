@@ -1,6 +1,7 @@
 use super::{
     cache::{sqlite_stamps, FileCache},
-    parse::{normalize, recorded_fields, timestamp},
+    parse::{normalize, recorded_fields, text, timestamp},
+    request_parse::{at, elapsed_ms, string, RequestError, RequestMeta, RequestOutcome},
     types::*,
 };
 use crate::agents::opencode::{model_id, open_db, MESSAGE_ERROR_SQL};
@@ -11,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const PARSER_VERSION: u8 = 10;
+pub(super) const PARSER_VERSION: u8 = 11;
 
 struct ForkBoundary {
     parent: String,
@@ -83,12 +84,12 @@ pub(super) fn read(
     let session_created = session_column("time_created");
     let directory = session_column("directory");
     let version = session_column("version");
-    let parent = session_column("parent_id");
+    let parent_session_id = session_column("parent_id");
     let query = format!("SELECT id,session_id,time_created,json_object(
         'modelID',json_extract(data,'$.modelID'),'providerID',json_extract(data,'$.providerID'),'model',json_extract(data,'$.model'),
         'completed',json_extract(data,'$.time.completed'),'streamed',json_extract(data,'$.time.streamed'),
         'firstToken',json_extract(data,'$.time.firstToken'),'finish',json_extract(data,'$.finish'),
-        'directory',{directory},'version',{version},'parent',{parent},'role',json_extract(data,'$.role'),
+        'directory',{directory},'version',{version},'parentSessionId',{parent_session_id},'role',json_extract(data,'$.role'),
         'variant',json_extract(data,'$.variant'),'tier',coalesce(json_extract(data,'$.serviceTier'),json_extract(data,'$.service_tier'),json_extract(data,'$.tier')),
         'httpStatus',json_extract(data,'$.httpStatus'),'error',{MESSAGE_ERROR_SQL},
         'failed',json_extract(data,'$._asm_failed')=1 OR (json_type(data,'$.error') IS NOT NULL AND json_type(data,'$.error') != 'null'),
@@ -174,8 +175,65 @@ pub(super) fn read(
     Ok((result, bytes))
 }
 
+fn request_meta(v: &Value, path: &Path, time: i64) -> RequestMeta {
+    let started_at = at(&v["created"]).or_else(|| at(&Value::from(time)));
+    let finished_at = ["streamed", "completed"]
+        .into_iter()
+        .filter_map(|key| at(&v[key]))
+        .find(|end| started_at.is_none_or(|start| *end > start));
+    let ttft_ms = at(&v["firstToken"])
+        .filter(|first| finished_at.is_none_or(|end| *first <= end))
+        .zip(started_at)
+        .and_then(|(first, start)| elapsed_ms(start, first));
+    let provider = string(&v["model"]["providerID"]).or_else(|| string(&v["providerID"]));
+    let native_session = (provider.as_deref() == Some("claude-agent"))
+        .then(|| text(v.get("nativeSession")).map(str::to_owned))
+        .flatten();
+    let parent_session_id = string(&v["parentSessionId"]);
+    let mut meta = RequestMeta {
+        provider,
+        native_session,
+        project: string(&v["directory"]).or_else(|| string(&v["path"]["cwd"])),
+        client: string(&v["agent"]).or_else(|| string(&v["mode"])),
+        kind: Some(
+            if v["role"] == "compaction" {
+                "compaction"
+            } else if parent_session_id.is_some() {
+                "subagent"
+            } else {
+                "main"
+            }
+            .into(),
+        ),
+        parent_session_id,
+        version: string(&v["version"]),
+        effort: string(&v["model"]["variant"]).or_else(|| string(&v["variant"])),
+        tier: string(&v["model"]["serviceTier"])
+            .or_else(|| string(&v["model"]["service_tier"]))
+            .or_else(|| string(&v["model"]["tier"]))
+            .or_else(|| string(&v["tier"])),
+        http_status: v["httpStatus"]
+            .as_u64()
+            .or_else(|| v["error"]["status"].as_u64())
+            .and_then(|value| u16::try_from(value).ok()),
+        error: RequestError::new(v["error"]["kind"].as_str(), v["error"]["message"].as_str()),
+        started_at,
+        finished_at,
+        ttft_ms,
+        ttft_scope: ttft_ms.map(|_| "request".into()),
+        stop: string(&v["finish"]),
+        scope: Some("request".into()),
+        source: Some(path.to_string_lossy().into_owned()),
+        status: (v["failed"] == true || v["failed"] == 1).then_some(RequestOutcome::Failed),
+        ..Default::default()
+    };
+    meta.duration();
+    meta.timing = meta.latency_ms.or(ttft_ms).map(|_| "recorded".into());
+    meta
+}
+
 fn read_message(v: &Value, path: &Path, id: String, session: String, time: i64) -> Option<Sample> {
-    let request = super::request_parse::opencode(v, path, time);
+    let request = request_meta(v, path, time);
     let measurement = normalize(&v["tokens"], "opencode");
     if measurement.is_none() && !request.failed() {
         return None;

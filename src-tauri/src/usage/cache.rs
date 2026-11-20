@@ -66,10 +66,10 @@ pub(super) fn covers_observations(current: &FileCache, old: &FileCache) -> bool 
 
 pub(super) fn jsonl_parser_version(agent: &str) -> u8 {
     match agent {
-        "codex" => 9,
-        "claude" => 8,
+        "codex" => 10,
+        "claude" => 9,
         "pi" => 6,
-        "qoder" => 5,
+        "qoder" => 6,
         _ => 3,
     }
 }
