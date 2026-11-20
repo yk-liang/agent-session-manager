@@ -1,12 +1,20 @@
-<img src="src/assets/brand/app-icon.svg" width="72" height="72" alt="Agent Session Manager icon">
+<p align="right">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-# Agent Session Manager
+<p align="center">
+  <img src="docs/images/hero.svg" alt="Sessions from Qoder, Claude Code, Codex, OpenCode, Pi, and Antigravity flowing into Agent Session Manager">
+</p>
 
-**English** · [简体中文](README.zh-CN.md)
+<h1 align="center">Agent Session Manager</h1>
 
-Browse local AI coding sessions, manage configuration profiles, and track usage on macOS. Supports **Qoder, Claude Code, Codex, OpenCode, Pi, and Antigravity**. The interface is in Simplified Chinese.
+<p align="center">
+  Browse local AI coding sessions, manage configuration profiles, and track usage on macOS.
+</p>
 
-[Download for macOS](https://github.com/yk-liang/agent-session-manager/releases/latest)
+<p align="center">
+  <a href="https://github.com/yk-liang/agent-session-manager/releases/latest"><img src="docs/images/download.svg" alt="Download for macOS"></a>
+</p>
 
 - **Sessions (会话)** — Browse by project or search messages. Read conversations in Markdown, jump between prompts, or resume in Terminal.
 - **Configuration (配置)** — Save profiles, preview changes before applying them, and restore backups.
@@ -20,8 +28,6 @@ Browse local AI coding sessions, manage configuration profiles, and track usage 
 ![Configuration profiles and file preview](docs/images/configuration.png)
 
 ![Usage analysis](docs/images/usage.png)
-
-![Usage by model](docs/images/models.png)
 
 </details>
 

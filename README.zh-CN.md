@@ -1,12 +1,20 @@
-<img src="src/assets/brand/app-icon.svg" width="72" height="72" alt="Agent Session Manager 图标">
+<p align="right">
+  <a href="README.md">English</a> · <strong>简体中文</strong>
+</p>
 
-# Agent Session Manager
+<p align="center">
+  <img src="docs/images/hero.svg" alt="Qoder、Claude Code、Codex、OpenCode、Pi 和 Antigravity 的会话数据汇入 Agent Session Manager">
+</p>
 
-[English](README.md) · **简体中文**
+<h1 align="center">Agent Session Manager</h1>
 
-在 macOS 上浏览本地 AI 编程会话、管理配置方案、查看用量。支持 **Qoder、Claude Code、Codex、OpenCode、Pi 和 Antigravity**，界面为简体中文。
+<p align="center">
+  在 macOS 上浏览本地 AI 编程会话、管理配置方案、查看用量。
+</p>
 
-[下载 macOS 版](https://github.com/yk-liang/agent-session-manager/releases/latest)
+<p align="center">
+  <a href="https://github.com/yk-liang/agent-session-manager/releases/latest"><img src="docs/images/download.zh-CN.svg" alt="下载 macOS 版"></a>
+</p>
 
 - **会话**可按项目浏览，也可搜索消息。支持 Markdown、对话导览和在终端恢复会话。
 - **配置**可保存方案、预览应用方案后的变更、恢复备份。
@@ -20,8 +28,6 @@
 ![配置方案和文件预览](docs/images/configuration.png)
 
 ![用量统计分析](docs/images/usage.png)
-
-![按模型统计用量](docs/images/models.png)
 
 </details>
 

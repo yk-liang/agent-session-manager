@@ -99,13 +99,13 @@ try {
   await preview.setContent(windowPreview);
   await mkdir(output, { recursive: true });
 
-  async function capture(name, target = page) {
+  async function capture(name) {
     await page.mouse.move(0, 0);
     await page.evaluate(() => document.fonts.ready);
     const text = await page.locator('body').innerText();
     assert.doesNotMatch(text, /\/Users\/(?!demo\b)[^/\s]+|sk-[a-zA-Z0-9]{10,}|[\w.+-]+@[\w.-]+\.[a-z]{2,}/, 'Unexpected private data in screenshot');
     assert.deepEqual(errors, []);
-    const screenshot = await target.screenshot({ animations: 'disabled' });
+    const screenshot = await page.screenshot({ animations: 'disabled' });
     const png = await frameScreenshot(preview, screenshot);
     const destination = path.join(output, `${name}.png`);
     await writeFile(destination, withoutMetadata(png));
@@ -125,7 +125,6 @@ try {
   await page.setViewportSize({ width: 1664, height: 1040 });
   await page.waitForFunction(() => document.querySelector('.usage-chart').clientWidth > 1400);
   await capture('usage');
-  await capture('models', page.locator('.usage-models'));
 
   await chooseAgent(page, 'codex');
   await page.getByRole('button', { name: '配置', exact: true }).click();
