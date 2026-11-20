@@ -118,6 +118,7 @@ try {
   const tierColumn = table.getByRole('columnheader', { name: '推理 / 档位', exact: true });
   assert.equal(await cacheWriteColumn.count(), 1, 'cache writes on a later page keep the column visible');
   assert.equal(await tierColumn.count(), 1, 'a tier on a later page keeps the combined heading');
+  assert.equal(await table.getByRole('columnheader', { name: '客户端', exact: true }).count(), 1);
   assert.equal(await table.locator('tbody > tr').count(), 50);
   const codex = table.locator('tbody > tr').filter({ hasText: 'gpt-codex' });
   assert.equal(await codex.locator('td').nth(7).locator('.usage-num').textContent(), '1,000');
@@ -141,8 +142,8 @@ try {
   const timing = event => table.locator(`tr[data-event-id=${JSON.stringify(event.id)}] .request-timing small`);
   assert.equal(await timing(successes[0]).textContent(), '1.67s · 3.53s');
   assert.equal(await timing(successes[1]).textContent(), '3.53s');
-  assert.equal(await codex.locator('.request-source > span').textContent(), 'Codex');
-  assert.equal(await codex.locator('.request-source > small').textContent(), 'Codex Desktop');
+  assert.equal(await codex.locator('.request-client > span').textContent(), 'Codex Desktop');
+  assert.equal(await codex.locator('.request-client > small').textContent(), '0.99.0');
   assert.equal(await codex.locator('.request-project > span').textContent(), 'codex');
   assert.equal(await codex.locator('.request-project > small').textContent(), '/fixture/codex');
   const beforeExpand = await table.locator('th').nth(5).boundingBox();
@@ -155,7 +156,7 @@ try {
   assert.match(await detailValue('请求时间').textContent(), /\d{2}:\d{2}:\d{2}\.\d{3} – .+\d{2}:\d{2}:\d{2}\.\d{3}$/);
   assert.equal(await detailValue('计时说明').textContent(), '耗时根据日志估算');
   assert.equal(await detailValue('结束原因').textContent(), 'length');
-  assert.equal(await detailValue('客户端').textContent(), 'Codex Desktop 0.99.0');
+  assert.equal(await detailValue('客户端').textContent(), await codex.locator('.request-client').getAttribute('title'));
   assert.ok(await detail.locator(':scope > div').evaluateAll(rows => {
     const boxes = rows.map(row => row.getBoundingClientRect());
     const leftEdges = rows.map(row => row.querySelector('dd').getBoundingClientRect().left);
@@ -173,12 +174,15 @@ try {
   const worker = table.locator(`tr[data-event-id=${JSON.stringify(successes[0].id)}]`);
   assert.equal(await worker.locator('.request-session-id code').textContent(), 'worker');
   assert.equal(await worker.locator('.request-tier').textContent(), 'standard');
-  assert.equal(await worker.locator('.request-source > small').textContent(), '未记录');
+  assert.equal(await worker.locator('.request-client > span').textContent(), 'Claude Code');
+  assert.equal(await worker.locator('.request-client > small').textContent(), '2.1.309');
+  const cli = table.locator(`tr[data-event-id=${JSON.stringify(successes[1].id)}] .request-client`);
+  assert.equal(await cli.locator('span').textContent(), 'Claude Code CLI');
   await worker.locator('.request-expand').click();
   assert.deepEqual((await detail.locator('dt').allTextContents()).slice(0, 4), ['请求 ID', '会话', '类型', '父会话']);
   assert.equal(await detailValue('会话').locator('code').textContent(), 'worker');
   assert.equal(await detailValue('类型').textContent(), 'agent:builtin:web-fetch');
-  assert.equal(await detailValue('客户端').textContent(), 'Claude Code 2.1.309');
+  assert.equal(await detailValue('客户端').textContent(), await worker.locator('.request-client').getAttribute('title'));
   assert.equal(await detailValue('父会话').locator('code').textContent(), 'session-one');
   assert.equal(await detailValue('项目').locator('code').textContent(), longProject);
   await assertTripleClickSelects(detailValue('项目').locator('code'), longProject);

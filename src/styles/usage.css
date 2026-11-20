@@ -568,9 +568,10 @@
   padding-right: 2px;
 }
 
-.request-model > span, .request-source > span, .request-project > span { display: block; }
+.request-model > span, .request-client > span, .request-project > span { display: block; }
+.request-client { max-width: 200px; }
 .request-project { max-width: 260px; }
-.request-project > :is(span, small) { overflow: hidden; text-overflow: ellipsis; }
+:is(.request-client, .request-project) > :is(span, small) { overflow: hidden; text-overflow: ellipsis; }
 .request-table > tbody > tr:not(.request-detail-row) > td:last-child { max-width: 220px; }
 .tip-trigger:has(.request-result[data-tone="error"]) { cursor: help; }
 .request-session-id { display: flex; align-items: center; gap: 6px; }

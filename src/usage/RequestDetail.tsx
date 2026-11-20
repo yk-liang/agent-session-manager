@@ -2,7 +2,6 @@ import type { RequestEvent, RequestMetadata } from "./types";
 import { formatDateTime } from "./format";
 import { requestErrorText } from "./metrics";
 import CopyButton from "../components/CopyButton";
-import { clientLabel } from "../utils";
 
 const routineStops = new Set(["end_turn", "stop", "tool_use", "tool-calls"]);
 
@@ -13,9 +12,9 @@ function requestTime({ startedAt, finishedAt }: RequestMetadata) {
   if (finishedAt) return `结束 ${format(finishedAt)}`;
 }
 
-export default function RequestDetail({ event, agentName, session, project, copyFeedback }: {
+export default function RequestDetail({ event, client, session, project, copyFeedback }: {
   event: RequestEvent;
-  agentName: string;
+  client: string;
   session: string;
   project: string | null;
   copyFeedback: { onCopied: () => void; onError: () => void };
@@ -28,7 +27,6 @@ export default function RequestDetail({ event, agentName, session, project, copy
     request.ttftScope === "turn" && request.ttftMs != null && "首字延迟按整轮对话计算",
   ].filter(Boolean).join("，");
   const stop = request.stop && !routineStops.has(request.stop) ? request.stop : undefined;
-  const client = clientLabel(agentName, request.client, request.version);
   const parentSession = request.parentSessionId !== session ? request.parentSessionId : undefined;
   const copyValue = (value: string, label: string) => (
     <div className="request-detail-copy">

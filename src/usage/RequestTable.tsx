@@ -5,7 +5,7 @@ import type { EventPage, RequestEvent } from "./types";
 import { formatClock, formatCount, formatDate, formatDuration, formatPercent, formatRate, formatTps, formatUsd } from "./format";
 import { costBreakdown, eventCostDisplay, requestErrorText, tokenDisplay, uncachedInputOf } from "./metrics";
 import { REQUEST_OUTCOMES } from "./trend";
-import { projectName, shortPath } from "../utils";
+import { formatClient, projectName, shortPath } from "../utils";
 import AgentIcon from "../components/AgentIcon";
 import { ProviderIcon } from "../components/BrandIcon";
 import { TipTrigger, type TooltipContent } from "./UsageTooltip";
@@ -21,7 +21,7 @@ function requestColumns(cacheWrites: boolean, serviceTiers: boolean): { label: s
     { label: "时间" },
     { label: "模型" },
     { label: serviceTiers ? "推理 / 档位" : "推理" },
-    { label: "Agent / 客户端" },
+    { label: "客户端" },
     { label: "结果" },
     { label: "TPS / 耗时" },
     { label: "输入", numeric: true },
@@ -75,7 +75,7 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
             const expanded = expandedRequestId === event.id;
             const session = request.subagentId || event.session;
             const project = request.absoluteProjectPath ?? request.project;
-            const client = request.client?.trim();
+            const client = formatClient(agentName, request.client, request.version);
             const cachePercent = event.cacheReadRecorded && event.inputRecorded && !event.inputIncomplete && event.inputTokens > 0 &&
               event.cacheReadTokens <= event.inputTokens && event.agent !== "qoder" ? (event.cacheReadTokens / event.inputTokens) * 100 : null;
             const uncached = event.agent === "qoder" ? null : uncachedInputOf(event);
@@ -89,7 +89,10 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
               <td>{event.time > 0 ? <><span>{formatClock(event.time)}</span><small>{formatDate(event.time)}</small></> : <span className="request-missing">未记录</span>}</td>
               <td className="request-model"><ModelLabel model={event.model} />{request.provider && <small title={request.provider}><ProviderIcon provider={request.provider} />{request.provider}</small>}</td>
               <td><span>{request.effort ?? "—"}</span>{tier && <small className="request-tier">{tier}</small>}</td>
-              <td className="request-source"><span><AgentIcon agent={event.agent} inline />{agentName}</span><small title={client}>{client || "未记录"}</small></td>
+              <td className="request-client" title={client.label}>
+                <span><AgentIcon agent={event.agent} inline />{client.name}</span>
+                {client.version && <small>{client.version}</small>}
+              </td>
               <td>
                 {event.status === "failed" ? (
                   <TipTrigger content={() => ({ title: "错误信息", rows: [], detail: requestErrorText(request) || "未记录错误信息" })}>
@@ -130,7 +133,7 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
               {expanded && (
                 <tr className="request-detail-row" data-event-id={event.id}>
                   <td colSpan={columns.length}>
-                    <RequestDetail event={event} agentName={agentName} session={session} project={project} copyFeedback={copyFeedback} />
+                    <RequestDetail event={event} client={client.label} session={session} project={project} copyFeedback={copyFeedback} />
                   </td>
                 </tr>
               )}

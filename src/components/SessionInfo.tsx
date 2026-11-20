@@ -4,7 +4,7 @@ import UiIcon from "./UiIcon";
 import type { SessionMeta } from "../types";
 import ModelLabel from "./ModelLabel";
 import useDismiss from "./useDismiss";
-import { clientLabel } from "../utils";
+import { formatClient } from "../utils";
 
 export default function SessionInfo({ meta, agentName, models = [] }: {
   meta: SessionMeta;
@@ -59,7 +59,7 @@ export default function SessionInfo({ meta, agentName, models = [] }: {
             )}
             <div>
               <dt>客户端</dt>
-              <dd>{clientLabel(agentName, meta.client, meta.version)}</dd>
+              <dd>{formatClient(agentName, meta.client, meta.version).label}</dd>
             </div>
             {meta.gitBranch && (
               <div>

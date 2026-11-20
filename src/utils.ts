@@ -1,12 +1,13 @@
 import type { SessionMeta } from "./types";
 
-export function clientLabel(agentName: string, client?: string | null, version?: string | null): string {
+export function formatClient(agentName: string, client?: string | null, version?: string | null) {
   const recorded = client?.trim();
   const name = !recorded ? agentName
     : recorded.toLowerCase().startsWith(agentName.toLowerCase()) ? recorded
     : recorded === "cli" ? `${agentName} CLI`
     : `${agentName} (${recorded})`;
-  return [name, version?.trim()].filter(Boolean).join(" ");
+  const release = version?.trim();
+  return { name, version: release, label: release ? `${name} ${release}` : name };
 }
 
 export function sessionKey(session: Pick<SessionMeta, "projectDir" | "sessionId">): string {
