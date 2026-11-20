@@ -54,10 +54,11 @@ CI 构建跳过访达布局。发布前重新打包 DMG，校验双架构、签�
 登录 macOS 桌面后，使用已经验证的 `.app` 打包。先创建输出目录并选用未占用的文件名。
 
 ```bash
-mkdir -p release/v0.1.39/repacked
+VERSION=0.1.40
+mkdir -p "release/v${VERSION}/repacked"
 npm run package:dmg -- \
   'src-tauri/target/universal-apple-darwin/release/bundle/macos/Agent Session Manager.app' \
-  release/v0.1.39/repacked/Agent-Session-Manager_0.1.39_universal.dmg
+  "release/v${VERSION}/repacked/Agent-Session-Manager_${VERSION}_universal.dmg"
 ```
 
 脚本用应用副本打包，校验版本和签名。首次运行可能需要授权控制访达。隐藏资源使用窗口右侧的正坐标，避免重新挂载后访达重排图标。
@@ -143,9 +144,6 @@ cargo test --release --offline --locked --lib usage::storage_bench::storage_comp
 指定本机某条分页会话做只读完整性检查：在 `src-tauri/` 中运行 `ASM_TEST_CODEX_SESSION='<会话ID>' cargo test --release --offline --locked --lib agents::codex::history_tests::real_paginated_history_is_unique_and_complete_if_present -- --exact --nocapture --test-threads=1`（将占位内容替换为实际 ID）。会话未列出或存在历史告警时测试失败，避免指定目标未命中却被当作验证通过；默认只输出文件数、消息数、事件数和告警数，不导出正文。压缩首段与两段普通续页的独立回归为 `compressed_first_page_is_restored_before_two_plain_continuations`。
 
 Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib compressed -- --test-threads=1`。覆盖压缩与普通日志混合分页、解压后字节边界、按需工具读取、追加帧和缓存刷新。归档、取消归档和删除由本机 Codex App Server 执行。可用 `cargo run --release --offline --locked --example session_perf -- --catalog-only --include-archived` 核对本机目录，输出数量和耗时。
-
-本机只读性能复测：`cd src-tauri && cargo run --release --offline --locked --example catalog_bench`。
-输出各 Agent 三轮目录耗时，不输出会话正文。
 
 ### Qoder 元数据
 

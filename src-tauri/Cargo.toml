@@ -1,6 +1,6 @@
 [package]
 name = "agent-session-manager"
-version = "0.1.39"
+version = "0.1.40"
 description = "Browse AI coding sessions, manage configuration profiles, and track token usage on macOS."
 authors = ["Agent Session Manager contributors"]
 license = "MIT"
