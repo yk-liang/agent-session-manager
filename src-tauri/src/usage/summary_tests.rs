@@ -47,7 +47,7 @@ fn sync_lock_and_database_open_reject_invalid_files_without_replacing_them() {
     fs::write(&path, bytes).unwrap();
     for error in [
         ledger::Ledger::open(Some(&path)).err().unwrap(),
-        ledger::reader(&path).err().unwrap(),
+        ledger::reader(&path, &|| false).err().unwrap(),
     ] {
         assert!(error.starts_with("无法读取用量账本版本"));
         assert!(!error.contains("PRIVATE_DATA"));
@@ -122,7 +122,7 @@ fn summary_coverage_requires_full_success_and_survives_restart() {
     // 没有日志的来源仍然需要保存完成状态，才能区分「确认 0」和「尚未读到」。
     ingest::sync_at("codex", &[dir.path().join("empty")], &mut store, &|| false).unwrap();
     drop(store);
-    let mut db = ledger::reader(&path).unwrap();
+    let mut db = ledger::reader(&path, &|| false).unwrap();
     let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
     assert_eq!(result.synced_agents, ["claude", "codex"]);
     assert_eq!(sum(&result), 110);

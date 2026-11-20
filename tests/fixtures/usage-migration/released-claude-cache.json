@@ -1,0 +1,126 @@
+{
+  "file": {
+    "failures": [],
+    "head": "f7bcaf5899ba2940594b7b39cf600ef0d1ffdaf2d57c5a4b2dbf63496456e32e",
+    "head_len": 199,
+    "offset": 199,
+    "origin_path": null,
+    "parser_version": 3,
+    "pending": false,
+    "problem": null,
+    "samples": [
+      {
+        "complete": false,
+        "copy_fingerprint": null,
+        "cumulative": false,
+        "details": {
+          "availabilityKnown": true,
+          "cacheReadRecorded": false,
+          "cacheWriteRecorded": false,
+          "inputIncomplete": false,
+          "inputRecorded": true,
+          "outputIncomplete": false,
+          "outputRecorded": true,
+          "reasoningRecorded": false
+        },
+        "key": "message:msg_cache_only",
+        "last_usage": null,
+        "model": "fixture",
+        "offset": 0,
+        "ordinal": null,
+        "partial": false,
+        "replayed": false,
+        "request": {
+          "client": null,
+          "costUsd": null,
+          "effort": null,
+          "finishedAt": 1790001600000,
+          "httpStatus": null,
+          "kind": null,
+          "latencyMs": null,
+          "project": null,
+          "provider": null,
+          "requestId": null,
+          "scope": "request",
+          "source": "/fixture/.claude/projects/deleted.jsonl",
+          "startedAt": null,
+          "status": "unknown",
+          "stop": null,
+          "tier": null,
+          "timing": null,
+          "ttftMs": null,
+          "ttftScope": null,
+          "version": "2.1.329"
+        },
+        "response_id": null,
+        "session": "retained",
+        "thread_total": null,
+        "timestamp": 1790001600000,
+        "tokens": {
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "inputTokens": 100,
+          "outputTokens": 13,
+          "reasoningTokens": 0,
+          "unclassifiedTokens": 0
+        }
+      }
+    ],
+    "stamps": [
+      {
+        "changed": 1790001600,
+        "changed_ns": 0,
+        "device": 1,
+        "inode": 1,
+        "len": 199,
+        "modified": 1790001600,
+        "modified_ns": 0
+      }
+    ],
+    "state": {
+      "bad_lines": 0,
+      "compactions": [],
+      "created_at": null,
+      "history_base": null,
+      "missing_usage": 0,
+      "model": "",
+      "parent_before": null,
+      "parent_session": null,
+      "requests": {
+        "boundary": null,
+        "claude": {},
+        "context": {
+          "client": null,
+          "costUsd": null,
+          "effort": null,
+          "finishedAt": null,
+          "httpStatus": null,
+          "kind": null,
+          "latencyMs": null,
+          "project": null,
+          "provider": null,
+          "requestId": null,
+          "scope": null,
+          "source": null,
+          "startedAt": null,
+          "status": null,
+          "stop": null,
+          "tier": null,
+          "timing": null,
+          "ttftMs": null,
+          "ttftScope": null,
+          "version": null
+        },
+        "first_offset": null,
+        "first_response": false,
+        "turn_id": "",
+        "turn_start": null
+      },
+      "saw_assistant": true,
+      "session": "retained",
+      "unmeasured_ids": []
+    },
+    "tail": "6f12e37141649e98700181fa510bf36da404cd497f242dac8e2bdf9ddf61fba4"
+  },
+  "scope": "51e6da7b14caab4aec9b14aab459969ca54281b2d3053e02558902cfc1e27eaa"
+}

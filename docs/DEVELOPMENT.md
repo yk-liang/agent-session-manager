@@ -15,7 +15,7 @@
 
 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `PI_CODING_AGENT_DIR` 可分别指定 Codex、Claude Code 和 Pi 的数据目录。`CLAUDE_CONFIG_DIR` 支持逗号分隔的配置目录。会话和用量会扫描其中已有的 `projects/`，配置页使用第一个目录。OpenCode 优先读取 `OPENCODE_DATA_DIR`，其次使用 `XDG_DATA_HOME/opencode/`。`ANTIGRAVITY_DATA_DIR` 接受数据目录或会话目录，多个路径用逗号分隔。
 
-配置方案和备份存放在 `~/.agent-session-manager/`。用量账本和缓存见[用量模块说明](../src-tauri/src/usage/README.md#存储)。
+Codex 用量采集还会只读检查 `thread_history_1.sqlite` 的模型调用失败记录。数据库目录按 `config.toml` 的 `sqlite_home`、`CODEX_SQLITE_HOME`、Codex 数据目录的顺序确定。配置方案和备份存放在 `~/.agent-session-manager/`。用量账本和缓存见[用量模块说明](../src-tauri/src/usage/README.md#存储)。
 
 ## 构建
 

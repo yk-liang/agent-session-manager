@@ -90,7 +90,7 @@ pub fn read(query: SummaryQuery, cancel: &dyn Fn() -> bool) -> Result<Summary, S
     if cancel() {
         return Err("用量查询已取消".into());
     }
-    let mut db = super::ledger::reader(&super::ledger::path()?)?;
+    let mut db = super::ledger::reader(&super::ledger::path()?, cancel)?;
     read_at(&mut db, query, cancel)
 }
 

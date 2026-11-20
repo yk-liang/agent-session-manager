@@ -71,9 +71,12 @@ fn relevant(agent: &str, roots: &[PathBuf], event: &Event) -> Changes {
     let mut paths = BTreeSet::new();
     for path in &event.paths {
         for root in roots {
-            // 根目录创建、移走或删除后重新注册监听。
-            if path == root || root.starts_with(path) {
+            if root.starts_with(path) && (root != path || !input.is_file_root(root)) {
                 return Changes::All;
+            }
+            if input.is_file_root(root) {
+                paths.extend(input.changed_file(root, path));
+                continue;
             }
             if !path.starts_with(root) {
                 continue;
@@ -145,6 +148,7 @@ fn watch(
                     queue.check = true;
                 }
                 for (id, mappings) in &mappings {
+                    let input = super::source::Source::for_agent(id);
                     let paths: Vec<_> = mappings.iter().map(|(_, p)| p.clone()).collect();
                     let mut changes = relevant(id, &paths, &event);
                     if let Changes::Paths(found) = changes {
@@ -155,7 +159,13 @@ fn watch(
                                     mappings.iter().find_map(|(original, physical)| {
                                         path.strip_prefix(physical)
                                             .ok()
-                                            .map(|relative| original.join(relative))
+                                            .map(|relative| {
+                                                if relative.as_os_str().is_empty() {
+                                                    original.clone()
+                                                } else {
+                                                    original.join(relative)
+                                                }
+                                            })
                                     })
                                 })
                                 .collect(),
@@ -165,7 +175,8 @@ fn watch(
                         queue.check |= event
                             .paths
                             .iter()
-                            .any(|path| paths.iter().any(|root| root.starts_with(path)));
+                            .any(|path| paths.iter().any(|root| root.starts_with(path)
+                                && (root != path || !input.is_file_root(root))));
                         queue.changes.entry(id.clone()).or_default().merge(changes);
                     }
                 }
@@ -652,6 +663,15 @@ mod tests {
         ));
         assert!(matches!(
             relevant("pi", &[root.clone()], &event("subagent-artifacts/a.jsonl")),
+            Changes::Empty
+        ));
+        let history = root.join(crate::usage::codex::failures::DATABASE);
+        assert!(matches!(
+            relevant("codex", &[history.clone()], &event("thread_history_1.sqlite-wal")),
+            Changes::Paths(paths) if paths == BTreeSet::from([history.clone()])
+        ));
+        assert!(matches!(
+            relevant("codex", &[history], &event("thread_history_1.sqlite-shm")),
             Changes::Empty
         ));
     }

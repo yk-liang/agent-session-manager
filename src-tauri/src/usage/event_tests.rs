@@ -44,14 +44,7 @@ pub(super) fn assert_index_matches_full(store: &mut Store, agent: &str) {
             }
         }
     }
-    let samples = normalize::records(agent, &files);
-    let expected: BTreeMap<_, _> = normalize::unique(
-        agent,
-        files
-            .values()
-            .flat_map(|f| f.failures.iter().cloned())
-            .chain(samples),
-    )
+    let expected: BTreeMap<_, _> = normalize::requests(agent, &files)
     .into_iter()
     .filter(|s| {
         s.model != "<synthetic>"
@@ -380,6 +373,67 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
 }
 
 #[test]
+fn codex_terminal_errors_merge_with_history_and_ignore_unattributed_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let rollout = sessions.join("rollout.jsonl");
+    let history = dir.path().join(codex::failures::DATABASE);
+    let t = 1_790_000_000_000i64;
+    let connection_error = json!({"message":"response failed","codex_error_info":{"http_connection_failed":{"http_status_code":503}}});
+    let mut lines = codex_lines(t);
+    lines.last_mut().unwrap()["payload"]["error"] = connection_error.clone();
+    lines.insert(lines.len() - 1, codex(t + 2050, "event_msg",
+        json!({"type":"error","message":"rate limited","codex_error_info":{"http_connection_failed":{"http_status_code":429}}})));
+    lines.insert(lines.len() - 1, codex(t + 2100, "event_msg",
+        json!({"type":"error","message":"response failed","codex_error_info":{"http_connection_failed":{"http_status_code":503}}})));
+    lines.extend([
+        codex(t + 3000, "event_msg", json!({"type":"task_started","turn_id":"rollout-only"})),
+        codex(t + 3200, "event_msg", json!({"type":"task_complete","turn_id":"rollout-only","error":connection_error})),
+        codex(t + 4000, "event_msg", json!({"type":"turn_aborted","turn_id":"cancelled","reason":"interrupted"})),
+    ]);
+    write(&rollout, &lines);
+    let db = rusqlite::Connection::open(&history).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(
+        thread_id TEXT,turn_id TEXT,completed_at INTEGER,status TEXT,error_json TEXT);").unwrap();
+    let insert = |session, turn, status, at: i64, error: Value| db.execute(
+        "INSERT INTO thread_turns VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![session, turn, at / 1000, status, error.to_string()],
+    ).unwrap();
+    let projected_error = json!({"message":"response failed","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":503}}});
+    insert("codex-session", "turn-one", "failed", t + 2200, projected_error.clone());
+    insert("removed-log", "sqlite", "failed", t + 5000, projected_error.clone());
+    insert("removed-log", "cancelled", "interrupted", t + 6000, projected_error.clone());
+    insert("removed-log", "generic", "failed", t + 7000, json!({"message":"Sandbox failed","codexErrorInfo":"other"}));
+    insert("removed-log", "http", "failed", t + 8000, json!({
+        "message":"unexpected status 400 Bad Request: provider rejected it, url: https://fixture.invalid/v1/responses",
+        "codexErrorInfo":"other"
+    }));
+    let roots = [sessions, history.clone()];
+    let mut store = Store::open(None);
+    ingest::sync_at("codex", &roots, &mut store, &|| false).unwrap();
+    let all = page(&mut store, EventQuery::default());
+    assert_eq!(all.total, 6);
+    let success = all.events.iter().find(|event| event.status == RequestOutcome::Success).unwrap();
+    assert_eq!(success.tokens.total(), 1100);
+    let failures: Vec<_> = all.events.iter().filter(|event| event.status == RequestOutcome::Failed).collect();
+    assert_eq!(failures.len(), 5);
+    assert!(failures.iter().all(|event| event.tokens.total() == 0));
+    let rollout_path = rollout.to_str();
+    assert_eq!(failures.iter().filter(|event| event.request.source.as_deref() == rollout_path).count(), 3);
+    assert!(failures.iter().all(|event| matches!(event.request.http_status, Some(400 | 429 | 503))));
+    assert_index_matches_full(&mut store, "codex");
+
+    let warm = ingest::sync_at("codex", &roots, &mut store, &|| false).unwrap();
+    assert_eq!((warm.changed_files, warm.bytes_read), (0, 0));
+    insert("removed-log", "new-wal", "failed", t + 9000, projected_error);
+    let fresh = ingest::sync_paths("codex", &roots, &mut store, Some(&BTreeSet::from([history])), &|| false).unwrap();
+    assert_eq!(fresh.changed_files, 1);
+    let updated = page(&mut store, EventQuery::default());
+    assert_eq!(updated.total, 7);
+    assert!(all.events.iter().all(|event| updated.events.iter().any(|new| new.id == event.id)));
+}
+
+#[test]
 fn request_events_codex_ignores_unchanged_counters_and_context_snapshots_for_timing() {
     let dir = tempfile::tempdir().unwrap();
     let t = 1_790_000_000_000i64;
@@ -432,7 +486,7 @@ fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
     let ledger = dir.path().join("ledger.sqlite");
     let cache_path = dir.path().join("cache.sqlite");
     let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger));
-    let (mut old, _) = cache::read_file(&path, "codex", None, false, &|| false).unwrap();
+    let (mut old, _) = source::jsonl::read(&path, "codex", None, false, &|| false).unwrap();
     old.parser_version -= 1;
 
     let bad_timing = |request: &mut request_parse::RequestMeta| {

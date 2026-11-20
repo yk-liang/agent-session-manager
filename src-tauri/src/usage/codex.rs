@@ -8,9 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
+pub(super) mod failures;
+
 pub(in crate::usage) const BOUNDARY_ESTIMATE: &str = "codex_boundary";
 pub(super) const COUNTER_BASELINE: &str = "counter_baseline";
-pub(super) const FORK_METADATA_VERSION: u8 = 9;
+// 解析版本 4 首次区分分叉历史与子代理归属。
+pub(super) const FORK_METADATA_VERSION: u8 = 4;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -135,8 +138,10 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                     state.context.tier = string(tier);
                 }
             }
-            Some("task_complete") if p["turn_id"].as_str() == Some(state.turn_id.as_str()) => {
-                if let Some(ttft) = p["time_to_first_token_ms"].as_i64().filter(|t| *t > 0) {
+            Some("task_complete") => {
+                let turn = text(p.get("turn_id"));
+                let current = turn == Some(state.turn_id.as_str());
+                if let Some(ttft) = p["time_to_first_token_ms"].as_i64().filter(|t| current && *t > 0) {
                     if let Some(sample) = file.samples.iter_mut().rev().find(|s| {
                         state
                             .first_request
@@ -159,6 +164,21 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                         }
                     }
                 }
+                let finished_at = time.or_else(|| at(&p["completed_at"]));
+                if let Some(mut failure) = turn.and_then(|turn| failures::terminal(
+                    &file.state.session, turn, codex_model_or_unknown(&file.state.model),
+                    &p["error"], finished_at, offset,
+                )) {
+                    let mut request = state.context.clone();
+                    request.merge(&failure.request);
+                    request.finished_at = finished_at;
+                    failure.request = request;
+                    failure.request.source = Some(path.to_string_lossy().into_owned());
+                    file.failures.push(failure);
+                }
+                if current {
+                    state.turn_id.clear();
+                }
             }
             Some("error") => {
                 let key = format!(
@@ -175,19 +195,8 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                     offset,
                 );
                 failure.request = state.context.clone();
-                failure.request.status = Some(RequestOutcome::Failed);
-                failure.request.error = RequestError::new(
-                    p["codex_error_info"].as_str().or_else(|| {
-                        p["codex_error_info"]
-                            .as_object()?
-                            .keys()
-                            .next()
-                            .map(String::as_str)
-                    }),
-                    p["message"].as_str(),
-                );
-                // 工具或连接错误可能缺少请求耗时和计量。
-                failure.request.scope = Some("error".into());
+                let turn = text(p.get("turn_id")).or_else(|| (!state.turn_id.is_empty()).then_some(state.turn_id.as_str()));
+                failures::assign(&mut failure, turn, p);
                 failure.request.source = Some(path.to_string_lossy().into_owned());
                 file.failures.push(failure);
             }

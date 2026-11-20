@@ -1,5 +1,5 @@
 //! 删除前仅保存本次会被移除的日志；不把其他活跃会话的同步放进删除等待链路。
-use super::{cache, source_error, Store};
+use super::{source, source_error, Store};
 use crate::agents::{verify_within_root, TargetKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +12,7 @@ fn snapshot(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
-) -> Result<BTreeMap<PathBuf, cache::Stamp>, String> {
+) -> Result<BTreeMap<PathBuf, source::Stamp>, String> {
     if targets.is_empty() {
         return Err("缺少待删会话文件，已中止删除".into());
     }
@@ -60,7 +60,7 @@ fn snapshot(
                 .ok_or("待删用量文件越出数据目录，已中止删除")?;
             // 状态目录里的日志也逐个验证；不能跟随子目录中的链接读到范围外的用量。
             verify_within_root(root, &path, TargetKind::File)?;
-            let stamp = cache::stamp(&path).map_err(|e| source_error(&path, e))?;
+            let stamp = source::stamp(&path).map_err(|e| source_error(&path, e))?;
             Ok((path, stamp))
         })
         .collect()

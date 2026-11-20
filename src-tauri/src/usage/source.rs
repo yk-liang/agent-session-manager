@@ -1,8 +1,47 @@
-use super::{antigravity, cache, opencode};
+use super::{antigravity, cache::FileCache, codex::failures, opencode};
+use serde::{Deserialize, Serialize};
 use std::{
-    fs::FileType,
+    fs::{self, FileType},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
+
+pub(super) mod jsonl;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(super) struct Stamp {
+    pub len: u64,
+    modified: i64,
+    modified_ns: i64,
+    inode: u64,
+    device: u64,
+    changed: i64,
+    changed_ns: i64,
+}
+pub(super) fn stamp(path: &Path) -> std::io::Result<Stamp> {
+    let m = fs::metadata(path)?;
+    if !m.is_file() {
+        return Err(std::io::Error::other("Source is not a regular file"));
+    }
+    Ok(Stamp {
+        len: m.len(),
+        modified: m.mtime(),
+        modified_ns: m.mtime_nsec(),
+        inode: m.ino(),
+        device: m.dev(),
+        changed: m.ctime(),
+        changed_ns: m.ctime_nsec(),
+    })
+}
+pub(super) fn sqlite_stamps(path: &Path) -> std::io::Result<Vec<Stamp>> {
+    let mut stamps = vec![stamp(path)?];
+    match stamp(&crate::agents::scanning::sqlite_wal_path(path)) {
+        Ok(value) => stamps.push(value),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(stamps)
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Source<'a> {
@@ -18,6 +57,11 @@ impl<'a> Source<'a> {
             "antigravity" => Self::Antigravity,
             _ => Self::JsonLines(agent),
         }
+    }
+
+    pub(super) fn is_file_root(self, path: &Path) -> bool {
+        matches!(self, Self::JsonLines("codex"))
+            && path.file_name().is_some_and(|name| name == failures::DATABASE)
     }
 
     fn accepts(self, name: &str) -> bool {
@@ -55,6 +99,10 @@ impl<'a> Source<'a> {
     }
 
     pub(super) fn changed_file(self, root: &Path, path: &Path) -> Option<PathBuf> {
+        if self.is_file_root(root) {
+            return (path == root || path == crate::agents::scanning::sqlite_wal_path(root))
+                .then(|| root.to_path_buf());
+        }
         let name = path.file_name()?.to_string_lossy();
         if self.accepts_path(root, path, &name) {
             return Some(path.to_path_buf());
@@ -68,38 +116,47 @@ impl<'a> Source<'a> {
             .then_some(database_path)
     }
 
-    pub(super) fn parser_version(self) -> u8 {
+    pub(super) fn parser_version(self, path: &Path) -> u8 {
+        if self.is_file_root(path) {
+            return failures::PARSER_VERSION;
+        }
         match self {
-            Self::JsonLines(agent) => cache::jsonl_parser_version(agent),
+            Self::JsonLines(_) => jsonl::PARSER_VERSION,
             Self::OpenCode => opencode::PARSER_VERSION,
             Self::Antigravity => antigravity::PARSER_VERSION,
         }
     }
 
-    pub(super) fn stamps(self, path: &Path) -> std::io::Result<Vec<cache::Stamp>> {
+    pub(super) fn stamps(self, path: &Path) -> std::io::Result<Vec<Stamp>> {
+        if self.is_file_root(path) {
+            return sqlite_stamps(path);
+        }
         match self {
-            Self::JsonLines(_) => cache::stamp(path).map(|stamp| vec![stamp]),
+            Self::JsonLines(_) => stamp(path).map(|stamp| vec![stamp]),
             Self::OpenCode if self.legacy_opencode(path) => {
-                cache::stamp(path).map(|stamp| vec![stamp])
+                stamp(path).map(|stamp| vec![stamp])
             }
-            _ => cache::sqlite_stamps(path),
+            _ => sqlite_stamps(path),
         }
     }
 
     pub(super) fn read(
         self,
         path: &Path,
-        old: Option<&cache::FileCache>,
+        old: Option<&FileCache>,
         force: bool,
         cancel: &dyn Fn() -> bool,
-    ) -> Result<(cache::FileCache, u64), String> {
+    ) -> Result<(FileCache, u64), String> {
+        if self.is_file_root(path) {
+            return failures::read(path, old, force, cancel);
+        }
         match self {
-            Self::JsonLines(agent) => cache::read_file(path, agent, old, force, cancel),
+            Self::JsonLines(agent) => jsonl::read(path, agent, old, force, cancel),
             Self::OpenCode if self.legacy_opencode(path) => {
                 let stamps = self.stamps(path).map_err(|error| error.to_string())?;
                 if !force
                     && old.is_some_and(|old| {
-                        old.parser_version == self.parser_version() && old.stamps == stamps
+                        old.parser_version == self.parser_version(path) && old.stamps == stamps
                     })
                 {
                     return Ok((old.unwrap().clone(), 0));

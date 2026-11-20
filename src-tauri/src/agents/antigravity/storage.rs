@@ -1,6 +1,7 @@
 use super::proto::Message;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
-use std::{error::Error, fmt::Write, fs, os::unix::fs::MetadataExt, path::Path, time::Duration};
+use crate::agents::scanning::sqlite_snapshot;
+use rusqlite::{Connection, OptionalExtension};
+use std::{error::Error, path::Path};
 
 pub(crate) const USER_PROMPT: i64 = 14;
 pub(crate) const MODEL_RESPONSE: i64 = 15;
@@ -18,47 +19,11 @@ pub(crate) struct StepColumns {
     pub error: &'static str,
 }
 
-fn open(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
-    let connection = Connection::open_with_flags(path, flags)?;
-    connection.busy_timeout(Duration::from_millis(300))?;
-    connection.execute_batch("BEGIN")?;
-    // SQLite 延迟到第一次读取才打开 WAL，提前确认可读并固定快照。
-    connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    Ok(connection)
-}
-
-fn immutable_uri(path: &Path) -> String {
-    let mut uri = String::from("file:");
-    for &byte in path.as_os_str().as_encoded_bytes() {
-        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
-            uri.push(char::from(byte));
-        } else {
-            write!(uri, "%{byte:02X}").unwrap();
-        }
-    }
-    uri.push_str("?immutable=1");
-    uri
-}
-
-fn revision(meta: fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
-    (
-        meta.dev(),
-        meta.ino(),
-        meta.len(),
-        meta.mtime(),
-        meta.mtime_nsec(),
-        meta.ctime(),
-        meta.ctime_nsec(),
-    )
-}
-
 pub(crate) fn read<T>(
     path: &Path,
     load: impl FnOnce(&Connection, Schema) -> ReadResult<T>,
 ) -> Result<T, String> {
-    snapshot(path, |connection| {
+    sqlite_snapshot(path, |connection| {
         let steps = if has_table(connection, "steps")? {
             let stmt = connection.prepare("SELECT * FROM steps LIMIT 0")?;
             let columns = stmt.column_names();
@@ -77,27 +42,6 @@ pub(crate) fn read<T>(
         load(connection, schema)
     })
     .map_err(|error| format!("读取 Antigravity 会话库 {} 失败：{error}", path.display()))
-}
-
-pub(super) fn snapshot<T>(path: &Path, load: impl FnOnce(&Connection) -> ReadResult<T>) -> ReadResult<T> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let error = match open(path, flags) {
-        Ok(connection) => return load(&connection),
-        Err(error) => error,
-    };
-    let wal = crate::agents::scanning::sqlite_wal_path(path);
-    if error.sqlite_error_code() != Some(ErrorCode::CannotOpen) || wal.try_exists()? {
-        return Err(error.into());
-    }
-    // 旧会话可能保留 WAL 模式的库头，但已无 WAL 文件。只在主库静止时读取。
-    let before = revision(fs::metadata(path)?);
-    let uri = immutable_uri(path);
-    let connection = open(Path::new(&uri), flags | OpenFlags::SQLITE_OPEN_URI)?;
-    let result = load(&connection)?;
-    if wal.try_exists()? || revision(fs::metadata(path)?) != before {
-        return Err("会话库正在写入，请刷新后重试".into());
-    }
-    Ok(result)
 }
 
 fn has_table(connection: &Connection, name: &str) -> rusqlite::Result<bool> {

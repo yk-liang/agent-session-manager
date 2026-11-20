@@ -79,7 +79,7 @@ fn cold_start_queries_do_not_rebuild_pending_indexes() {
 fn cold_start_missing_ledger_is_empty_and_reading_never_creates_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("not-created/ledger.sqlite");
-    let mut db = ledger::reader(&path).unwrap();
+    let mut db = ledger::reader(&path, &|| false).unwrap();
     assert_eq!(
         events::page(&mut db, Default::default(), &|| false)
             .unwrap()
@@ -226,7 +226,7 @@ fn cold_start_large_import_is_queryable_and_restart_reads_no_unchanged_logs() {
     let mut slowest = Duration::ZERO;
     while !done.load(Ordering::SeqCst) && !worker.is_finished() {
         let query_started = Instant::now();
-        let mut db = ledger::reader(&path).unwrap();
+        let mut db = ledger::reader(&path, &|| false).unwrap();
         let page = events::page(&mut db, Default::default(), &|| false).unwrap();
         assert!(
             page.total == 0 || page.total == 32768,
@@ -252,7 +252,7 @@ fn cold_start_large_import_is_queryable_and_restart_reads_no_unchanged_logs() {
     assert!(queries > 1);
     assert!(slowest < Duration::from_secs(2));
     let cold_ms = started.elapsed().as_millis();
-    let mut db = ledger::reader(&path).unwrap();
+    let mut db = ledger::reader(&path, &|| false).unwrap();
     assert_eq!(
         events::page(&mut db, Default::default(), &|| false)
             .unwrap()

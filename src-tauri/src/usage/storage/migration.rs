@@ -1,7 +1,10 @@
 use super::{decode, encode, MigrationResult, SOURCES};
 use crate::usage::{cache::FileCache, events::RequestEvent, request_parse::codex_client_kind};
 use rusqlite::{params, Connection};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+pub(in crate::usage) mod released_cache;
 
 // v0.1.33–v0.1.37 使用文本 JSON 与路径关联来源。
 pub(super) fn upgrade_v4(db: &Connection) -> MigrationResult {
@@ -30,11 +33,12 @@ pub(super) fn upgrade_v4(db: &Connection) -> MigrationResult {
     }
     db.execute_batch(
         "INSERT INTO usage_source_keys
-            SELECT (SELECT s.id FROM usage_ledger_sources s WHERE s.agent=k.agent AND s.path=k.path),k.key
-            FROM old_source_keys k;
+            SELECT s.id,k.key FROM old_source_keys k
+            JOIN usage_ledger_sources s ON s.agent=k.agent AND s.path=k.path;
         INSERT INTO usage_request_events
-            SELECT e.id,e.agent,e.time,e.model,e.status,e.data,CASE WHEN e.source='' THEN 0 ELSE s.id END
-            FROM old_request_events e LEFT JOIN usage_ledger_sources s ON s.agent=e.agent AND s.path=e.source;
+            SELECT e.id,e.agent,e.time,e.model,e.status,e.data,COALESCE(s.id,0)
+            FROM old_request_events e LEFT JOIN usage_ledger_sources s
+            ON e.source<>'' AND s.agent=e.agent AND s.path=e.source;
         DROP TABLE old_source_keys;
         DROP TABLE old_request_events;
         DROP TABLE old_ledger_sources;
@@ -59,7 +63,7 @@ pub(super) fn upgrade_v5(db: &Connection) -> MigrationResult {
     normalize_events(db)
 }
 
-fn normalize_source(agent: &str, file: &mut Value) -> MigrationResult {
+fn normalize_source(agent: &str, file: &mut Value) -> MigrationResult<FileCache> {
     file.as_object_mut().ok_or("无效的用量来源")?.remove("problem");
     for field in ["samples", "failures"] {
         for sample in file.get_mut(field).and_then(Value::as_array_mut).into_iter().flatten() {
@@ -81,8 +85,7 @@ fn normalize_source(agent: &str, file: &mut Value) -> MigrationResult {
     if let Some(context) = file.pointer_mut("/state/requests/context") {
         normalize_request(agent, context);
     }
-    serde_json::from_value::<FileCache>(file.clone())?;
-    Ok(())
+    Ok(FileCache::deserialize(&*file)?)
 }
 
 fn normalize_events(db: &Connection) -> MigrationResult {
@@ -108,7 +111,7 @@ fn normalize_events(db: &Connection) -> MigrationResult {
         if normalize_request(&agent, &mut event["request"]) {
             event["outputTps"] = Value::Null;
         }
-        let event_data: RequestEvent = serde_json::from_value(event.clone())?;
+        let event_data = RequestEvent::deserialize(&event)?;
         update.execute(params![
             event_data.status.as_str(),
             event_data.model,

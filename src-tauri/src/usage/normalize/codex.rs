@@ -120,7 +120,7 @@ fn merged_observations(sources: &[(&PathBuf, &FileCache)]) -> Option<Vec<Sample>
     let mut incoming = Vec::<usize>::new();
     for (_, file) in sources {
         let mut previous: Option<usize> = None;
-        for (id, sample) in ledger::observation_ids(&file.samples)
+        for (id, sample) in ledger::sources::observation_ids(&file.samples)
             .into_iter()
             .zip(&file.samples)
         {

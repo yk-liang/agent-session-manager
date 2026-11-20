@@ -277,7 +277,7 @@ pub fn read(query: EventQuery, cancel: &dyn Fn() -> bool) -> Result<EventPage, S
     if cancel() {
         return Err("请求记录读取已取消".into());
     }
-    let mut db = super::ledger::reader(&super::ledger::path()?)?;
+    let mut db = super::ledger::reader(&super::ledger::path()?, cancel)?;
     page(&mut db, query, cancel)
 }
 

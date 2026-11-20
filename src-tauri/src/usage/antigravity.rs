@@ -16,7 +16,7 @@ use std::{
 mod reconcile;
 
 pub(super) use reconcile::records;
-pub(super) const PARSER_VERSION: u8 = 5;
+pub(super) const PARSER_VERSION: u8 = 1;
 
 const MODEL_ERROR: i64 = 17;
 
@@ -317,7 +317,7 @@ pub(super) fn read(
     force: bool,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
-    let stamps = super::cache::sqlite_stamps(path).map_err(|error| error.to_string())?;
+    let stamps = super::source::sqlite_stamps(path).map_err(|error| error.to_string())?;
     if !force {
         if let Some(old) = old.filter(|old| {
             old.parser_version == PARSER_VERSION && old.stamps == stamps

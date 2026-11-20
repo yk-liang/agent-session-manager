@@ -98,17 +98,17 @@ pub(super) fn physical_id(path: &Path) -> String {
         .to_owned()
 }
 
-fn canonical_key(agent: &str, key: &str) -> String {
+pub(super) fn canonical_key<'a>(agent: &str, key: &'a str) -> std::borrow::Cow<'a, str> {
     if matches!(agent, "claude" | "qoder") {
         if let Some((prefix, id)) = key.rsplit_once(':') {
             if (prefix.starts_with("session:") || prefix.starts_with("request:"))
                 && (id.starts_with("resp_") || super::claude::is_global_message_id(id))
             {
-                return format!("message:{id}");
+                return format!("message:{id}").into();
             }
         }
     }
-    key.to_owned()
+    key.into()
 }
 
 fn resolved_parent(origin: &Path, parent: &str) -> PathBuf {
@@ -226,9 +226,18 @@ pub(super) fn records(agent: &str, files: &BTreeMap<PathBuf, FileCache>) -> Vec<
                 .values()
                 .flat_map(|file| file.samples.iter().cloned())
                 .map(|mut sample| {
-                    sample.key = canonical_key(agent, &sample.key);
+                    sample.key = canonical_key(agent, &sample.key).into_owned();
                     sample
                 }),
         ),
     }
+}
+
+pub(super) fn requests(agent: &str, files: &BTreeMap<PathBuf, FileCache>) -> Vec<Sample> {
+    let failures = if agent == "codex" {
+        super::codex::failures::reconcile(files)
+    } else {
+        files.values().flat_map(|file| file.failures.iter().cloned()).collect()
+    };
+    unique(agent, failures.into_iter().chain(records(agent, files)))
 }

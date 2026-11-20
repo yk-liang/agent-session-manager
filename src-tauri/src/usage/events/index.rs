@@ -116,14 +116,15 @@ pub(in crate::usage) fn refresh(
                 return Err("请求记录读取已取消".into());
             }
             let (path, file) = row.map_err(|_| "无法读取请求记录来源")?;
-            crate::usage::ledger::source_keys(&tx, agent, &PathBuf::from(path), &file)?;
+            crate::usage::ledger::sources::source_keys(&tx, agent, &PathBuf::from(path), &file)?;
         }
         tx.execute(
             "UPDATE usage_ledger_sources SET dirty=1 WHERE agent=?1",
             [agent],
         )
         .map_err(|_| "无法升级请求来源索引")?;
-        tx.execute("DELETE FROM usage_request_events WHERE agent=?1", [agent])
+        // 没有来源的发布版历史无法从观测重建，保留原请求 ID，存在同 ID 时由新记录更新。
+        tx.execute("DELETE FROM usage_request_events WHERE agent=?1 AND source<>0", [agent])
             .map_err(|_| "无法升级请求记录索引")?;
     }
     loop {
@@ -137,16 +138,16 @@ pub(in crate::usage) fn refresh(
             .map_err(|_| "无法读取变化来源")?;
         let Some(seed) = seed else { break };
         let mut files = BTreeMap::<PathBuf, FileCache>::new();
-        // 共享请求 ID、分页或父子关系的来源一起归并；无关会话的 data 不会被读取。
+        // 从已知来源沿身份键扩展。CROSS JOIN 固定连接顺序，让 SQLite 先按来源查键，再按键查关联来源。
         let mut statement = tx
             .prepare(
                 "WITH RECURSIVE affected(id) AS (
             SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2 UNION
             SELECT b.source FROM affected a
-            JOIN usage_source_keys k ON k.source=a.id
-            JOIN usage_source_keys b ON b.key=k.key
+            CROSS JOIN usage_source_keys k ON k.source=a.id
+            CROSS JOIN usage_source_keys b ON b.key=k.key
             JOIN usage_ledger_sources related ON related.id=b.source AND related.agent=?1
-        ) SELECT s.path,s.data FROM affected a JOIN usage_ledger_sources s
+        ) SELECT s.path,s.data FROM affected a CROSS JOIN usage_ledger_sources s
             ON s.id=a.id ORDER BY s.path",
             )
             .map_err(|_| "无法查询相关会话")?;
@@ -189,14 +190,7 @@ fn update_sources(
     files: &BTreeMap<PathBuf, FileCache>,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(), String> {
-    let samples = normalize::records(agent, files);
-    let samples = normalize::unique(
-        agent,
-        files
-            .values()
-            .flat_map(|f| f.failures.iter().cloned())
-            .chain(samples),
-    );
+    let samples = normalize::requests(agent, files);
     let owner = files.keys().next().ok_or("请求来源为空")?.to_string_lossy();
     let owner_id: i64 = tx
         .query_row(

@@ -1,5 +1,6 @@
 use super::{
-    cache::{sqlite_stamps, FileCache},
+    cache::FileCache,
+    source::sqlite_stamps,
     parse::{normalize, recorded_fields, text, timestamp},
     request_parse::{at, elapsed_ms, string, RequestError, RequestMeta, RequestOutcome},
     types::*,
@@ -12,7 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const PARSER_VERSION: u8 = 12;
+// v0.1.33–v0.1.39 发布的 OpenCode SQLite 解析版本为 4。
+pub(super) const PARSER_VERSION: u8 = 5;
 
 struct ForkBoundary {
     parent: String,
@@ -52,7 +54,7 @@ pub(super) fn read(
     force: bool,
     cancel: &dyn Fn() -> bool,
 ) -> Result<(FileCache, u64), String> {
-    let force = force || old.is_some_and(|old| old.parser_version < PARSER_VERSION);
+    let force = force || old.is_some_and(|old| old.parser_version != PARSER_VERSION);
     let stamps = sqlite_stamps(path).map_err(|e| e.to_string())?;
     if !force && old.is_some_and(|old| old.stamps == stamps) {
         return Ok((old.unwrap().clone(), 0));
@@ -272,7 +274,7 @@ fn read_message(v: &Value, path: &Path, id: String, session: String, time: i64) 
 
 pub(super) fn read_legacy(
     path: &Path,
-    stamps: Vec<super::cache::Stamp>,
+    stamps: Vec<super::source::Stamp>,
 ) -> Result<(FileCache, u64), String> {
     let mut result = FileCache {
         parser_version: PARSER_VERSION,

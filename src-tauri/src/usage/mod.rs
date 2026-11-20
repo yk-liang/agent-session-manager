@@ -55,7 +55,7 @@ struct ReportSnapshot {
     scope: String,
     revision: cache::StoreRevision,
     timezone: String,
-    sources: BTreeMap<PathBuf, Vec<cache::Stamp>>,
+    sources: BTreeMap<PathBuf, Vec<source::Stamp>>,
     readable: bool,
     report: UsageReport,
 }
@@ -89,7 +89,7 @@ fn timezone_key() -> String {
 fn unchanged_sources(
     agent: &str,
     roots: &[PathBuf],
-    sources: &BTreeMap<PathBuf, Vec<cache::Stamp>>,
+    sources: &BTreeMap<PathBuf, Vec<source::Stamp>>,
     cancel: &dyn Fn() -> bool,
 ) -> Result<bool, String> {
     let input = Source::for_agent(agent);
@@ -123,7 +123,11 @@ pub fn roots(agent: &str) -> Result<Vec<PathBuf>, String> {
     Ok(match agent {
         "claude" => crate::agents::claude::project_roots(),
         "qoder" => vec![root.join("projects")],
-        "codex" => vec![root.join("sessions"), root.join("archived_sessions")],
+        "codex" => vec![
+            root.join("sessions"),
+            root.join("archived_sessions"),
+            codex::failures::database(&root),
+        ],
         "pi" => vec![root.join("sessions")],
         _ => vec![root],
     })
@@ -199,6 +203,13 @@ fn discover(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && roots.contains(&dir) => continue,
             Err(e) => return Err(source_error(&dir, e)),
         }
+        if dir == *root && input.is_file_root(&dir) {
+            if dir.is_file() {
+                found.insert(dir);
+                continue;
+            }
+            return Err(source_error(&dir, "Codex 历史数据库必须是普通文件"));
+        }
         let canonical = dir
             .canonicalize()
             .map_err(|e| source_error(&dir, e))?;
@@ -238,6 +249,10 @@ pub(crate) fn read_at(
 ) -> Result<Option<UsageReport>, String> {
     if cancel() {
         return Err("统计已取消".into());
+    }
+    if refresh {
+        // 直接生成测试报表时，解析缓存不可用仍可从现存日志统计。
+        let _ = store.recover_released_cache(agent, roots, cancel);
     }
     let started = Instant::now();
     let input = Source::for_agent(agent);
@@ -316,9 +331,9 @@ pub(crate) fn read_at(
     if cancel() {
         return Err("统计已取消".into());
     }
-    readable &= files.values().all(|file| file.parser_version >= input.parser_version());
+    readable &= files.iter().all(|(path, file)| file.parser_version >= input.parser_version(path));
     let incoming = changed.iter().map(|path| (path.clone(), files[path].clone())).collect();
-    ledger::absorb(agent, &mut history, &incoming, &mut recorded);
+    ledger::sources::absorb(agent, &mut history, &incoming, &mut recorded);
     let records = normalize::records(agent, &history);
     let measured = history.values().filter(|f| !f.samples.is_empty()).count();
     let mut partial = !readable || history.values().any(|file| file.pending);

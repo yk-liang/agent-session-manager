@@ -21,6 +21,7 @@ pub(super) fn collect(
     paths: Option<&BTreeSet<PathBuf>>,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Ingested, String> {
+    store.recover_released_cache(agent, roots, cancel)?;
     collect_with_progress(agent, roots, store, paths, cancel, &|_, _| {})
 }
 
@@ -62,7 +63,7 @@ pub(super) fn collect_with_progress(
         let stamps = input
             .stamps(path)
             .map_err(|error| source_error(path, error))?;
-        if store.ledger()?.unchanged(agent, path, &stamps, input.parser_version())? {
+        if store.ledger()?.unchanged(agent, path, &stamps, input.parser_version(path))? {
             continue;
         }
         let old = store.load_file(&key, path);
@@ -72,7 +73,7 @@ pub(super) fn collect_with_progress(
         let incoming = BTreeMap::from([(path.clone(), file)]);
         let mut history = BTreeMap::new();
         let mut recorded = BTreeSet::new();
-        ledger::absorb(agent, &mut history, &incoming, &mut recorded);
+        ledger::sources::absorb(agent, &mut history, &incoming, &mut recorded);
         // 每份来源解析后立即持久化，后面的大文件/失败不能阻止已读计量入账。
         // commit 在事务内合并该来源；无需加载另外数万条历史或保留正文。
         let at = chrono::Utc::now().timestamp_millis();
@@ -144,6 +145,7 @@ pub(super) fn sync_with_store(
         })
     };
     report("discovering", 0, None);
+    let recovery = store.recover_released_cache(agent, roots, cancel);
     // 即使稍后的文件不可读，也先把本轮已经入账的部分转成持久请求事件。
     let collected = collect_with_progress(agent, roots, store, paths, cancel, &|done, total| {
         report("reading", done, Some(total))
@@ -152,6 +154,7 @@ pub(super) fn sync_with_store(
         report("indexing", 0, None);
         events::refresh(&mut store.ledger()?.db, agent, cancel)?;
     }
+    recovery?;
     let result = collected?;
     if cancel() {
         return Err("采集已停止".into());

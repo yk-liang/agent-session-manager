@@ -1,15 +1,78 @@
 //! 会话日志的扫描、读取与诊断。
 
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 use serde_json::Value;
+use std::fmt::Write;
 use std::fs;
 use std::io::{Error, ErrorKind};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::time::Duration;
 
 pub(crate) fn sqlite_wal_path(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push("-wal");
     path.with_file_name(name)
+}
+
+fn open_sqlite_snapshot(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    let connection = Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(Duration::from_millis(300))?;
+    connection.execute_batch("BEGIN")?;
+    // SQLite 延迟到第一次读取才打开 WAL，提前确认可读并固定快照。
+    connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    Ok(connection)
+}
+
+fn immutable_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            write!(uri, "%{byte:02X}").unwrap();
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
+}
+
+fn sqlite_revision(meta: fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    (
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    )
+}
+
+pub(crate) fn sqlite_snapshot<T>(
+    path: &Path,
+    load: impl FnOnce(&Connection) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let error = match open_sqlite_snapshot(path, flags) {
+        Ok(connection) => return load(&connection),
+        Err(error) => error,
+    };
+    let wal = sqlite_wal_path(path);
+    if error.sqlite_error_code() != Some(ErrorCode::CannotOpen) || wal.try_exists()? {
+        return Err(error.into());
+    }
+    // 旧会话可能保留 WAL 模式的库头，但已无 WAL 文件。只在主库静止时读取。
+    let before = sqlite_revision(fs::metadata(path)?);
+    let uri = immutable_uri(path);
+    let connection = open_sqlite_snapshot(Path::new(&uri), flags | OpenFlags::SQLITE_OPEN_URI)?;
+    let result = load(&connection)?;
+    if wal.try_exists()? || sqlite_revision(fs::metadata(path)?) != before {
+        return Err("会话库正在写入，请刷新后重试".into());
+    }
+    Ok(result)
 }
 
 /// 以「非阻塞 + 普通文件复核」方式打开 JSONL 转录，供所有会话解析器共用。

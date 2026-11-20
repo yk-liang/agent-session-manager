@@ -409,20 +409,20 @@ fn two_collectors_merge_stale_source_snapshots_without_overwriting_recorded_call
     let mut a_changed = BTreeSet::new();
     let mut b_changed = BTreeSet::new();
     write(&path, &[family("msg_a", Some(counters(10, 1)))]);
-    let source_a = cache::read_file(&path, "claude", None, false, &|| false)
+    let source_a = source::jsonl::read(&path, "claude", None, false, &|| false)
         .unwrap()
         .0;
-    ledger::absorb(
+    ledger::sources::absorb(
         "claude",
         &mut a,
         &BTreeMap::from([(path.clone(), source_a)]),
         &mut a_changed,
     );
     write(&path, &[family("msg_b", Some(counters(20, 2)))]);
-    let source_b = cache::read_file(&path, "claude", None, false, &|| false)
+    let source_b = source::jsonl::read(&path, "claude", None, false, &|| false)
         .unwrap()
         .0;
-    ledger::absorb(
+    ledger::sources::absorb(
         "claude",
         &mut b,
         &BTreeMap::from([(path, source_b)]),
@@ -681,7 +681,7 @@ fn cached_read_before_refresh_cannot_bypass_extraction_upgrade_for_unchanged_log
     write(&path, &[response]);
     let cache_path = dir.path().join("cache.sqlite");
     let mut writer = Store::open(Some(&cache_path));
-    let mut old = cache::read_file(&path, "claude", None, false, &|| false)
+    let mut old = source::jsonl::read(&path, "claude", None, false, &|| false)
         .unwrap()
         .0;
     old.parser_version = 0;
@@ -690,7 +690,7 @@ fn cached_read_before_refresh_cannot_bypass_extraction_upgrade_for_unchanged_log
     old.samples[0].partial = true;
     let mut history = BTreeMap::new();
     let mut changed = BTreeSet::new();
-    ledger::absorb("claude", &mut history, &BTreeMap::from([(path, old)]), &mut changed);
+    ledger::sources::absorb("claude", &mut history, &BTreeMap::from([(path, old)]), &mut changed);
     writer.ledger().unwrap().commit("claude", &history, &changed, 1).unwrap();
     drop(writer);
     let mut store = Store::open(Some(&cache_path));
@@ -1245,7 +1245,7 @@ fn codex_legacy_ledger_parents_do_not_shadow_newer_page_baselines() {
         let parent = logs.join(format!("rollout-{id}.jsonl"));
         write(&parent, &[meta("original"), counter(100, 0, 1)]);
         let mut store = Store::open(None);
-        let old = cache::read_file(&parent, "codex", None, false, &|| false)
+        let old = source::jsonl::read(&parent, "codex", None, false, &|| false)
             .unwrap()
             .0;
         let legacy = parent
@@ -1618,7 +1618,7 @@ fn codex_rewritten_prefix_requires_parent_evidence() {
     let log = dir.path().join("guardian.jsonl");
     write(&log, &[header, meta("parent"), calls[0].clone(), calls[1].clone()]);
     assert_eq!(total(&scan("codex", dir.path(), &mut store)), 222);
-    let file = cache::read_file(&log, "codex", None, false, &|| false).unwrap().0;
+    let file = source::jsonl::read(&log, "codex", None, false, &|| false).unwrap().0;
     assert_eq!(file.state.session, "guardian");
     assert!(file.samples.iter().all(|sample| {
         sample.session == "guardian"

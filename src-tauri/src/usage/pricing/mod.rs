@@ -391,7 +391,7 @@ pub fn global() -> &'static Pricer {
 }
 
 pub fn list_model_prices(agent: Option<&str>) -> Result<ModelPricesResponse, String> {
-    let db = super::ledger::reader(&super::ledger::path()?)?;
+    let db = super::ledger::reader(&super::ledger::path()?, &|| false)?;
     global().list_model_prices_from_db(&db, agent)
 }
 

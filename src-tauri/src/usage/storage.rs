@@ -4,6 +4,8 @@ use serde::{de::DeserializeOwned, Serialize};
 
 mod migration;
 
+pub(super) use migration::released_cache;
+
 pub(super) const VERSION: i64 = 7;
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
@@ -35,9 +37,9 @@ const SOURCES: &str = "CREATE TABLE usage_ledger_sources(
     id TEXT PRIMARY KEY,agent TEXT NOT NULL,time INTEGER NOT NULL,model TEXT NOT NULL,
     status TEXT NOT NULL,data TEXT NOT NULL,source INTEGER NOT NULL DEFAULT 0);";
 
-type MigrationResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+pub(super) type MigrationResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-pub(super) fn initialize(db: &Connection, version: i64) -> Result<(), String> {
+pub(super) fn initialize(db: &rusqlite::Transaction<'_>, version: i64) -> Result<(), String> {
     (|| -> MigrationResult {
         match version {
             0 => {
@@ -46,7 +48,7 @@ pub(super) fn initialize(db: &Connection, version: i64) -> Result<(), String> {
             }
             4 => migration::upgrade_v4(db)?,
             5 => migration::upgrade_v5(db)?,
-            _ => unreachable!("Unsupported ledger version"),
+            _ => return Err(format!("不支持的用量账本结构版本 {version}").into()),
         }
         finish_schema(db)?;
         db.pragma_update(None, "user_version", VERSION)?;

@@ -198,7 +198,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let combined = ledger::merge("antigravity", &old, &incoming);
+        let combined = ledger::sources::merge("antigravity", &old, &incoming);
         let records = records(&BTreeMap::from([("session.db".into(), combined)]));
         assert_eq!(records.len(), 2);
         assert_eq!(

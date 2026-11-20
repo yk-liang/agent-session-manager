@@ -1,5 +1,6 @@
 //! 会话索引提供官方标题、工作区和派生会话关系。
 use super::storage;
+use crate::agents::scanning::sqlite_snapshot;
 use crate::agents::{escape_path_id, ms_to_iso, SessionMeta};
 use std::{collections::HashMap, fs, io::ErrorKind, path::{Path, PathBuf}};
 
@@ -26,7 +27,7 @@ pub(super) fn read(path: &Path) -> Result<HashMap<String, Summary>, String> {
     if path.metadata().is_err_and(|error| error.kind() == ErrorKind::NotFound) {
         return Ok(HashMap::new());
     }
-    storage::snapshot(path, |connection| {
+    sqlite_snapshot(path, |connection| {
         let mut stmt = connection.prepare("SELECT conversation_id,title,workspace_uris,last_modified_time,
             coalesce(parent_conversation_id,'') != '' OR coalesce(nesting_depth,0) > 0
             FROM conversation_summaries")?;
