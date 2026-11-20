@@ -30,6 +30,7 @@ type Roots = BTreeMap<String, Vec<PathBuf>>;
 
 #[derive(Clone, Default)]
 enum Changes {
+    Recollect,
     All,
     #[default]
     Empty,
@@ -38,6 +39,8 @@ enum Changes {
 impl Changes {
     fn merge(&mut self, other: Self) {
         match (&mut *self, other) {
+            (Self::Recollect, _) => {}
+            (_, Self::Recollect) => *self = Self::Recollect,
             (Self::All, _) | (_, Self::Empty) => {}
             (_, Self::All) => *self = Self::All,
             (Self::Empty, paths) => *self = paths,
@@ -233,6 +236,14 @@ struct Pending {
 }
 impl Pending {
     fn changed(&mut self, id: String, changes: Changes, now: Instant) {
+        if matches!(changes, Changes::Recollect) {
+            self.jobs.insert(id, Job {
+                changes,
+                due: now,
+                failures: 0,
+            });
+            return;
+        }
         let due = self
             .next_read
             .get(&id)
@@ -259,7 +270,9 @@ impl Pending {
         self.jobs
             .iter()
             .filter(|(_, job)| job.due <= now)
-            .min_by_key(|(id, job)| (job.due, id.as_str() == "codex"))
+            .min_by_key(|(id, job)| {
+                (!matches!(job.changes, Changes::Recollect), job.due, id.as_str() == "codex")
+            })
             .map(|(id, _)| id.clone())
     }
     fn wait(&self, now: Instant) -> Duration {
@@ -283,6 +296,13 @@ impl Pending {
         self.jobs
             .iter()
             .filter(|(_, job)| job.failures == 0)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+    fn recollecting(&self) -> BTreeSet<String> {
+        self.jobs
+            .iter()
+            .filter(|(_, job)| job.failures == 0 && matches!(job.changes, Changes::Recollect))
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -391,6 +411,25 @@ impl Queue {
         self.inbox.lock().unwrap_or_else(|e| e.into_inner()).manual = true;
         wake(&self.sender);
     }
+    fn recollect(&self, agent: String) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .changes
+            .insert(agent, Changes::Recollect);
+        wake(&self.sender);
+    }
+
+    fn queued_recollections(&self) -> BTreeSet<String> {
+        self.inbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .changes
+            .iter()
+            .filter(|(_, changes)| matches!(changes, Changes::Recollect))
+            .map(|(agent, _)| agent.clone())
+            .collect()
+    }
 
     fn ledger_changed(&self) {
         self.inbox.lock().unwrap_or_else(|e| e.into_inner()).ledger_changed = true;
@@ -409,6 +448,7 @@ pub struct SyncStatus {
     pub revision: u64,
     pub updated_at: Option<i64>,
     pub syncing: BTreeSet<String>,
+    pub recollecting: BTreeSet<String>,
     pub progress: Option<SyncProgress>,
     pub failed_agents: BTreeSet<String>,
     pub unavailable: bool,
@@ -496,6 +536,7 @@ impl Collection<'_> {
         };
         status.unavailable = false;
         status.syncing = pending.syncing();
+        status.recollecting.clear();
         publish(status);
         let mut store = {
             let _writer = super::ledger::SyncLock::acquire(&self.ledger, cancelled)?;
@@ -512,21 +553,24 @@ impl Collection<'_> {
         while !cancelled() {
             let queued = self.queue.take();
             let now = Instant::now();
-            if queued.check || queued.manual || now >= reconcile {
+            let check = queued.check || queued.manual || now >= reconcile;
+            if check || queued.changes.values().any(|changes| matches!(changes, Changes::Recollect)) {
                 let Some(next) = load_roots()? else { break };
                 if next != roots || queued.check || watcher.is_err() {
                     watcher = create_watch(&next);
                 }
                 roots = next;
                 pending.jobs.retain(|id, _| roots.contains_key(id));
-                pending.all(&roots, now);
+                if check {
+                    pending.all(&roots, now);
+                    reconcile = now + RECONCILE;
+                }
                 if queued.manual {
                     for job in pending.jobs.values_mut() {
                         job.failures = 0;
                         job.due = now;
                     }
                 }
-                reconcile = now + RECONCILE;
             }
             for (id, changes) in queued.changes {
                 if roots.contains_key(&id) {
@@ -539,18 +583,23 @@ impl Collection<'_> {
                     publication.update(Publication::read(&mut store)?, &mut state);
                 }
                 state.syncing = pending.syncing();
+                state.recollecting = pending.recollecting();
                 publish(&mut state);
             }
             if let Some(id) = pending.due(Instant::now()) {
                 let job = pending.jobs.remove(&id).unwrap();
-                let paths = match &job.changes {
-                    Changes::Paths(paths) => Some(paths),
-                    _ => None,
+                let scan = match &job.changes {
+                    Changes::Paths(paths) => ingest::Scan::Paths(paths),
+                    Changes::Recollect => ingest::Scan::Recollect,
+                    Changes::All | Changes::Empty => ingest::Scan::Incremental,
                 };
                 let started = Instant::now();
                 if self.control_dir.is_none() {
                     let mut state = status.borrow_mut();
                     state.syncing.insert(id.clone());
+                    if matches!(scan, ingest::Scan::Recollect) {
+                        state.recollecting.insert(id.clone());
+                    }
                     state.progress = Some(SyncProgress {
                         agent: id.clone(),
                         phase: "waiting",
@@ -579,7 +628,7 @@ impl Collection<'_> {
                         &id,
                         &roots[&id],
                         &mut store,
-                        paths,
+                        scan,
                         cancelled,
                         &progress,
                     )
@@ -600,6 +649,7 @@ impl Collection<'_> {
                 }
                 state.progress = None;
                 state.syncing = pending.syncing();
+                state.recollecting = pending.recollecting();
                 publish(&mut state);
                 on_finish(&id, &collected, elapsed)?;
                 continue;
@@ -725,20 +775,28 @@ mod tests {
     }
 
     #[test]
-    fn collection_publishes_file_changes_and_keeps_the_update_time_on_empty_checks() {
+    fn collection_recollects_one_agent_and_keeps_requests_missing_from_logs() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("logs");
         std::fs::create_dir(&root).unwrap();
         let path = root.join("session.jsonl");
-        let line = |id| {
+        let orphan = root.join("orphan.jsonl");
+        let other = dir.path().join("qoder");
+        std::fs::create_dir(&other).unwrap();
+        let line = |id, session, output| {
             serde_json::json!({
-                "type":"assistant","sessionId":"session","timestamp":"2026-11-20T00:00:00Z",
-                "message":{"id":id,"model":"fixture","usage":{"input_tokens":10,"output_tokens":1}}
+                "type":"assistant","sessionId":session,"timestamp":"2026-11-20T00:00:00Z","requestRef":id,
+                "message":{"id":id,"model":"fixture","usage":{"input_tokens":10,"output_tokens":output}}
             })
         };
-        std::fs::write(&path, format!("{}\n", line("msg_initial"))).unwrap();
-        let roots = Roots::from([("claude".into(), vec![root])]);
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", line("msg_initial", "session", 5), line("msg_history", "session", 3)),
+        ).unwrap();
+        std::fs::write(&orphan, format!("{}\n", line("msg_orphan", "orphan", 7))).unwrap();
+        std::fs::write(other.join("session.jsonl"), format!("{}\n", line("msg_qoder", "other", 9))).unwrap();
+        let roots = Roots::from([("claude".into(), vec![root]), ("qoder".into(), vec![other])]);
         let (queue, receiver) = Queue::new();
         let (publisher, published) = mpsc::channel();
         let stopped = AtomicBool::new(false);
@@ -791,13 +849,39 @@ mod tests {
                     .append(true)
                     .open(&path)
                     .map_err(|e| e.to_string())?;
-                writeln!(file, "{}", line("msg_appended")).map_err(|e| e.to_string())?;
+                writeln!(file, "{}", line("msg_appended", "session", 1)).map_err(|e| e.to_string())?;
                 drop(file);
                 let updated = settled("file notification", checked.sequence)?;
                 if updated.revision <= checked.revision || updated.updated_at <= checked.updated_at
                 {
                     return Err(format!("The append did not publish an update: {updated:?}"));
                 }
+
+                std::fs::remove_file(&orphan).map_err(|e| e.to_string())?;
+                std::fs::write(
+                    &path,
+                    format!("{}\n{}\n", line("msg_initial", "session", 2), line("msg_appended", "session", 1)),
+                ).map_err(|e| e.to_string())?;
+                queue.check_now();
+                let incremental = settled("incremental check after rewrite", updated.sequence)?;
+                let db = super::super::ledger::reader(&dir.path().join("ledger.sqlite3"), &|| false)?;
+                let revision = || db.query_row("SELECT indexed FROM usage_request_index WHERE agent='qoder'", [], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string());
+                let output = |id| db.query_row(
+                    "SELECT json_extract(data,'$.outputTokens') FROM usage_request_events
+                     WHERE json_extract(data,'$.request.requestId')=?1",
+                    [id], |r| r.get::<_, i64>(0),
+                ).map_err(|e| e.to_string());
+                let other_revision = revision()?;
+                assert_eq!(output("msg_initial")?, 5);
+                queue.recollect("claude".into());
+                let recollected = settled("targeted recollection", incremental.sequence)?;
+                assert!(recollected.revision > incremental.revision);
+                assert!(recollected.recollecting.is_empty());
+                assert_eq!(output("msg_initial")?, 2);
+                assert_eq!(output("msg_history")?, 3);
+                assert_eq!(output("msg_orphan")?, 7);
+                assert_eq!(revision()?, other_revision);
                 Ok(())
             };
             let result = verify();

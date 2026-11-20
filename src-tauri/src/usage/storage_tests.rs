@@ -335,6 +335,31 @@ fn reparsing_partial_history_keeps_distinct_codex_failures_and_uses_stable_claud
     let claude = ledger::sources::merge("claude", &old, &incoming);
     assert_eq!(claude.samples.iter().map(|sample| sample.key.as_str()).collect::<Vec<_>>(),
         ["message:deleted", "message:resp_same"]);
+
+    let mut prefix = sample("");
+    prefix.cumulative = true;
+    prefix.tokens.input_tokens = 100;
+    let mut tail = prefix.clone();
+    tail.offset = 40;
+    tail.timestamp = 100;
+    tail.tokens.input_tokens = 150;
+    let original = cache::FileCache {
+        parser_version: 3,
+        offset: 70,
+        samples: vec![prefix.clone(), tail],
+        ..Default::default()
+    };
+    prefix.request.client = Some("recorded-client".into());
+    let truncated = cache::FileCache {
+        parser_version: 4,
+        offset: 40,
+        samples: vec![prefix],
+        ..Default::default()
+    };
+    let refreshed = ledger::sources::merge("codex", &original, &truncated);
+    assert_eq!(refreshed.offset, 70);
+    assert_eq!(refreshed.samples.iter().map(|sample| sample.tokens.input_tokens).collect::<Vec<_>>(), [100, 150]);
+    assert_eq!(refreshed.samples[0].request.client.as_deref(), Some("recorded-client"));
 }
 
 #[test]

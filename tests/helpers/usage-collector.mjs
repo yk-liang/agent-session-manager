@@ -1,5 +1,5 @@
 function createCollector(agents, collect = async () => false, resolveCallback = callback => callback) {
-  let status = { sequence: 0, revision: 0, updatedAt: null, syncing: [], progress: null, failedAgents: [], unavailable: false };
+  let status = { sequence: 0, revision: 0, updatedAt: null, syncing: [], recollecting: [], progress: null, failedAgents: [], unavailable: false };
   let running;
   let listenerId = -1;
   const listeners = new Map();

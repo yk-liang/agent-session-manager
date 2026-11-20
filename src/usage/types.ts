@@ -73,6 +73,7 @@ export interface UsageSyncState {
   revision: number;
   updatedAt: number | null;
   syncing: string[];
+  recollecting: string[];
   progress: UsageSyncProgress | null;
   failedAgents: string[];
   unavailable: boolean;

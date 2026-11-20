@@ -39,6 +39,10 @@ export function useUsageSync() {
   const [syncStatus, setSyncStatus] = useState<UsageSyncState | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [pricingRevision, setPricingRevision] = useState(0);
+  const updateStatus = useCallback((status: UsageSyncState) => {
+    setSyncStatus(current => !current || status.sequence >= current.sequence ? status : current);
+    setConnectionFailed(false);
+  }, []);
   const onPricingChanged = useCallback((revision: number) => {
     if (Number.isFinite(revision)) setPricingRevision(current => Math.max(current, revision));
   }, []);
@@ -47,9 +51,7 @@ export function useUsageSync() {
     let active = true;
     let poll: ReturnType<typeof setTimeout> | undefined;
     const update = (status: UsageSyncState) => {
-      if (!active) return;
-      setSyncStatus(current => !current || status.sequence >= current.sequence ? status : current);
-      setConnectionFailed(false);
+      if (active) updateStatus(status);
     };
 
     const readStatus = async (repeat: boolean) => {
@@ -74,14 +76,17 @@ export function useUsageSync() {
       void status.then(unlisten => unlisten()).catch(() => {});
       void pricing.then(unlisten => unlisten?.()).catch(() => {});
     };
-  }, [onPricingChanged]);
+  }, [onPricingChanged, updateStatus]);
 
   const checkUsage = () => {
     void api.checkUsageNow().catch(() => setConnectionFailed(true));
   };
+  const recollectUsage = (agent: string) => {
+    void api.recollectUsage(agent).then(updateStatus, () => setConnectionFailed(true));
+  };
   return {
     syncStatus, syncUnavailable: connectionFailed || syncStatus?.unavailable === true,
-    pricingRevision, onPricingChanged, checkUsage,
+    pricingRevision, onPricingChanged, checkUsage, recollectUsage,
   };
 }
 

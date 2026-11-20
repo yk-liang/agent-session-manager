@@ -21,12 +21,13 @@ export function formatSyncProgress(progress: UsageSyncProgress) {
   return PHASES[progress.phase] + files;
 }
 
-export default function UsageSyncStatus({ agents, synced, status, unavailable, onRetry }: {
+export default function UsageSyncStatus({ agents, synced, status, unavailable, onRetry, onRecollect }: {
   agents: AgentInfo[];
   synced: ReadonlySet<string>;
   status: UsageSyncState | null;
   unavailable: boolean;
   onRetry: () => void;
+  onRecollect: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pulseAt, setPulseAt] = useState<number | null>(null);
@@ -39,7 +40,7 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
     if (reason === "escape") trigger.current?.focus({ preventScroll: true });
   });
 
-  const busy = !!status?.syncing.length;
+  const busy = Boolean(status?.syncing.length || status?.recollecting.length);
   const readingHistory = status?.syncing.some(id => !synced.has(id)) ?? false;
   const showBusy = useDelayedBusy(!!status?.progress || readingHistory, 250, 0);
   const updatedAt = status?.updatedAt;
@@ -65,9 +66,10 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
     : showBusy ? (readingHistory ? "同步历史用量…" : "正在更新…")
     : !status ? "正在准备同步…"
     : updatedAt == null ? "自动更新" : `${formatClock(updatedAt)} 更新`;
-  const agentSyncState = (id: string) => {
+  const agentSyncState = (id: string, recollecting: boolean) => {
     const progress = status?.progress;
     if (progress?.agent === id) return { text: formatSyncProgress(progress), tone: "busy" };
+    if (recollecting) return { text: "等待重新采集", tone: "busy" };
     if (status?.failedAgents.includes(id)) return { text: "读取失败，等待重试", tone: "error" };
     if (status?.syncing.includes(id)) return { text: "等待同步", tone: "busy" };
     return synced.has(id) ? { text: "已同步", tone: "ok" } : { text: "等待首次同步", tone: "busy" };
@@ -104,11 +106,19 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
           {updatedAt != null && <p>最近更新 <time dateTime={new Date(updatedAt).toISOString()}>{updatedTimeLabel}</time></p>}
           <ul className="usage-sync-agents">
             {agents.map(agent => {
-              const state = agentSyncState(agent.id);
+              const recollecting = status?.recollecting.includes(agent.id) ?? false;
+              const state = agentSyncState(agent.id, recollecting);
               return (
-                <li key={agent.id} className={state.tone}>
-                  <span>{agent.displayName}</span>
-                  <span>{state.text}</span>
+                <li key={agent.id}>
+                  <div className="usage-sync-agent-info">
+                    <span>{agent.displayName}</span>
+                    <span className="usage-sync-agent-state" data-tone={state.tone}>
+                      <span className="usage-sync-agent-dot" aria-hidden="true" />
+                      {state.text}
+                    </span>
+                  </div>
+                  <button type="button" className="btn-sm" aria-label={`重新采集 ${agent.displayName}`}
+                    disabled={recollecting} onClick={() => onRecollect(agent.id)}>重新采集</button>
                 </li>
               );
             })}

@@ -1,5 +1,5 @@
 //! 采集只提交变化来源的计量，不为后台文件事件生成全历史报表。
-use super::{discover, events, ledger, scope, source::Source, source_error, Store};
+use super::{discover, events, scope, source::Source, source_error, Store};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -13,6 +13,13 @@ pub(super) struct Ingested {
     pub bytes_read: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Scan<'a> {
+    Incremental,
+    Paths(&'a BTreeSet<PathBuf>),
+    Recollect,
+}
+
 #[cfg(test)]
 pub(super) fn collect(
     agent: &str,
@@ -22,24 +29,24 @@ pub(super) fn collect(
     cancel: &dyn Fn() -> bool,
 ) -> Result<Ingested, String> {
     store.recover_released_cache(agent, roots, cancel)?;
-    collect_with_progress(agent, roots, store, paths, cancel, &|_, _| {})
+    collect_with_progress(agent, roots, store, paths.map_or(Scan::Incremental, Scan::Paths), cancel, &|_, _| {})
 }
 
 pub(super) fn collect_with_progress(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
-    paths: Option<&BTreeSet<PathBuf>>,
+    scan: Scan<'_>,
     cancel: &dyn Fn() -> bool,
     progress: &dyn Fn(usize, usize),
 ) -> Result<Ingested, String> {
     let input = Source::for_agent(agent);
     let key = scope(agent, roots);
-    let full_scan = paths.is_none();
+    let recollect = matches!(scan, Scan::Recollect);
     let discovered;
-    let paths = match paths {
-        Some(paths) => paths,
-        None => {
+    let paths = match scan {
+        Scan::Paths(paths) => paths,
+        Scan::Incremental | Scan::Recollect => {
             discovered = discover(agent, roots, cancel)?;
             &discovered
         }
@@ -60,29 +67,27 @@ pub(super) fn collect_with_progress(
             _ => {}
         }
         result.checked_files += 1;
-        let stamps = input
-            .stamps(path)
-            .map_err(|error| source_error(path, error))?;
-        if store.ledger()?.unchanged(agent, path, &stamps, input.parser_version(path))? {
-            continue;
-        }
-        let old = store.load_file(&key, path);
+        let old = if recollect {
+            None
+        } else {
+            let stamps = input.stamps(path).map_err(|error| source_error(path, error))?;
+            if store.ledger()?.unchanged(agent, path, &stamps, input.parser_version(path))? {
+                continue;
+            }
+            store.load_file(&key, path)
+        };
         let (file, bytes) = input
-            .read(path, old.as_ref(), false, cancel)
+            .read(path, old.as_ref(), recollect, cancel)
             .map_err(|e| source_error(path, e))?;
-        let incoming = BTreeMap::from([(path.clone(), file)]);
-        let mut history = BTreeMap::new();
-        let mut recorded = BTreeSet::new();
-        ledger::sources::absorb(agent, &mut history, &incoming, &mut recorded);
-        // 每份来源解析后立即持久化，后面的大文件/失败不能阻止已读计量入账。
-        // commit 在事务内合并该来源；无需加载另外数万条历史或保留正文。
+        // 逐来源持久化，后续文件读取失败仍保留已采集的记录。
         let at = chrono::Utc::now().timestamp_millis();
-        store.ledger()?.commit(agent, &history, &recorded, at)?;
+        store.ledger()?.record(agent, path, &file, at, recollect)?;
+        let incoming = BTreeMap::from([(path.clone(), file)]);
         store.commit(&key, &incoming, &BTreeSet::from([path.clone()]), &[], at);
         result.files += 1;
         result.bytes_read += bytes;
     }
-    if full_scan && !cancel() {
+    if !matches!(scan, Scan::Paths(_)) && !cancel() {
         store.prune_missing(&key, paths);
     }
     progress(paths.len(), paths.len());
@@ -125,14 +130,14 @@ pub(super) fn sync_paths(
     paths: Option<&BTreeSet<PathBuf>>,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Synced, String> {
-    sync_with_store(agent, roots, store, paths, cancel, &|_| {})
+    sync_with_store(agent, roots, store, paths.map_or(Scan::Incremental, Scan::Paths), cancel, &|_| {})
 }
 
 pub(super) fn sync_with_store(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
-    paths: Option<&BTreeSet<PathBuf>>,
+    scan: Scan<'_>,
     cancel: &dyn Fn() -> bool,
     progress: &dyn Fn(SyncProgress),
 ) -> Result<Synced, String> {
@@ -147,7 +152,7 @@ pub(super) fn sync_with_store(
     report("discovering", 0, None);
     let recovery = store.recover_released_cache(agent, roots, cancel);
     // 即使稍后的文件不可读，也先把本轮已经入账的部分转成持久请求事件。
-    let collected = collect_with_progress(agent, roots, store, paths, cancel, &|done, total| {
+    let collected = collect_with_progress(agent, roots, store, scan, cancel, &|done, total| {
         report("reading", done, Some(total))
     });
     if !cancel() {
@@ -159,7 +164,7 @@ pub(super) fn sync_with_store(
     if cancel() {
         return Err("采集已停止".into());
     }
-    if paths.is_none() {
+    if !matches!(scan, Scan::Paths(_)) {
         // 必须在目录遍历和请求索引全部成功后标记；部分文件入账不能冒充全量完成。
         store
             .ledger()?

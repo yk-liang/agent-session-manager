@@ -129,6 +129,14 @@ fn check_usage_now(collector: tauri::State<'_, usage::collector::Desktop>) {
 }
 
 #[tauri::command]
+fn recollect_usage(
+    agent: String,
+    collector: tauri::State<'_, usage::collector::Desktop>,
+) -> Result<usage::collector::SyncStatus, String> {
+    collector.recollect(agent)
+}
+
+#[tauri::command]
 async fn read_usage_summary(
     query: usage::summary::SummaryQuery,
     generation: u64,
@@ -579,7 +587,7 @@ pub fn run() {
             list_agents,
             open_data_dir,
             catalog,
-            usage_sync_status, check_usage_now, read_usage_summary, cancel_usage_summary, count_sessions,
+            usage_sync_status, check_usage_now, recollect_usage, read_usage_summary, cancel_usage_summary, count_sessions,
             read_request_events,
             cancel_request_events,
             clear_orphan_requests,

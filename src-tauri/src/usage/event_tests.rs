@@ -245,7 +245,7 @@ fn request_events_refine_survive_session_deletion_and_can_be_cleaned() {
     fs::write(&path, original).unwrap();
     append(&path, claude("new", t + 3000, 1, true));
     let mut store = Store::open_with_ledger(None, Some(&ledger));
-    scan("claude", &logs, &mut store);
+    ingest::sync_with_store("claude", &[logs], &mut store, ingest::Scan::Recollect, &|| false, &|_| {}).unwrap();
     let cleaned = page(&mut store, EventQuery::default());
     assert_eq!(cleaned.total, 3);
     assert!(cleaned.events.iter().all(|event| event.id != e.id));

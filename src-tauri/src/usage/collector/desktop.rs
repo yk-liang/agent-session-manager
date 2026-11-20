@@ -54,6 +54,7 @@ impl Desktop {
                 }
                 state.unavailable = true;
                 state.syncing.clear();
+                state.recollecting.clear();
                 state.progress = None;
                 state.sequence += 1;
                 publish(&state);
@@ -68,14 +69,26 @@ impl Desktop {
     }
 
     pub fn status(&self) -> SyncStatus {
-        self.status
+        let mut status = self.status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        status.recollecting.extend(self.queue.queued_recollections());
+        status
     }
 
     pub fn check_now(&self) {
         self.queue.check_now();
+    }
+
+    pub fn recollect(&self, agent: String) -> Result<SyncStatus, String> {
+        if !crate::usage::AGENTS.contains(&agent.as_str()) {
+            return Err("不支持的用量来源".into());
+        }
+        if !self.status().recollecting.contains(&agent) {
+            self.queue.recollect(agent);
+        }
+        Ok(self.status())
     }
 
     pub fn ledger_changed(&self) {

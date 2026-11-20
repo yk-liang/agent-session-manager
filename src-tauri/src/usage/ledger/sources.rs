@@ -2,9 +2,11 @@ use crate::usage::{cache::FileCache, normalize, source::jsonl, storage, types::S
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::usage) fn source_keys(
     db: &Connection,
@@ -146,14 +148,19 @@ fn merge_reparsed(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCac
     if jsonl::covers_observations(incoming, old) {
         return incoming.clone();
     }
+    replace_observations(agent, old, incoming)
+}
+
+// SQLite 来源也可能已删掉部分会话。重新读取整个文件仍须保留未再次观察到的历史。
+pub(super) fn replace_observations(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCache {
     let mut merged = incoming.clone();
     if merged.state.session.is_empty() && !old.state.session.is_empty() {
         merged.state = old.state.clone();
     }
-    // 缺少完整覆盖证据时，只替换具有相同身份的观测。失败按其请求键匹配。
     merged.samples = replace_matching(agent, &old.samples, &incoming.samples, agent == "codex");
     merged.failures = replace_matching(agent, &old.failures, &incoming.failures, false);
     if merged.samples.len() > incoming.samples.len() || merged.failures.len() > incoming.failures.len() {
+        merged.offset = old.offset.max(incoming.offset);
         clear_source_coverage(&mut merged);
     }
     merged
@@ -166,19 +173,30 @@ fn replace_matching(agent: &str, old: &[Sample], new: &[Sample], observations: b
         .map(|sample| normalize::canonical_key(agent, &sample.key))
         .collect();
     let missing_key = |sample: &Sample| !keys.contains(&normalize::canonical_key(agent, &sample.key));
-    let mut retained: Vec<_> = if observations {
-        let ids: HashSet<_> = observation_ids(new).into_iter().collect();
-        observation_ids(old)
-            .into_iter()
-            .zip(old)
-            .filter(|(id, sample)| missing_key(sample) && !ids.contains(id))
-            .map(|(_, sample)| sample.clone())
-            .collect()
-    } else {
-        old.iter().filter(|sample| missing_key(sample)).cloned().collect()
-    };
-    retained.extend_from_slice(new);
-    retained
+    if !observations {
+        return old.iter().filter(|sample| missing_key(sample)).chain(new).cloned().collect();
+    }
+
+    // Codex 的累计计数依赖观测顺序。保留已截断的尾部时仍需先处理现存前缀。
+    let positions: HashMap<_, _> = observation_ids(new)
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+    let mut merged = Vec::with_capacity(old.len().max(new.len()));
+    let mut next = 0;
+    for (id, sample) in observation_ids(old).into_iter().zip(old) {
+        if let Some(&index) = positions.get(&id) {
+            if index >= next {
+                merged.extend_from_slice(&new[next..=index]);
+                next = index + 1;
+            }
+        } else if missing_key(sample) {
+            merged.push(sample.clone());
+        }
+    }
+    merged.extend_from_slice(&new[next..]);
+    merged
 }
 
 pub(in crate::usage) fn merge(agent: &str, old: &FileCache, incoming: &FileCache) -> FileCache {
@@ -257,6 +275,7 @@ fn merge_observations(agent: &str, old: &FileCache, incoming: &FileCache) -> Fil
     merged
 }
 
+#[cfg(test)]
 pub(in crate::usage) fn absorb(
     agent: &str,
     history: &mut BTreeMap<PathBuf, FileCache>,

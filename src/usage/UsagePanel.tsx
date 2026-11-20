@@ -58,7 +58,7 @@ export default function UsagePanel({
   const selectRequests = (filters: RequestSelection) => setRequestSelection({ agent, filters });
   const [period, setPeriod] = useState<UsagePeriod>("month");
   const now = useUsageDate();
-  const { syncStatus, syncUnavailable, pricingRevision, onPricingChanged, checkUsage } = useUsageSync();
+  const { syncStatus, syncUnavailable, pricingRevision, onPricingChanged, checkUsage, recollectUsage } = useUsageSync();
   const syncRevision = syncStatus?.revision ?? 0;
   const { summary, queryLoading, queryError, retrySummary } = useUsageSummary(summaryQuery(period, now), syncRevision, pricingRevision);
 
@@ -118,6 +118,7 @@ export default function UsagePanel({
               status={syncStatus}
               unavailable={syncUnavailable}
               onRetry={checkUsage}
+              onRecollect={recollectUsage}
             />
           </div>
         </div>

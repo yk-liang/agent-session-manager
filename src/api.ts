@@ -22,6 +22,7 @@ export const openDataDir = (agent: string) => invoke<void>("open_data_dir", { ag
 
 export const usageSyncStatus = () => invoke<import("./usage/types").UsageSyncState>("usage_sync_status");
 export const checkUsageNow = () => invoke<void>("check_usage_now");
+export const recollectUsage = (agent: string) => invoke<import("./usage/types").UsageSyncState>("recollect_usage", { agent });
 let summaryGeneration = Date.now();
 export const nextSummaryGeneration = () => ++summaryGeneration;
 export const readUsageSummary = (query: import("./usage/types").UsageSummaryQuery, generation: number) => invoke<import("./usage/types").UsageSummary>("read_usage_summary", { query, generation });

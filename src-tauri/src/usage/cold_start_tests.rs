@@ -127,7 +127,7 @@ fn cold_start_cancelled_import_keeps_committed_progress_and_wal_permissions() {
         "claude",
         &[logs.clone()],
         &mut store,
-        None,
+        ingest::Scan::Incremental,
         &|| cancel.get(),
         &|done, _| {
             if done == 2 {

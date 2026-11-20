@@ -123,13 +123,18 @@
 
 .usage-sync-agents li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.usage-sync-agents li > :last-child { color: var(--text-dim); text-align: right; }
-.usage-sync-agents li.error > :last-child { color: var(--danger); }
+.usage-sync-agent-info { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.usage-sync-agent-state { display: inline-flex; align-items: baseline; gap: 5px; color: var(--text-dim); }
+.usage-sync-agent-state[data-tone="error"] { color: var(--danger); }
+.usage-sync-agent-dot { flex: none; width: 6px; height: 6px; align-self: center; border-radius: 50%; background: var(--text-muted); }
+.usage-sync-agent-state[data-tone="ok"] .usage-sync-agent-dot { background: var(--success); }
+.usage-sync-agent-state[data-tone="error"] .usage-sync-agent-dot { background: var(--danger); }
+.usage-sync-agents button { flex: none; }
 .usage-spin { animation: usage-spin 1.2s linear infinite; }
 
 @keyframes usage-spin {

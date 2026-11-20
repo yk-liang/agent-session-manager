@@ -2,12 +2,14 @@
 use super::{cache::FileCache, source::Stamp, storage};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{self, File},
     os::fd::AsRawFd,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 pub(super) mod sources;
 
@@ -129,6 +131,7 @@ fn check_version(db: &Connection, version: i64) -> Result<(), String> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceWrite {
     Scan,
+    Recollect,
     Recovery,
 }
 
@@ -242,6 +245,7 @@ impl Ledger {
             .map_err(|e| format!("无法读取用量来源状态：{e}"))
     }
 
+    #[cfg(test)]
     pub fn commit(
         &mut self,
         agent: &str,
@@ -264,6 +268,21 @@ impl Ledger {
         self.write_sources(agent, files.iter(), at, SourceWrite::Recovery)
     }
 
+    pub(super) fn record(
+        &mut self,
+        agent: &str,
+        origin: &Path,
+        file: &FileCache,
+        at: i64,
+        recollect: bool,
+    ) -> Result<(), String> {
+        let write = if recollect { SourceWrite::Recollect } else { SourceWrite::Scan };
+        let path = sources::source_path(agent, origin, file);
+        let mut record = file.clone();
+        record.origin_path = Some(origin.to_owned());
+        self.write_sources(agent, std::iter::once((&path, &record)), at, write)
+    }
+
     fn write_sources<'a>(
         &mut self,
         agent: &str,
@@ -275,6 +294,7 @@ impl Ledger {
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| "无法锁定用量账本，请稍后重试")?;
+        let scanned = write != SourceWrite::Recovery;
         let mut changed = false;
         for (path, incoming) in sources {
             changed = true;
@@ -288,13 +308,14 @@ impl Ledger {
                 .optional()
                 .map_err(|_| "无法读取累计用量")?;
             let existing = match existing {
-                None if write == SourceWrite::Scan && agent == "codex" => {
+                None if scanned && agent == "codex" => {
                     sources::previous_codex_source(&tx, path, incoming)?
                 }
                 existing => existing,
             };
             let combined = match (write, existing.as_ref()) {
                 (SourceWrite::Scan, Some(old)) => sources::merge(agent, old, incoming),
+                (SourceWrite::Recollect, Some(old)) => sources::replace_observations(agent, old, incoming),
                 (SourceWrite::Recovery, Some(old)) => sources::merge_restored(agent, old, incoming),
                 (_, None) => incoming.clone(),
             };
@@ -306,7 +327,7 @@ impl Ledger {
             )
             .map_err(|_| "无法保存累计用量，本次操作尚未删除会话")?;
             if let Some(origin) = incoming.origin_path.as_ref()
-                .filter(|_| write == SourceWrite::Scan && combined.parser_version == incoming.parser_version)
+                .filter(|_| scanned && combined.parser_version == incoming.parser_version)
             {
                 let stamps = serde_json::to_string(&incoming.stamps).map_err(|_| "无法编码用量来源状态")?;
                 tx.execute(
@@ -315,7 +336,7 @@ impl Ledger {
                 ).map_err(|_| "无法保存用量来源状态")?;
             }
             sources::source_keys(&tx, agent, path, &combined)?;
-            if write == SourceWrite::Scan && agent == "codex" && path.extension().is_some_and(|ext| ext == "zst") {
+            if scanned && agent == "codex" && path.extension().is_some_and(|ext| ext == "zst") {
                 sources::replace_covered_archives(&tx, path, incoming)?;
             }
         }
