@@ -1,9 +1,8 @@
 use super::*;
 
 const OPTIONS: FamilyOptions = FamilyOptions {
-    title_events: true,
+    use_runtime_model: true,
     filter_non_cli_entrypoint: true,
-    filter_qoderwork_cwd: true,
 };
 
 #[test]

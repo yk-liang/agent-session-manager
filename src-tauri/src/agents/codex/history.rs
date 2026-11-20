@@ -94,9 +94,8 @@ pub(super) fn read_headers(
         is_relevant_session(&page.header) && !compressed_copies.contains(&page.path)
     });
     pages.sort_by(|a, b| {
-        a.header
-            .created_ts
-            .cmp(&b.header.created_ts)
+        super::super::timestamp(a.header.created_ts.as_deref())
+            .cmp(&super::super::timestamp(b.header.created_ts.as_deref()))
             .then(a.path.cmp(&b.path))
     });
     Ok(pages)
@@ -239,21 +238,30 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         )
         .split();
         warnings.extend(ws);
-        let Some(p) = parsed else { continue };
+        let Some(mut p) = parsed else { continue };
         if p.session_id != meta.session_id || !is_relevant_session(&p) {
             return Err("会话来源已变化，请刷新后重试".into());
         }
         dedup.commit_page();
-        if p.first_ts.is_some() && (meta.first_ts.is_none() || p.first_ts < meta.first_ts) {
+        let first = super::super::timestamp(p.first_ts.as_deref());
+        let previous = super::super::timestamp(meta.first_ts.as_deref());
+        if first.is_some() && (previous.is_none() || first < previous) {
             meta.first_ts = p.first_ts;
         }
-        if p.last_ts > meta.last_ts {
+        if super::super::timestamp(p.last_ts.as_deref()) > super::super::timestamp(meta.last_ts.as_deref()) {
             meta.last_ts = p.last_ts;
         }
         if meta.title.is_none() {
             meta.title = p.first_user_text;
         }
         // 只沿有效分页前缀推进模型；新页未重复写模型时继续保留父历史的已知值。
+        if let Some(model) = &meta.model {
+            for event in &mut p.events {
+                if event["type"] == "assistant" && event["message"]["model"].is_null() {
+                    event["message"]["model"] = serde_json::json!(model);
+                }
+            }
+        }
         if p.model.is_some() {
             meta.model = p.model;
         }

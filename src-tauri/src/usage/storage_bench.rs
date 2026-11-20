@@ -102,14 +102,9 @@ fn storage_comparison() {
         "SELECT id,data FROM usage_request_events ORDER BY id",
         Some(1),
     );
-    let compact: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_source_keys') WHERE name='source')", [], |r| r.get(0)).unwrap();
     let identity_hash = digest(
         db,
-        if compact {
-            "SELECT s.agent,s.path,k.key FROM usage_source_keys k JOIN usage_ledger_sources s ON s.id=k.source ORDER BY s.agent,s.path,k.key"
-        } else {
-            "SELECT agent,path,key FROM usage_source_keys ORDER BY agent,path,key"
-        },
+        "SELECT s.agent,s.path,k.key FROM usage_source_keys k JOIN usage_ledger_sources s ON s.id=k.source ORDER BY s.agent,s.path,k.key",
         None,
     );
     let request_count: i64 = db

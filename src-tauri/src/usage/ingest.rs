@@ -34,22 +34,6 @@ pub(super) fn collect_with_progress(
 ) -> Result<Ingested, String> {
     let input = Source::for_agent(agent);
     let key = scope(agent, roots);
-    if store.ledger()?.updated(agent).is_none() {
-        // 从只有可重建缓存的旧版本升级时，先接入已采集数据，包括已删除的源文件。
-        let cached = store.load(&key);
-        if !cached.is_empty() {
-            let mut history = BTreeMap::new();
-            let mut recorded = BTreeSet::new();
-            ledger::absorb(agent, &mut history, &cached, &mut recorded);
-            store.ledger()?.commit(
-                agent,
-                &history,
-                &recorded,
-                chrono::Utc::now().timestamp_millis(),
-            )?;
-            store.mark_durable(&key, &cached);
-        }
-    }
     let full_scan = paths.is_none();
     let discovered;
     let paths = match paths {
@@ -78,27 +62,13 @@ pub(super) fn collect_with_progress(
         let stamps = input
             .stamps(path)
             .map_err(|error| source_error(path, error))?;
-        if store.unchanged(&key, path, &stamps, input.parser_version()) {
+        if store.ledger()?.unchanged(agent, path, &stamps, input.parser_version())? {
             continue;
         }
         let old = store.load_file(&key, path);
         let (file, bytes) = input
             .read(path, old.as_ref(), false, cancel)
             .map_err(|e| source_error(path, e))?;
-        let changed = old.as_ref().is_none_or(|old| {
-            old.stamps != file.stamps || old.parser_version != file.parser_version
-        });
-        if !changed {
-            // 首次迁移小索引；以后只比较 stamps，不再加载整份 FileCache。
-            store.commit(
-                &key,
-                &BTreeMap::from([(path.clone(), file)]),
-                &BTreeSet::from([path.clone()]),
-                &[],
-                chrono::Utc::now().timestamp_millis(),
-            );
-            continue;
-        }
         let incoming = BTreeMap::from([(path.clone(), file)]);
         let mut history = BTreeMap::new();
         let mut recorded = BTreeSet::new();

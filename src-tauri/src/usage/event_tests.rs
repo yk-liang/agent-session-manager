@@ -358,23 +358,6 @@ fn request_events_codex_dedup_turn_timing_and_aggregate_are_explicit() {
         Some("Connection closed before the response finished")
     );
 
-    let ledger = store.ledger().unwrap();
-    let changed = ledger
-        .db
-        .execute(
-            "UPDATE usage_request_events SET data=json_set(data,'$.request.kind','vscode')
-         WHERE id=?1 AND json_extract(data,'$.request.kind')='cli'",
-            [&e.id],
-        )
-        .unwrap();
-    assert_eq!(changed, 1);
-    let old_page = page(&mut store, EventQuery::default());
-    let indexed = old_page
-        .events
-        .iter()
-        .find(|event| event.id == e.id)
-        .unwrap();
-    assert_eq!(indexed.request.kind.as_deref(), Some("cli"));
     append(
         &p,
         codex(
@@ -441,9 +424,9 @@ fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
     let mut lines = codex_lines(t);
     lines.pop();
     lines.extend([
-        codex(t + 13_990, "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution"}})),
+        codex(t + 13_990, "response_item", json!({"type":"function_call_output","call_id":"tool"})),
         codex(t + 14_000, "token_usage_record", json!({"turn_id":"turn-one","response_id":"response-two","usage":usage})),
-        codex(t + 14_500, "event_msg", json!({"type":"task_complete","turn_id":"turn-one","time_to_first_token_ms":400})),
+        codex(t + 14_500, "event_msg", json!({"type":"task_complete","turn_id":"turn-one","time_to_first_token_ms":15_000})),
     ]);
     write(&path, &lines);
     let ledger = dir.path().join("ledger.sqlite");
@@ -456,7 +439,7 @@ fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
         if let Some(end) = request.finished_at {
             request.started_at = Some(end - 10);
             request.latency_ms = Some(10);
-            request.timing = Some("estimated".into());
+            request.timing = Some(codex::BOUNDARY_ESTIMATE.into());
         }
     };
     for sample in &mut old.samples {
@@ -477,29 +460,17 @@ fn request_events_replaces_bad_codex_timing_in_existing_ledger() {
         )
         .unwrap();
     events::refresh(&mut old_store.db, "codex", &|| false).unwrap();
-    old_store.db.execute(
-        "UPDATE usage_request_events SET data=json_set(data,'$.request.timing','estimated','$.request.latencyMs',10,'$.outputTps',10000)",
-        [],
-    ).unwrap();
     let before = page(&mut store, EventQuery::default());
     assert_eq!(before.total, 2);
-    assert!(before
-        .events
-        .iter()
-        .all(|e| e.request.latency_ms.is_none() && e.output_tps.is_none()));
-    let summary = summary::read_from(&mut store, Default::default(), &|| false).unwrap();
-    assert!(summary
-        .rows
-        .iter()
-        .all(|row| row.metrics.latency_count == 0 && row.metrics.tps_count == 0));
     drop(store);
 
     let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger));
     scan("codex", &logs, &mut store);
     let recalculated = page(&mut store, EventQuery::default());
     assert_eq!(recalculated.total, 2);
-    assert_eq!(recalculated.events[0].request.latency_ms, Some(11_950));
+    assert_eq!(recalculated.events[0].request.latency_ms, Some(10));
     for event in recalculated.events {
+        assert!(event.request.ttft_ms.is_none());
         assert_eq!(event.request.tier.as_deref(), Some("fast"));
         assert_eq!(event.session, "codex-session");
         let previous = before
@@ -726,35 +697,6 @@ fn request_events_unmetered_failures_and_replayed_blocks_do_not_duplicate() {
     assert!(success.request.error.is_none());
     assert!(!failed.details.output_recorded);
     assert_eq!(failed.output_tps, None);
-}
-
-#[test]
-fn request_events_migrate_v1_ledger_even_when_source_is_gone() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("a.jsonl");
-    let t = 1_790_000_000_000i64;
-    write(&p, &[claude("old", t, 80, true)]);
-    let (file, _) = cache::read_file(&p, "claude", None, false, &|| false).unwrap();
-    let mut v = serde_json::to_value(file).unwrap();
-    v["parser_version"] = json!(2);
-    v["samples"][0].as_object_mut().unwrap().remove("request");
-    v.as_object_mut().unwrap().remove("failures");
-    let ledger = dir.path().join("v1.sqlite");
-    let db = rusqlite::Connection::open(&ledger).unwrap();
-    db.execute_batch("CREATE TABLE usage_ledger_sources(agent TEXT,path TEXT,data TEXT,PRIMARY KEY(agent,path));CREATE TABLE usage_ledger_updates(agent TEXT PRIMARY KEY,updated INTEGER);PRAGMA user_version=1;").unwrap();
-    db.execute(
-        "INSERT INTO usage_ledger_sources VALUES ('claude','old',?1)",
-        [v.to_string()],
-    )
-    .unwrap();
-    drop(db);
-    fs::remove_file(p).unwrap();
-    let mut store = Store::open_with_ledger(None, Some(&ledger));
-    let result = page(&mut store, EventQuery::default());
-    assert_eq!(result.total, 1);
-    assert_eq!(result.events[0].tokens.output_tokens, 80);
-    assert_eq!(result.events[0].output_tps, None);
-    assert_eq!(result.events[0].status, RequestOutcome::Success);
 }
 
 #[test]
@@ -999,7 +941,7 @@ fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
     failure["time"]["created"] = json!(t + 3000);
     failure["time"]["completed"] = json!(t + 4000);
     db.execute(
-        "INSERT INTO session_message VALUES ('msg_b','ses_a','compaction',1,?1,?1,?2)",
+        "INSERT INTO session_message VALUES ('msg_b','ses_a','assistant',1,?1,?1,?2)",
         rusqlite::params![t + 3000, failure.to_string()],
     )
     .unwrap();
@@ -1023,7 +965,7 @@ fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
     assert_eq!(failed.events[0].request.latency_ms, Some(1000));
     assert_eq!(failed.events[0].request.ttft_ms, None);
     assert_eq!(failed.events[0].request.http_status, Some(503));
-    assert_eq!(failed.events[0].request.kind.as_deref(), Some("compaction"));
+    assert_eq!(failed.events[0].request.kind.as_deref(), Some("subagent"));
     let error = failed.events[0].request.error.as_ref().unwrap();
     assert_eq!(error.kind.as_deref(), Some("APIError"));
     assert_eq!(error.message.as_deref(), Some("Provider unavailable"));
@@ -1035,7 +977,7 @@ fn request_events_opencode_v2_keeps_timing_and_error_without_body() {
 #[test]
 fn usage_excludes_a_legacy_open_code_mirror_when_native_claude_usage_is_available() {
     let dir = tempfile::tempdir().unwrap();
-    let t = 1_790_000_000_000i64;
+    let t = 1_790_000_000_000i64 / 86_400_000 * 86_400_000 + 1_000;
     let file = dir.path().join("storage/message/open-code/msg_mirror.json");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, json!({
@@ -1051,7 +993,7 @@ fn usage_excludes_a_legacy_open_code_mirror_when_native_claude_usage_is_availabl
     assert_eq!(before.total, 1);
     assert_eq!(before.events[0].model, "claude-agent/claude");
 
-    let mut native = claude("native-usage", t, 10, true);
+    let mut native = claude("native-usage", t - 2_000, 10, true);
     native["sessionId"] = json!("native");
     write(&dir.path().join("native.jsonl"), &[native]);
     scan("claude", dir.path(), &mut store);
@@ -1128,8 +1070,8 @@ fn request_timeline_counts_filtered_ledger_and_maps_buckets_to_pages() {
     for (id, time, status) in [
         ("b", t + 3_600_000, "failed"),
         ("c", t + 7_200_000, "success"),
-        ("d", t + 7_260_000, "unknown"),
-        ("e", 0, "unknown"),
+        ("d", t + 7_260_000, "success"),
+        ("e", 0, "success"),
     ] {
         store
             .ledger()
@@ -1157,9 +1099,21 @@ fn request_timeline_counts_filtered_ledger_and_maps_buckets_to_pages() {
     assert_eq!(bounded.events[0].tokens.cache_write_tokens, 0);
     let timeline = &bounded.timeline;
     assert_eq!(
-        (timeline.start, timeline.step, timeline.success.len()),
+        (timeline.bounds[0], timeline.bounds[1] - timeline.bounds[0], timeline.success.len()),
         (midnight, 15 * 60_000, 96)
     );
+    let calendar_date = |month, day| Local.with_ymd_and_hms(2026, month, day, 0, 0, 0)
+        .earliest().unwrap().timestamp_millis();
+    let daily = page(&mut store, EventQuery {
+        from: Some(calendar_date(1, 31)),
+        to: Some(calendar_date(4, 15)),
+        ..Default::default()
+    }).timeline;
+    assert_eq!(daily.days_per_bucket, Some(1));
+    for &bound in &daily.bounds {
+        let local = Local.timestamp_millis_opt(bound).single().unwrap();
+        assert_eq!(local.time(), chrono::NaiveTime::MIN);
+    }
     assert_eq!(timeline.success.iter().sum::<u64>(), 3);
     assert_eq!(
         timeline.failed[44], 1,

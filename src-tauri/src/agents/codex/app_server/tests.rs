@@ -17,7 +17,7 @@ fn mutations_use_the_verified_thread_and_ignore_notifications() {
             &mut input,
             Cursor::new(responses),
             action,
-            &escape_cwd("/tmp/project"),
+            &escape_cwd("/private/tmp/project"),
             "test-thread",
         )
         .unwrap();

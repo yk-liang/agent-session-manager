@@ -16,7 +16,7 @@ use std::{
 mod reconcile;
 
 pub(super) use reconcile::records;
-pub(super) const PARSER_VERSION: u8 = 4;
+pub(super) const PARSER_VERSION: u8 = 5;
 
 const MODEL_ERROR: i64 = 17;
 
@@ -29,6 +29,7 @@ struct Usage {
     cache_read: u64,
     reasoning: u64,
     visible: u64,
+    provider: Option<&'static str>,
     keys: Vec<String>,
 }
 
@@ -42,6 +43,13 @@ impl Usage {
             cache_read: fields.number(5).unwrap_or_default(),
             reasoning: fields.number(9).unwrap_or_default(),
             visible: fields.number(10).unwrap_or_default(),
+            provider: match fields.number(6) {
+                Some(3) => Some("vertex_ai"),
+                Some(24 | 30) => Some("google"),
+                Some(26) => Some("anthropic"),
+                Some(31 | 32) => Some("openai"),
+                _ => None,
+            },
             keys: [(7, "message"), (11, "response"), (12, "provider")]
                 .into_iter()
                 .filter_map(|(number, kind)| fields.text(number).map(|id| format!("{kind}:{id}")))
@@ -236,6 +244,9 @@ impl Conversation {
             return;
         }
         let (model, effort) = model.resolve(usage.model, &self.models);
+        if request.provider.is_none() {
+            request.provider = usage.provider.map(str::to_owned);
+        }
         request.client = self.client.clone();
         request.project = self.project.clone();
         request.effort = effort;
@@ -248,7 +259,6 @@ impl Conversation {
             timestamp,
             tokens,
             details: RecordedFields {
-                availability_known: true,
                 input_recorded: measured,
                 output_recorded: measured,
                 cache_read_recorded: measured,
@@ -327,13 +337,7 @@ pub(super) fn read(
         let mut generations = Vec::new();
         let mut conversation = Conversation {
             session: session.into(),
-            client: path
-                .parent()
-                .and_then(|parent| parent.parent())
-                .and_then(|root| root.file_name())
-                .and_then(|name| name.to_str())
-                .filter(|name| name.starts_with("antigravity"))
-                .map(str::to_owned),
+            client: storage::client_id(path).map(str::to_owned),
             project: trajectory.cwd,
             created: trajectory.created,
             models: HashMap::new(),
@@ -402,7 +406,9 @@ pub(super) fn read(
             let latency_ms = generation
                 .ttft
                 .zip(generation.streaming)
-                .and_then(|(first, streaming)| first.checked_add(streaming));
+                .and_then(|(first, streaming)| first.checked_add(streaming))
+                .filter(|&ms| ms > 0);
+            let ttft_ms = generation.ttft.filter(|&ms| ms > 0);
             conversation.add(
                 &mut file,
                 key.clone(),
@@ -413,9 +419,10 @@ pub(super) fn read(
                     request_id: generation.request_id.clone(),
                     started_at: timestamp,
                     latency_ms,
-                    ttft_ms: generation.ttft,
-                    timing: latency_ms.or(generation.ttft).map(|_| "recorded".into()),
-                    ttft_scope: generation.ttft.map(|_| "request".into()),
+                    finished_at: timestamp.zip(latency_ms).and_then(|(start, ms)| start.checked_add(ms)),
+                    ttft_ms,
+                    timing: latency_ms.or(ttft_ms).map(|_| "recorded".into()),
+                    ttft_scope: ttft_ms.map(|_| "request".into()),
                     status: (error.is_some() || step.is_some_and(Step::failed))
                         .then_some(RequestOutcome::Failed),
                     error: error.cloned(),

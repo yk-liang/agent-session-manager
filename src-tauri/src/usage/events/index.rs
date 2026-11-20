@@ -13,7 +13,7 @@ pub(in crate::usage) fn schema(db: &Connection) -> Result<(), String> {
         agent TEXT PRIMARY KEY,revision INTEGER NOT NULL,indexed INTEGER NOT NULL);
         INSERT OR IGNORE INTO usage_request_index SELECT DISTINCT agent,1,0 FROM usage_ledger_sources;
         CREATE TABLE IF NOT EXISTS usage_request_events(
-            id TEXT PRIMARY KEY,agent TEXT NOT NULL,time INTEGER NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL);
+            id TEXT PRIMARY KEY,agent TEXT NOT NULL,time INTEGER NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,source INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS usage_requests_time ON usage_request_events(time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_agent ON usage_request_events(agent,time DESC,id DESC);
         CREATE INDEX IF NOT EXISTS usage_requests_model ON usage_request_events(model,time DESC,id DESC);
@@ -26,10 +26,6 @@ pub(in crate::usage) fn schema(db: &Connection) -> Result<(), String> {
 }
 
 pub(in crate::usage) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent {
-    s.migrate_availability();
-    if agent == "codex" {
-        s.request.clear_legacy_codex_timing();
-    }
     let id = format!("{:x}", Sha256::digest(format!("{agent}:{}", s.key)));
     let status = s.request.status.unwrap_or_default();
     if s.request.scope.is_none() {
@@ -41,6 +37,10 @@ pub(in crate::usage) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent 
             }
             .into(),
         );
+    }
+    let time = s.request.started_at.unwrap_or(s.timestamp);
+    if s.request.scope.as_deref() == Some("usage_delta") {
+        s.request.clear_timing();
     }
     let output_tps = s
         .request
@@ -57,7 +57,7 @@ pub(in crate::usage) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent 
     RequestEvent {
         id,
         agent: agent.into(),
-        time: s.request.started_at.unwrap_or(s.timestamp),
+        time,
         session: s.session,
         model: s.model,
         status,

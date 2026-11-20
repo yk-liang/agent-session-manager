@@ -18,7 +18,9 @@ export function dailySeries(
 ): (ModelUsage & { date: string })[] {
   const dates = rows.map(r => r.date).filter(Boolean).sort();
   const start = firstDate(period, now) || dates[0] || dateKey(now);
-  const end = dateKey(now);
+  const today = dateKey(now);
+  const latest = dates[dates.length - 1];
+  const end = latest && latest > today ? latest : today;
   const byDay = new Map<string, ModelUsage>();
   for (const row of rows) {
     if (row.date) byDay.set(row.date, addModelUsage(byDay.get(row.date) ?? emptyModelUsage(), row));
@@ -123,23 +125,14 @@ export function buildTrendSeries(
   });
   if (group === "category") {
     if (metric === "tokens") {
-      // 只有每个时段的缓存读写都包含在输入内时，才拆出未缓存输入，避免重复或负值。
-      const split = points.every(p => p.cacheReadTokens + p.cacheWriteTokens === 0 || uncachedInputOf(p) != null);
-      return nonEmpty(
-        split
-          ? [
-              make("uncached_input", "未缓存输入", TOKEN_COLORS.input, p => uncachedInputOf(p) ?? p.inputTokens),
-              make("cache_read", "缓存读取", TOKEN_COLORS.cacheRead, p => p.cacheReadTokens),
-              make("cache_write", "缓存写入", TOKEN_COLORS.cacheWrite, p => p.cacheWriteTokens),
-              make("output", "输出", TOKEN_COLORS.output, p => p.outputTokens),
-              make("unclassified", "未分项", TOKEN_COLORS.unclassified, p => p.unclassifiedTokens),
-            ]
-          : [
-              make("input", "输入（含缓存）", TOKEN_COLORS.input, p => p.inputTokens),
-              make("output", "输出", TOKEN_COLORS.output, p => p.outputTokens),
-              make("unclassified", "未分项", TOKEN_COLORS.unclassified, p => p.unclassifiedTokens),
-            ],
-      );
+      return nonEmpty([
+        make("uncached_input", "未缓存输入", TOKEN_COLORS.input, p => uncachedInputOf(p) ?? 0),
+        make("cache_read", "缓存读取", TOKEN_COLORS.cacheRead, p => p.cacheInputReadTokens),
+        make("cache_write", "缓存写入", TOKEN_COLORS.cacheWrite, p => p.cacheInputWriteTokens),
+        make("input", "输入（缓存未拆分）", TABLEAU_10[7], p => p.inputTokens - (p.cacheInputTokens ?? 0)),
+        make("output", "输出", TOKEN_COLORS.output, p => p.outputTokens),
+        make("unclassified", "未分项", TOKEN_COLORS.unclassified, p => p.unclassifiedTokens),
+      ]);
     }
     if (metric === "requests") {
       const { success, failed } = REQUEST_OUTCOMES;

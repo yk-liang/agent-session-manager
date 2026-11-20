@@ -106,7 +106,7 @@ try {
   await page.locator('.usage-query-error').waitFor();
   await page.locator('.usage-query-error').getByText(/无法读取用量/).waitFor();
   await page.getByRole('tab', { name: '请求记录', exact: true }).click();
-  await page.locator('.request-error').waitFor();
+  await page.locator('.request-events').getByRole('alert').filter({ hasText: '无法读取请求记录' }).waitFor();
   await page.getByRole('tab', { name: '统计分析', exact: true }).click();
   await page.evaluate(() => { window.__COLD__.failSource = true; window.__COLD__.release(); });
   await page.waitForFunction(() => window.__COLD__.active === 'opencode');

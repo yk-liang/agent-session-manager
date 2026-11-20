@@ -13,43 +13,8 @@ use std::collections::BTreeMap;
 pub const SOURCE_ID: &str = "litellm";
 pub const SOURCE_NAME: &str = "LiteLLM";
 
-const UNSUPPORTED_UNIT_FIELDS: &[&str] = &[
-    "input_cost_per_character",
-    "output_cost_per_character",
-    "input_cost_per_second",
-    "output_cost_per_second",
-    "input_cost_per_audio_second",
-    "output_cost_per_audio_second",
-    "input_cost_per_image",
-    "output_cost_per_image",
-    "input_cost_per_pixel",
-    "output_cost_per_pixel",
-    "cost_per_query",
-    "input_cost_per_request",
-    "output_cost_per_request",
-    "search_context_cost_per_query",
-];
-
 fn opt_f64(map: &Map<String, Value>, key: &str) -> Option<f64> {
     map.get(key).and_then(Value::as_f64)
-}
-
-fn has_unsupported_unit(map: &Map<String, Value>) -> bool {
-    if UNSUPPORTED_UNIT_FIELDS
-        .iter()
-        .any(|key| opt_f64(map, key).is_some_and(|v| !v.is_finite() || v > 0.0))
-    {
-        return true;
-    }
-    // 存在多档 tiered_pricing 数组时无法用单阈值准确表达，拒绝降级为普通费率。
-    if map
-        .get("tiered_pricing")
-        .and_then(Value::as_array)
-        .is_some_and(|tiers| !tiers.is_empty())
-    {
-        return true;
-    }
-    false
 }
 
 fn supported_mode(map: &Map<String, Value>) -> bool {
@@ -148,84 +113,61 @@ const SERVICE_SUFFIXES: [(&str, &str); 3] = [
     ("_batches", "batch"),
 ];
 
-/// 归类条目中的全部文本 Token 费率键。返回 Err 表示含有无法准确表达的阈值费率，
-/// 此时整个条目按未定价处理，避免静默降级为普通费率。
-/// - `_priority` / `_flex` / `_batches` 后缀归入对应服务档位，不影响标准价；
-/// - `cache_creation_input_token_cost_above_1hr` 记为 1 小时缓存写入价；
-///   其他 TTL（如 OpenAI 的 `_above_12hr`）没有任何来源记录对应 Token，忽略且不会套用。
-fn collect_tiers(
-    map: &Map<String, Value>,
-) -> Result<(BTreeMap<&'static str, TierFields>, Option<f64>), ()> {
-    let mut tiers: BTreeMap<&'static str, TierFields> = BTreeMap::new();
-    let mut cache_write_1h = None;
+fn tier_rates(map: &Map<String, Value>, service_suffix: &str) -> Option<TierRates> {
+    let mut tier = TierFields::default();
     for (key, value) in map {
-        let Some(raw) = value.as_f64() else { continue };
-        let (stem, service) = SERVICE_SUFFIXES
+        let Some(key) = key.strip_suffix(service_suffix) else { continue };
+        let Some((field, suffix)) = FIELD_PREFIXES
             .iter()
-            .find_map(|(suffix, name)| key.strip_suffix(suffix).map(|stem| (stem, *name)))
-            .unwrap_or((key.as_str(), "standard"));
-        let Some((field, rest)) = FIELD_PREFIXES
-            .iter()
-            .find_map(|(prefix, field)| stem.strip_prefix(prefix).map(|rest| (*field, rest)))
-            .filter(|(_, rest)| rest.is_empty() || rest.starts_with('_'))
+            .find_map(|(prefix, field)| key.strip_prefix(prefix).map(|suffix| (*field, suffix)))
         else {
-            // 其他计费单位由 has_unsupported_unit 处理；未知的阈值字段不能静默忽略。
-            if key.contains("_above_") && key.contains("cost") {
-                return Err(());
-            }
             continue;
         };
-        let rate = per_token_to_per_million(raw).ok_or(())?;
-        let tier = tiers.entry(service).or_default();
-        if rest.is_empty() {
-            tier.base.set(field, rate);
-            continue;
-        }
-        let Some(suffix) = rest.strip_prefix("_above_") else {
-            // 例如 `_cache_hit` 等别名字段：不属于本项目使用的文本价，忽略。
-            continue;
-        };
-        if let Some(threshold) = parse_token_threshold(suffix) {
-            tier.above.entry(threshold).or_default().set(field, rate);
-        } else if suffix.ends_with("hr") || suffix.contains("hr_above_") {
-            if matches!(field, Field::CacheWrite) && service == "standard" && suffix == "1hr" {
-                cache_write_1h = Some(rate);
-            }
+        let fields = if suffix.is_empty() {
+            &mut tier.base
+        } else if let Some(threshold) = suffix.strip_prefix("_above_").and_then(parse_token_threshold) {
+            tier.above.entry(threshold).or_default()
         } else {
-            return Err(());
+            continue;
+        };
+        if value.is_null() && suffix.is_empty() {
+            continue;
         }
+        fields.set(field, per_token_to_per_million(value.as_f64()?)?);
     }
-    Ok((tiers, cache_write_1h))
-}
-
-fn parse_rates(map: &Map<String, Value>) -> Option<Rates> {
-    if !supported_mode(map) || has_unsupported_unit(map) {
-        return None;
-    }
-    if let (Some(reasoning), Some(output)) = (
-        opt_f64(map, "output_cost_per_reasoning_token"),
-        opt_f64(map, "output_cost_per_token"),
-    ) {
-        if !approx_f64(reasoning, output) {
+    let reasoning_key = format!("output_cost_per_reasoning_token{service_suffix}");
+    if let Some(reasoning) = map.get(&reasoning_key).filter(|value| !value.is_null()) {
+        if !approx_f64(per_token_to_per_million(reasoning.as_f64()?)?, tier.base.output?) {
             return None;
         }
     }
-    let (mut tiers, cache_write_1h) = collect_tiers(map).ok()?;
-    let standard = tiers.remove("standard")?.rates()?;
+    tier.rates().filter(TierRates::validate)
+}
+
+fn parse_rates(map: &Map<String, Value>) -> Option<Rates> {
+    if !supported_mode(map)
+        || ["input_cost_per_character", "output_cost_per_character"]
+            .into_iter()
+            .any(|key| opt_f64(map, key).is_some_and(|rate| rate > 0.0))
+        || map.get("tiered_pricing").and_then(Value::as_array).is_some_and(|tiers| !tiers.is_empty())
+    {
+        return None;
+    }
+    let standard = tier_rates(map, "")?;
     let rates = Rates {
         input: standard.input,
         output: standard.output,
         cache_read: standard.cache_read,
         cache_write: standard.cache_write,
         long_context: standard.long_context,
-        cache_write_1h,
-        // 缺输入/输出或多阈值的特殊档位只丢弃该档位，标准价保持可用。
-        service_tiers: tiers
-            .into_iter()
-            .filter_map(|(name, tier)| Some((name.to_owned(), tier.rates()?)))
+        cache_write_1h: opt_f64(map, "cache_creation_input_token_cost_above_1hr")
+            .and_then(per_token_to_per_million),
+        cache_write_12h: opt_f64(map, "cache_creation_input_token_cost_above_12hr")
+            .and_then(per_token_to_per_million),
+        service_tiers: SERVICE_SUFFIXES.into_iter()
+            .filter_map(|(suffix, name)| Some((name.to_owned(), tier_rates(map, suffix)?)))
             .collect(),
     };
-    rates.validate_reference().ok()?;
     Some(rates)
 }
 

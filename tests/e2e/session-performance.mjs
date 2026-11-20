@@ -10,7 +10,7 @@ try {
   await page.addInitScript(()=>{
     const meta={sessionId:'long',projectDir:'p',cwd:'/tmp/long',title:'长会话性能回归',model:'logged-codex-model',firstTs:null,lastTs:null,userCount:2,assistantCount:6000,realUserCount:2,assistantTextCount:5999,sizeBytes:400000000,hasTranscript:true};
     const events=[{type:'user',uuid:'first',message:{content:'第一条指令'}},
-      {type:'assistant',uuid:'tool',message:{content:[{type:'tool_use',id:'call',name:'shell',deferred:'input'}]}},
+      {type:'assistant',uuid:'tool',message:{model:'earlier-codex-model',content:[{type:'tool_use',id:'call',name:'shell',deferred:'input'}]}},
       {type:'user',uuid:'result',message:{content:[{type:'tool_result',tool_use_id:'call',is_error:true,deferred:'output'}]}},
       ...Array.from({length:6000},(_,i)=>({type:'assistant',uuid:`a-${i}`,message:{content:`消息 ${i}\n`+'正文示例\n'.repeat(10)}})),
       {type:'user',uuid:'last',message:{content:'末尾指令 '+ '长文本'.repeat(3000)+' 唯一定位针 '+ '结尾'.repeat(2000)}}];
@@ -38,7 +38,9 @@ try {
   console.log(`PASS: first detail render ${Date.now()-start} ms with 6004 events (${engine})`);
   assert.ok(await page.locator('.event-group').count()<50);
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
-  assert.equal(await page.locator('.session-info-popover .model-label').textContent(),'logged-codex-model');
+  assert.deepEqual(await page.locator('.session-info-popover .model-label').allTextContents(),
+    ['logged-codex-model', 'earlier-codex-model']);
+  assert.equal(await page.locator('#ev-1').getAttribute('title'), '模型：earlier-codex-model');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
   const tool = page.getByRole('button',{name:/^工具调用 shell.*失败$/});
@@ -108,8 +110,15 @@ try {
   await outline.click();
   await page.locator('.toc-item').last().click();
   await page.waitForFunction(() => document.activeElement?.id === 'ev-6003');
-  await page.getByRole('button',{name:'显示更多',exact:true}).click();
-  assert.ok((await page.locator('#ev-6003').textContent()).includes('结尾'));
+  const lastMessage = page.locator('#ev-6003 .msg-text');
+  const prefix = () => mark.evaluate(el => el.previousSibling?.textContent ?? '');
+  const initialPrefix = await prefix();
+  assert.match(initialPrefix, /^…/);
+  await lastMessage.getByRole('button',{name:'显示更多',exact:true}).click();
+  assert.equal(await prefix(), initialPrefix, 'expanding after a late search match keeps the starting offset');
+  assert.match(await lastMessage.textContent(), /结尾$/);
+  await lastMessage.getByRole('button', { name: '显示前文', exact: true }).click();
+  assert.match(await prefix(), /^末尾指令/);
   assert.deepEqual(errors,[]);
   console.log(`PASS: historical model in detail and refined card; bounded DOM, deferred tools, persistent expansion, background counts, TOC, resize and long-text search (${engine})`);
 } finally {await browser.close();}

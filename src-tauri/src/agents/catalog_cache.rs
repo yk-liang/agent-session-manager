@@ -179,16 +179,12 @@ pub(super) fn peek_summary(kind: &str, paths: &[PathBuf]) -> Option<SessionMeta>
 /// SQLite 是共享数据库：同时校验主库与 WAL，任何提交均触发重新查询。
 pub(super) fn database(
     paths: &[PathBuf],
-    include_empty: bool,
+    filter: super::CatalogFilter,
     load: impl FnOnce() -> Result<Catalog, String>,
 ) -> Result<Catalog, String> {
     static CACHE: OnceLock<FileCache<Catalog>> = OnceLock::new();
     CACHE.get_or_init(|| FileCache::new(16)).load(
-        if include_empty {
-            "sqlite-all"
-        } else {
-            "sqlite"
-        },
+        &format!("sqlite:{}:{}", filter.include_empty, filter.include_archived),
         paths,
         load,
         |catalog| catalog.warnings.is_empty(),

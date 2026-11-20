@@ -46,6 +46,8 @@ test('daily trend fills zero days without altering totals or mutating source row
   assert.equal(series.at(-1).date, '2026-10-22');
   assert.equal(sumTokens(series).totalTokens, 15);
   assert.equal(rows[0].totalTokens, 15);
+  const future = row('2026-10-29', 'future', 30);
+  assert.equal(dailySeries([future], 'all', new Date(2026, 9, 27, 12))[0].date, '2026-10-29');
 });
 
 test('detail availability survives aggregation and missing data is not turned into measured zero', () => {
@@ -80,7 +82,10 @@ const measured = (model, input, cached, costUsd, extra = {}) => ({
   costUsd,
   costIncomplete: costUsd === null,
   cacheReadIncomplete: false,
-  cacheRateUnavailable: false,
+  cacheInputTokens: input,
+  cacheInputReadTokens: cached,
+  cacheInputWriteTokens: 0,
+  cacheExcludedCount: 0,
   ...extra,
 });
 
@@ -102,9 +107,14 @@ test('model metrics and footer use weighted cache rates across models, sources a
 
 test('model metrics distinguish custom and reference estimates, known zero and unknown costs', () => {
   const known = measured('a', 100, 90, 0);
-  const missing = { ...measured('a', 900, 0, null), cacheReadRecorded: false, cacheReadIncomplete: true, cacheRateUnavailable: true };
+  const missing = { ...measured('a', 900, 0, null), cacheReadRecorded: false, cacheReadIncomplete: true, cacheInputTokens: null, cacheInputReadTokens: 0, cacheExcludedCount: 1 };
   const cells = groupUsageCells(sumModelUsage([known, missing]));
-  assert.deepEqual(cells.map(c => c.text), ['1K', '20', '≥ 90', '—', '≥ $0.00']);
+  assert.deepEqual(cells.map(c => c.text), ['1K', '20', '≥ 90', '90.0%', '≥ $0.00']);
+  const bucket = usageSeries([known, missing], 'all', new Date(2026, 9, 22, 12));
+  const stack = buildTrendSeries([known, missing], bucket, 'all', 'tokens', 'category', (_, key) => key);
+  assert.deepEqual(stack.map(({ key, values }) => [key, values[0]]), [
+    ['uncached_input', 10], ['cache_read', 90], ['input', 900], ['output', 20],
+  ]);
   assert.equal(groupUsageCells(sumModelUsage([missing]))[2].text, '—');
   assert.equal(groupUsageCells(sumModelUsage([missing]))[4].text, '—');
   assert.equal(groupUsageCells(sumModelUsage([measured('zero', 100, 0, 0)]))[3].text, '0.0%');

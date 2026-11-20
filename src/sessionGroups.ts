@@ -1,5 +1,5 @@
 import type { Catalog, Project, SessionMeta } from "./types";
-import { sessionKey } from "./utils.ts";
+import { compareTimestamps, sessionKey } from "./utils.ts";
 
 export const PROJECTLESS_GROUP = "group:projectless";
 export interface SessionGroup extends Project { projectless: boolean }
@@ -31,12 +31,12 @@ function buildCatalogGroups(catalog: Catalog) {
       continue;
     }
     group.sessionCount++;
-    if (session.lastTs && (!group.lastActivity || session.lastTs > group.lastActivity)) group.lastActivity = session.lastTs;
+    if (compareTimestamps(session.lastTs, group.lastActivity) > 0) group.lastActivity = session.lastTs;
   }
 
   return {
     groups: regroup ? [...groups.values()].sort((a, b) => Number(b.projectless) - Number(a.projectless)
-      || (b.lastActivity ?? "").localeCompare(a.lastActivity ?? ""))
+      || compareTimestamps(b.lastActivity, a.lastActivity))
       : catalog.projects.map(project => ({ ...project, projectless: false })),
     byGroup, hints, projectlessKeys,
   };

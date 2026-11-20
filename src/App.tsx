@@ -122,8 +122,11 @@ export default function App() {
 
   const availableAgents = agents.filter((agent) => agent.installed);
   const currentAgent = availableAgents.find((agent) => agent.id === selectedAgent);
-  const supportsArchive = currentAgent?.supportsArchive;
-  const catalogFilter = useMemo(() => catalogFilterFor(filter, supportsArchive), [filter, supportsArchive]);
+  const supportsArchivedSessions = currentAgent?.supportsArchivedSessions;
+  const catalogFilter = useMemo(
+    () => catalogFilterFor(filter, supportsArchivedSessions),
+    [filter, supportsArchivedSessions],
+  );
   const { includeArchived } = catalogFilter;
   const onWatchError = useCallback(() => showToast("会话可能无法自动更新。切回应用可重试。", true), [showToast]);
   const { cache: catalogCache, catalog, loading, refreshing, error: catalogError, refresh: refreshCatalog } = useSessionCatalog(
@@ -221,7 +224,7 @@ export default function App() {
   const changeFilter = (next: CatalogFilter) => {
     if (sessionActionsBusy || mutationRunning.current) return;
     clearBatchSelection();
-    setFilter(currentAgent?.supportsArchive ? next : { ...next, includeArchived: filter.includeArchived });
+    setFilter(supportsArchivedSessions ? next : { ...next, includeArchived: filter.includeArchived });
     if (!next.includeArchived && (selectedDetail?.meta ?? readRequest?.session)?.archived) closeSessionDetail();
   };
 
@@ -414,19 +417,20 @@ export default function App() {
           onOpen={tab === "sessions" ? sessionCounts.refresh : undefined}
           disabled={sessionActionsBusy || (tab === "config" && configActivity.busy)} onChange={selectAgent} />
         <nav className="tabs">
-          <button className={tab === "sessions" ? "active" : ""} onClick={() => changeTab("sessions")} disabled={sessionActionsBusy}>
+          <button type="button" className="btn-ghost" aria-current={tab === "sessions" ? "page" : undefined} onClick={() => changeTab("sessions")} disabled={sessionActionsBusy}>
             会话
           </button>
           {availableAgents.length > 0 && (
-            <button className={tab === "config" ? "active" : ""} onClick={() => changeTab("config")} disabled={sessionActionsBusy}>
+            <button type="button" className="btn-ghost" aria-current={tab === "config" ? "page" : undefined} onClick={() => changeTab("config")} disabled={sessionActionsBusy}>
               配置
             </button>
           )}
-          <button className={tab === "usage" ? "active" : ""} onClick={() => changeTab("usage")} disabled={sessionActionsBusy}>用量</button>
+          <button type="button" className="btn-ghost" aria-current={tab === "usage" ? "page" : undefined} onClick={() => changeTab("usage")} disabled={sessionActionsBusy}>用量</button>
         </nav>
         <div className="topbar-actions">
           {tab !== "usage" && currentAgent?.dataDir && (
             <button
+              type="button"
               className="button-with-icon"
               onClick={() =>
                 api.openDataDir(currentAgent.id).catch((e) => showToast(`无法打开数据目录：${e}`, true))
@@ -502,7 +506,6 @@ export default function App() {
           ) : readRequest ? (
             <div className="detail-read-state" aria-busy={readRequest.pending}>
               {readRequest.error ? <ReadDiagnostics
-                className="session-read-error"
                 title={/^stage: (parse_json|decode_utf8)$/m.test(readRequest.error) ? "无法解析会话正文" : "无法读取会话正文"}
                 errors={[readRequest.error]}
                 retry={() => void openSession(readRequest.session)}
@@ -541,7 +544,10 @@ export default function App() {
         onConfirm={confirmDeletion}
         onCancel={() => setOperation(current => current?.kind === "confirmDelete" ? null : current)}
       />}
-      {toast && <div className={`toast ${toast.error ? "error" : ""}`}>{toast.msg}</div>}
+      <div className={toast ? toast.error ? "toast error" : "toast" : undefined}
+        role="status" aria-live="polite" aria-atomic="true">
+        {toast?.msg}
+      </div>
     </div>
   );
 }

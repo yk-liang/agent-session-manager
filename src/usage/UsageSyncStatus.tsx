@@ -5,6 +5,7 @@ import type { UsageSyncProgress, UsageSyncState } from "./types";
 import { useDelayedBusy } from "../useDelayedBusy";
 import { formatClock, formatCount, formatDateTime } from "./format";
 import UiIcon from "../components/UiIcon";
+import useDismiss from "../components/useDismiss";
 
 const PHASES: Record<UsageSyncProgress["phase"], string> = {
   waiting: "等待同步",
@@ -33,24 +34,10 @@ export default function UsageSyncStatus({ agents, synced, status, unavailable, o
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panelId = useId();
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      trigger.current?.focus();
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape, true);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape, true);
-    };
-  }, [open]);
+  useDismiss(open, [root], reason => {
+    setOpen(false);
+    if (reason === "escape") trigger.current?.focus({ preventScroll: true });
+  });
 
   const busy = !!status?.syncing.length;
   const readingHistory = status?.syncing.some(id => !synced.has(id)) ?? false;

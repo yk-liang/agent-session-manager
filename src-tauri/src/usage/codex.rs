@@ -10,7 +10,6 @@ use std::path::Path;
 
 pub(in crate::usage) const BOUNDARY_ESTIMATE: &str = "codex_boundary";
 pub(super) const COUNTER_BASELINE: &str = "counter_baseline";
-pub(in crate::usage) const LEGACY_ESTIMATE: &str = "estimated";
 pub(super) const FORK_METADATA_VERSION: u8 = 9;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -80,6 +79,13 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                 .or_else(|| string(&p["collaboration_mode"]["settings"]["reasoning_effort"]));
             state.context.project = string(&p["cwd"]).or(state.context.project.clone());
         }
+        Some("response_item")
+            if matches!(p["type"].as_str(), Some(
+                "function_call_output" | "custom_tool_call_output" | "local_shell_call_output"
+            )) =>
+        {
+            state.boundary = state.boundary.max(time);
+        }
         Some("compacted") => {
             if let Some(id) = compaction_response_id(p) {
                 file.state.compactions.insert(id.into());
@@ -106,7 +112,7 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                 state.turn_id = string(&p["turn_id"]).unwrap_or_default();
                 state.first_request = None;
             }
-            // 助手消息和工具项可能紧贴本次用量写入，只有用户消息用于定位请求起点。
+            // 用户输入与工具结果回传分别开启下一次模型调用。
             Some("item_completed")
                 if matches!(
                     p["item"]["type"].as_str(),
@@ -125,8 +131,8 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                 }
                 state.context.provider =
                     string(&s["model_provider_id"]).or(state.context.provider.clone());
-                if let Some(tier) = string(&s["service_tier"]) {
-                    state.context.tier = Some(tier);
+                if let Some(tier) = s.get("service_tier") {
+                    state.context.tier = string(tier);
                 }
             }
             Some("task_complete") if p["turn_id"].as_str() == Some(state.turn_id.as_str()) => {
@@ -148,15 +154,8 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                                     ms > 0
                                         && request.latency_ms.is_some_and(|duration| ms <= duration)
                                 });
-                            request.ttft_ms = Some(within_request.unwrap_or(ttft));
-                            request.ttft_scope = Some(
-                                if within_request.is_some() {
-                                    "request"
-                                } else {
-                                    "turn"
-                                }
-                                .into(),
-                            );
+                            request.ttft_ms = within_request;
+                            request.ttft_scope = within_request.map(|_| "request".into());
                         }
                     }
                 }
@@ -171,7 +170,7 @@ pub(super) fn read_line(v: &Value, offset: u64, path: &Path, file: &mut FileCach
                 let mut failure = Sample::unmeasured(
                     key,
                     &file.state.session,
-                    file.state.model.clone(),
+                    codex_model_or_unknown(&file.state.model).to_owned(),
                     time.unwrap_or(0),
                     offset,
                 );
@@ -266,6 +265,10 @@ fn codex_model(v: &Value) -> Option<&str> {
         .or_else(|| text(v.pointer("/metadata/model_name")))
 }
 
+fn codex_model_or_unknown(model: &str) -> &str {
+    if model.is_empty() { "unknown" } else { model }
+}
+
 fn compaction_response_id(payload: &Value) -> Option<&str> {
     text(payload.get("compaction_response_id")).or_else(|| text(payload.get("response_id")))
 }
@@ -275,7 +278,7 @@ fn measurement(value: &Value, offset: u64, time: i64, state: &mut ParserState) -
     let mut sample = match value["type"].as_str()? {
         "token_usage_record" => {
             let id = text(p.get("response_id"))?;
-            let model = codex_model(p).unwrap_or(&state.model).to_owned();
+            let model = codex_model(p).unwrap_or_else(|| codex_model_or_unknown(&state.model)).to_owned();
             let mut sample = Sample::unmeasured(
                 format!("response:{id}"),
                 &state.session,
@@ -319,7 +322,7 @@ fn measurement(value: &Value, offset: u64, time: i64, state: &mut ParserState) -
             let mut sample = Sample::unmeasured(
                 String::new(),
                 &state.session,
-                state.model.clone(),
+                codex_model_or_unknown(&state.model).to_owned(),
                 time,
                 offset,
             );

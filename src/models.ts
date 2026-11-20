@@ -6,8 +6,8 @@ function assistantModel(event: SessionEvent) {
 
 export function historicalModels(events: SessionEvent[]): string[] {
   const models = new Set<string>();
-  for (const event of events) {
-    const model = assistantModel(event);
+  for (let index = events.length - 1; index >= 0; index--) {
+    const model = assistantModel(events[index]);
     if (model) models.add(model);
   }
   return [...models];

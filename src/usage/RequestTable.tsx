@@ -81,9 +81,9 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
             const uncached = event.agent === "qoder" ? null : uncachedInputOf(event);
             const write1h = Math.min(event.cacheWrite1hTokens ?? 0, event.cacheWriteTokens);
             const cost = eventCostDisplay(event);
-            const result = <span className={`request-result ${event.status}`}>{REQUEST_OUTCOMES[event.status].label}</span>;
+            const result = <span className="status-tag request-result" data-tone={event.status === "success" ? "success" : "error"}>{REQUEST_OUTCOMES[event.status].label}</span>;
             return <Fragment key={event.id}><tr data-event-id={event.id} className={expanded ? "request-selected" : undefined}>
-              <td><button className="request-expand" aria-label={`${expanded ? "收起" : "查看"}请求详情 ${event.id}`} title={expanded ? "收起详情" : "查看详情"} aria-expanded={expanded} onClick={() => onExpand(expanded ? null : event.id)}>
+              <td><button type="button" className="request-expand btn-icon btn-ghost" aria-label={`${expanded ? "收起" : "查看"}请求详情 ${event.id}`} title={expanded ? "收起详情" : "查看详情"} aria-expanded={expanded} onClick={() => onExpand(expanded ? null : event.id)}>
                 <UiIcon icon={expanded ? ChevronDown : ChevronRight} />
               </button></td>
               <td>{event.time > 0 ? <><span>{formatClock(event.time)}</span><small>{formatDate(event.time)}</small></> : <span className="request-missing">未记录</span>}</td>
@@ -99,13 +99,13 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
                 {request.scope === "usage_delta" && <small title="仅计入 Token 用量">累计用量差额</small>}
               </td>
               <td className="request-timing" title={estimated ? "根据 Codex 日志时间估算" : undefined}>
-                <span>{event.outputTps == null ? "—" : `${estimated ? "≈ " : ""}${formatTps(event.outputTps)}`}</span>
+                <span>{event.outputTps == null ? "—" : `${estimated ? "~" : ""}${formatTps(event.outputTps)}`}</span>
                 <small>
                   {ttftMs != null && <span title={request.ttftScope === "turn" ? "整轮对话的首字延迟" : "首字延迟"}>
                     {formatDuration(ttftMs, true)}
                   </span>}
                   {ttftMs != null && latencyMs != null && " · "}
-                  {latencyMs == null ? ttftMs == null && "—" : `${estimated ? "≈ " : ""}${formatDuration(latencyMs, true)}`}
+                  {latencyMs == null ? ttftMs == null && "—" : `${estimated ? "~" : ""}${formatDuration(latencyMs, true)}`}
                 </small>
               </td>
               <td className="numeric"><UsageNumber value={tokenDisplay(event, "input", { compact: false })} />{uncached != null && event.cacheReadTokens + event.cacheWriteTokens > 0 && <small title="输入减去缓存读写">未缓存 {formatCount(uncached)}</small>}</td>
@@ -123,14 +123,14 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
               <td>
                 <div className="request-session-id">
                   <code title={session}>{session}</code>
-                  <CopyButton className="request-copy request-session" value={session} label={`复制会话 ID ${session}`} {...copyFeedback} />
+                  <CopyButton className="request-session btn-icon btn-ghost" value={session} label={`复制会话 ID ${session}`} {...copyFeedback} />
                 </div>
               </td>
             </tr>
               {expanded && (
                 <tr className="request-detail-row" data-event-id={event.id}>
                   <td colSpan={columns.length}>
-                    <RequestDetail event={event} session={session} project={project} copyFeedback={copyFeedback} />
+                    <RequestDetail event={event} agentName={agentName} session={session} project={project} copyFeedback={copyFeedback} />
                   </td>
                 </tr>
               )}

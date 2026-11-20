@@ -2,119 +2,73 @@ use super::{
     is_cli,
     models::Model,
     proto::Message,
-    storage::{self, MODEL_RESPONSE, TOOL_RESULT, USER_PROMPT},
+    steps::{self, Content},
+    storage::{self, MODEL_RESPONSE, USER_PROMPT},
 };
-use crate::agents::{escape_path_id, ms_to_iso, SessionDetail, SessionMeta};
+use crate::agents::{context, escape_path_id, ms_to_iso, SessionDetail, SessionMeta};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::{BTreeMap, HashMap}, fs, path::Path};
 
-fn first_text(content: &[Value]) -> Option<&str> {
-    content
-        .iter()
-        .find_map(|block| block.get("text").and_then(Value::as_str))
+fn generation_models(
+    connection: &rusqlite::Connection,
+    warnings: &mut Vec<String>,
+) -> storage::ReadResult<BTreeMap<i64, Model>> {
+    let mut stmt = connection.prepare("SELECT idx,data FROM gen_metadata ORDER BY idx")?;
+    let mut rows = stmt.query([])?;
+    let mut models = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let index = row.get(0)?;
+        let blob: Vec<u8> = row.get(1)?;
+        match Message::decode(&blob).and_then(|message| message.message(1)) {
+            Ok(request) => {
+                let model = Model::generation(&request);
+                if model.is_recorded() {
+                    models.insert(index, model);
+                }
+            }
+            Err(error) => warnings.push(format!("Antigravity 生成记录 {index} 的模型无法读取：{error}")),
+        }
+    }
+    Ok(models)
 }
 
-fn content(kind: i64, payload: &[u8]) -> std::io::Result<Vec<Value>> {
-    let payload = Message::decode(payload)?;
-    let mut blocks = Vec::new();
+fn count_message(meta: &mut SessionMeta, kind: i64, blocks: &[Value]) {
+    let first_text = blocks.iter().filter(|block| block["type"] == "text")
+        .find_map(|block| block["text"].as_str());
     match kind {
         USER_PROMPT => {
-            let prompt = payload.message(19)?;
-            if let Some(text) = prompt.text(2).or(prompt.message(3)?.text(1)) {
-                blocks.push(json!({"type":"text", "text":text}));
-            }
-        }
-        MODEL_RESPONSE => {
-            let response = payload.message(20)?;
-            if let Some(text) = response.text(1).or_else(|| response.text(8)) {
-                blocks.push(json!({"type":"text", "text":text}));
-            }
-            if let Some(thinking) = response.text(3) {
-                blocks.push(json!({"type":"thinking", "thinking":thinking}));
-            }
-            for call in response.repeated(7) {
-                let call = Message::decode(call)?;
-                if let Some(name) = call.text(2) {
-                    let input = call
-                        .text(3)
-                        .map(|text| serde_json::from_str(text).unwrap_or_else(|_| json!(text)))
-                        .unwrap_or_else(|| json!({}));
-                    blocks.push(
-                        json!({"type":"tool_use", "id":call.text(1), "name":name, "input":input}),
-                    );
+            meta.user_count += 1;
+            if first_text.is_some() || blocks.iter().any(context::is_attachment) {
+                meta.real_user_count += 1;
+                if meta.title.is_none() {
+                    meta.title = first_text.map(|text| text.chars().take(160).collect());
                 }
             }
         }
+        MODEL_RESPONSE => {
+            meta.assistant_count += 1;
+            meta.assistant_text_count += u32::from(first_text.is_some());
+        }
         _ => {}
     }
-    Ok(blocks)
-}
-
-fn tool_result(
-    metadata: &Message<'_>,
-    payload: &[u8],
-    status: Option<i64>,
-    error: &[u8],
-) -> std::io::Result<Vec<Value>> {
-    let call = metadata.message(4)?;
-    let output = Message::decode(payload)?.message(140)?.message(2)?;
-    let error_details = Message::decode(error)?;
-    let text = output
-        .text(1)
-        .or_else(|| error_details.text(2))
-        .or_else(|| error_details.text(3));
-    if call.text(1).is_none() && text.is_none() {
-        return Ok(Vec::new());
-    }
-    let status = match status {
-        Some(3) => Some("completed"),
-        Some(7) => Some("error"),
-        _ if !error.is_empty() => Some("error"),
-        _ => None,
-    };
-    if status.is_none() && text.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut result = json!({"type":"tool_result", "tool_use_id":call.text(1), "content":text});
-    if let Some(status) = status {
-        result["status"] = json!(status);
-        result["is_error"] = json!(status == "error");
-    }
-    Ok(vec![result])
-}
-
-fn latest_model(connection: &rusqlite::Connection) -> storage::ReadResult<Option<Model>> {
-    let mut stmt = connection.prepare("SELECT data FROM gen_metadata ORDER BY idx DESC")?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let blob: Vec<u8> = row.get(0)?;
-        let request = Message::decode(&blob)?.message(1)?;
-        let model = Model::generation(&request);
-        if model.is_recorded() {
-            return Ok(Some(model));
-        }
-    }
-    Ok(None)
 }
 
 pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
     storage::read(path, |connection, schema| {
         let session_id = storage::session_id(path)?;
-        let stats = fs::metadata(path)?;
+        let wal = crate::agents::scanning::sqlite_wal_path(path);
+        let size = fs::metadata(path)?.len() + fs::metadata(&wal).map_or(0, |meta| meta.len());
         let (trajectory, _) = storage::trajectory(connection)?;
         let cwd = trajectory.cwd;
         let created = trajectory.created;
-        let fallback_time = stats
-            .modified()
-            .ok()
-            .map(|time| chrono::DateTime::<chrono::Utc>::from(time).timestamp_millis());
         let mut meta = SessionMeta {
             session_id: session_id.into(),
-            project_dir: cwd.as_deref().map(escape_path_id).unwrap_or_default(),
+            project_dir: cwd.as_deref().map(escape_path_id).unwrap_or_else(|| "-unknown".into()),
             cwd,
             title: None,
             model: None,
             version: None,
+            client: storage::client_id(path).map(str::to_owned),
             git_branch: None,
             entrypoint: Some(if is_cli(path) { "cli" } else { "antigravity" }.into()),
             first_ts: created.and_then(ms_to_iso),
@@ -123,122 +77,115 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             assistant_count: 0,
             real_user_count: 0,
             assistant_text_count: 0,
-            size_bytes: Some(stats.len()),
+            size_bytes: Some(size),
             has_transcript: false,
             archived: false,
             stats_pending: false,
-            source_files: vec![
-                path.to_path_buf(),
-                crate::agents::scanning::sqlite_wal_path(path),
-            ],
+            source_files: vec![path.to_path_buf(), wal],
         };
         let mut detail_events = Vec::new();
         let mut warnings = Vec::new();
-        let mut latest = Model::default();
-        let mut last_time = created;
+        let generation = if schema.generations {
+            generation_models(connection, &mut warnings).unwrap_or_else(|error| {
+                warnings.push(format!("Antigravity 会话模型无法读取：{error}"));
+                BTreeMap::new()
+            })
+        } else {
+            BTreeMap::new()
+        };
+        let mut names = HashMap::new();
+        for model in generation.values() {
+            model.remember(&mut names);
+        }
+        let mut current_model = None;
+        let mut latest_model_index = None;
+        let mut last_time = None;
         if let Some(storage::StepColumns { status, error }) = schema.steps {
+            let [tool, error_step, checkpoint, notice] = steps::DETAIL_TYPES;
             let mut stmt = connection.prepare(&format!(
                 "SELECT idx, step_type, metadata,
-                    CASE WHEN step_type IN (:user, :response) OR :detail AND step_type = :tool THEN step_payload END,
-                    CASE WHEN :detail AND step_type = :tool THEN {status} END,
-                    CASE WHEN :detail AND step_type = :tool THEN {error} END
+                    CASE WHEN step_type IN ({USER_PROMPT}, {MODEL_RESPONSE})
+                        OR :detail AND step_type IN ({tool}, {error_step}, {checkpoint}, {notice})
+                        THEN step_payload END,
+                    CASE WHEN :detail AND step_type = {tool} THEN {status} END,
+                    CASE WHEN :detail AND step_type = {tool} THEN {error} END
                  FROM steps ORDER BY idx"
             ))?;
-            let mut rows = stmt.query(rusqlite::named_params! {
-                ":user": USER_PROMPT, ":response": MODEL_RESPONSE,
-                ":tool": TOOL_RESULT, ":detail": events,
-            })?;
+            let mut rows = stmt.query(rusqlite::named_params! {":detail": events})?;
             while let Some(row) = rows.next()? {
                 let index: i64 = row.get(0)?;
                 let kind: i64 = row.get(1)?;
                 let metadata = row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default();
-                let payload = row.get::<_, Option<Vec<u8>>>(3)?;
-                let step = || -> std::io::Result<_> {
+                let payload: Option<Vec<u8>> = row.get(3)?;
+                let status: Option<i64> = row.get(4)?;
+                let error: Option<Vec<u8>> = row.get(5)?;
+                let read_step = || -> std::io::Result<_> {
                     let metadata = Message::decode(&metadata)?;
                     let started = metadata.millis(1)?.filter(|&time| time > 0);
                     let finished = metadata.millis(8)?.filter(|&time| time > 0);
                     let model = Model::step(&metadata)?;
-                    let blocks = if events && kind == TOOL_RESULT {
-                        let status = row
-                            .get::<_, Option<i64>>(4)
-                            .map_err(std::io::Error::other)?;
-                        let error = row
-                            .get::<_, Option<Vec<u8>>>(5)
-                            .map_err(std::io::Error::other)?;
-                        tool_result(
-                            &metadata,
-                            payload.as_deref().unwrap_or_default(),
-                            status,
-                            error.as_deref().unwrap_or_default(),
-                        )?
-                    } else if let Some(payload) = payload {
-                        content(kind, &payload)?
+                    let content = if payload.is_some() || events && steps::DETAIL_TYPES.contains(&kind) {
+                        Some(steps::decode(kind, &metadata, payload.as_deref().unwrap_or_default(),
+                            status, error.as_deref().unwrap_or_default(), events)?)
                     } else {
-                        Vec::new()
+                        None
                     };
-                    Ok((started, finished, model, blocks))
+                    Ok((started, finished, model, content))
                 };
-                let (started, finished, model, blocks) = match step() {
+                let (started, finished, model, content) = match read_step() {
                     Ok(step) => step,
                     Err(error) => {
                         warnings.push(format!("Antigravity 会话步骤 {index} 无法读取：{error}"));
                         continue;
                     }
                 };
-                if model.is_recorded() {
-                    latest = model;
+                model.remember(&mut names);
+                if let Some(model) = generation.get(&index).or_else(|| model.is_recorded().then_some(&model)) {
+                    current_model = Some(model.resolve(None, &names).0);
+                    latest_model_index = Some(index);
                 }
                 last_time = last_time.max(finished.or(started));
                 if meta.first_ts.is_none() {
                     meta.first_ts = started.and_then(ms_to_iso);
                 }
-                match kind {
-                    USER_PROMPT => {
-                        meta.user_count += 1;
-                        if let Some(text) = first_text(&blocks) {
-                            meta.real_user_count += 1;
-                            if meta.title.is_none() {
-                                meta.title = Some(text.chars().take(160).collect());
+                meta.has_transcript |= steps::is_notice(kind);
+                let id = format!("{session_id}:{index}");
+                let timestamp = started.and_then(ms_to_iso);
+                match content {
+                    Some(Content::Message(blocks)) => {
+                        count_message(&mut meta, kind, &blocks);
+                        meta.has_transcript |= !blocks.is_empty();
+                        if events && !blocks.is_empty() {
+                            let role = if kind == MODEL_RESPONSE { "assistant" } else { "user" };
+                            let mut event = json!({"uuid":id,"type":role,"timestamp":timestamp,
+                                "message":{"role":role,"content":blocks}});
+                            if kind == MODEL_RESPONSE {
+                                event["message"]["model"] = json!(current_model);
                             }
+                            detail_events.push(event);
                         }
                     }
-                    MODEL_RESPONSE => {
-                        meta.assistant_count += 1;
-                        meta.assistant_text_count += u32::from(first_text(&blocks).is_some());
+                    Some(Content::Context { kind, label, text }) => {
+                        meta.has_transcript = true;
+                        detail_events.push(json!({"uuid":id,"type":"context","timestamp":timestamp,
+                            "context":{"kind":kind,"label":label},
+                            "message":{"role":"system","content":text}}));
                     }
-                    _ => {}
-                }
-                meta.has_transcript |= !blocks.is_empty();
-                if events && !blocks.is_empty() {
-                    let role = if kind == MODEL_RESPONSE {
-                        "assistant"
-                    } else {
-                        "user"
-                    };
-                    detail_events.push(json!({
-                        "uuid": format!("{session_id}:{index}"),
-                        "type": role, "timestamp": started.and_then(ms_to_iso),
-                        "message": {"role":role, "content":blocks}
-                    }));
+                    Some(Content::System(text)) => {
+                        meta.has_transcript = true;
+                        detail_events.push(json!({"uuid":id,"type":"system","timestamp":timestamp,"content":text}));
+                    }
+                    None => count_message(&mut meta, kind, &[]),
                 }
             }
         }
-        meta.last_ts = last_time.or(fallback_time).and_then(ms_to_iso);
-        if schema.generations {
-            match latest_model(connection) {
-                Ok(Some(model)) => latest = model,
-                Ok(None) => {}
-                Err(error) => warnings.push(format!("Antigravity 会话模型无法读取：{error}")),
+        meta.last_ts = last_time.and_then(ms_to_iso);
+        if let Some((index, model)) = generation.last_key_value() {
+            if latest_model_index.is_none_or(|latest| *index > latest) {
+                current_model = Some(model.resolve(None, &names).0);
             }
         }
-        let (name, _) = latest.resolve(None, &HashMap::new());
-        if name != "unknown" {
-            meta.model = Some(name);
-        }
-        Ok(SessionDetail {
-            meta,
-            events: detail_events,
-            warnings,
-        })
+        meta.model = current_model.filter(|name| name != "unknown");
+        Ok(SessionDetail { meta, events: detail_events, warnings })
     })
 }

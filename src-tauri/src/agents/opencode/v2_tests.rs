@@ -140,8 +140,12 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
     let (_dir, path) = fixture();
     let db = Connection::open(&path).unwrap();
     for (id, kind, seq, value) in [
-        ("msg_error", "assistant", 6, json!({"error":{"message":"Provider unavailable"}})),
-        ("msg_files", "user", 7, json!({"files":[{"name":"preview.png","mime":"image/png","data":"AAAA"}]})),
+        ("msg_error", "assistant", 6, json!({"error":{"type":"provider.unavailable"}})),
+        ("msg_idle", "idle", 7, json!({"outcome":"interrupted"})),
+        ("msg_skill", "skill", 8, json!({"name":"Demo","skill":"demo","text":"Skill instructions"})),
+        ("msg_shell", "shell", 9, json!({"status":"exited","command":"fixture","exit":2,
+            "output":{"output":"Command output"}})),
+        ("msg_files", "user", 10, json!({"text":"附件说明","files":[{"name":"preview.png","mime":"image/png","data":"AAAA"}]})),
     ] {
         db.execute(
             "INSERT INTO session_message VALUES (?1,'ses_v2',?2,?3,2000000,2000000,?4)",
@@ -173,12 +177,17 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
             .events
             .iter()
             .rev()
-            .find(|e| e["type"] == "assistant")
+            .find(|e| e["type"] == "assistant" && e["message"]["content"].is_string())
             .unwrap()["message"]["content"],
         "Latest answer"
     );
-    assert!(detail.events.iter().any(|event| event["type"] == "system" && event["content"] == "Provider unavailable"));
-    assert_eq!(detail.events.last().unwrap()["message"]["content"][0]["filename"], "preview.png");
+    assert!(detail.events.iter().any(|event| event["type"] == "system" && event["content"] == "provider.unavailable"));
+    assert!(detail.events.iter().any(|e| e["content"] == "轮次已中断"));
+    assert!(detail.events.iter().any(|e| e["context"]["label"] == "技能上下文"));
+    assert!(detail.events.iter().any(|e| e["message"]["content"][0]["content"] == "退出码：2\n\nCommand output"));
+    let content = &detail.events.last().unwrap()["message"]["content"];
+    assert_eq!(content[0]["text"], "附件说明");
+    assert_eq!(content[1]["filename"], "preview.png");
     assert_eq!(search_events_at(&path, meta).unwrap(), detail.events);
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(open_db(&path)

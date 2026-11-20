@@ -8,36 +8,36 @@ pub(crate) struct Model {
     pub display: Option<String>,
 }
 
-fn known_name(id: u64) -> Option<&'static str> {
+fn known_model(id: u64) -> Option<(&'static str, Option<&'static str>)> {
     Some(match id {
-        246 => "gemini-2.5-pro",
-        281 | 282 => "claude-sonnet-4",
-        290 | 291 => "claude-opus-4",
-        312 => "gemini-2.5-flash",
-        313 | 329 => "gemini-2.5-flash-thinking",
-        330 => "gemini-2.5-flash-lite",
-        333 | 334 => "claude-sonnet-4-5",
-        340 | 341 => "claude-haiku-4-5",
-        342 => "gpt-oss-120b-medium",
-        1016 | 1036 | 1037 => "gemini-3.1-pro",
-        1018 | 1047 | 1084 => "gemini-3-flash-preview",
-        1020 => "gemini-3.5-flash-medium",
-        1026 => "claude-opus-4-6",
-        1035 => "claude-sonnet-4-6",
-        1050 => "gemini-3.1-flash-lite",
-        1071 => "gemini-3.6-flash-high",
-        1072 => "gemini-3.6-flash-medium",
-        1073 => "gemini-3.6-flash-low",
-        1132 | 1133 => "gemini-3.5-flash-high",
-        1187 => "gemini-3.5-flash-extra-low",
-        1298 => "gemini-3.7-flash-high",
-        1299 => "gemini-3.7-flash-medium",
-        1300 => "gemini-3.7-flash-low",
-        1318 => "gemini-3.8-flash-high",
-        1319 => "gemini-3.8-flash-medium",
-        1320 => "gemini-3.8-flash-low",
-        1402 => "claude-opus-5-5",
-        1417..=1419 => "gemini-4-argon",
+        246 => ("gemini-2.5-pro", None),
+        281 | 282 => ("claude-sonnet-4", None),
+        290 | 291 => ("claude-opus-4", None),
+        312 => ("gemini-2.5-flash", None),
+        313 | 329 => ("gemini-2.5-flash-thinking", None),
+        330 => ("gemini-2.5-flash-lite", None),
+        333 | 334 => ("claude-sonnet-4-5", None),
+        340 | 341 => ("claude-haiku-4-5", None),
+        342 => ("gpt-oss-120b", Some("medium")),
+        1016 | 1036 | 1037 => ("gemini-3.1-pro", None),
+        1018 | 1047 | 1084 => ("gemini-3-flash-preview", None),
+        1020 => ("gemini-3.5-flash", Some("medium")),
+        1026 => ("claude-opus-4-6", None),
+        1035 => ("claude-sonnet-4-6", None),
+        1050 => ("gemini-3.1-flash-lite", None),
+        1071..=1073 => ("gemini-3.6-flash", Some(["high", "medium", "low"][(id - 1071) as usize])),
+        1132 | 1133 => ("gemini-3.5-flash", Some("high")),
+        1187 => ("gemini-3.5-flash", Some("extra-low")),
+        1298..=1300 => ("gemini-3.7-flash", Some(["high", "medium", "low"][(id - 1298) as usize])),
+        1318..=1320 => ("gemini-3.8-flash", Some(["high", "medium", "low"][(id - 1318) as usize])),
+        1402 => ("claude-opus-5-5", Some("high")),
+        1403 => ("claude-sonnet-5-5", Some("low")),
+        1405 => ("claude-sonnet-5-5", Some("high")),
+        1417 => ("gemini-4-argon", Some("high")),
+        1418..=1419 => ("gemini-4-argon", None),
+        1526 => ("gemini-4-hydrogen", Some("medium")),
+        1528 => ("gemini-4-hydrogen", Some("xhigh")),
+        1532..=1535 => ("gemini-4-neon", Some(["high", "medium", "low", "xhigh"][(id - 1532) as usize])),
         _ => return None,
     })
 }
@@ -48,20 +48,27 @@ fn placeholder_id(name: &str) -> Option<u64> {
         .parse::<u64>().ok()?.checked_add(1000)
 }
 
-fn effort(value: &str) -> Option<&str> {
-    let suffix = value
-        .rsplit_once(" (")
-        .and_then(|(_, tail)| tail.strip_suffix(')'))
-        .or_else(|| value.rsplit_once('-').map(|(_, tail)| tail))?;
-    Some(match suffix.to_ascii_lowercase().as_str() {
+fn model_parts(value: &str) -> (&str, Option<&'static str>) {
+    let Some((model, suffix)) = value.strip_suffix(')')
+        .and_then(|name| name.rsplit_once(" ("))
+        .or_else(|| value.rsplit_once('-'))
+    else {
+        return (value, None);
+    };
+    let effort = match suffix.to_ascii_lowercase().as_str() {
         "minimal" => "minimal",
+        "low" if model.ends_with("-extra") => {
+            return (model.trim_end_matches("-extra"), Some("extra-low"));
+        }
+        "extra-low" => "extra-low",
         "low" => "low",
         "medium" => "medium",
         "high" => "high",
         "xhigh" => "xhigh",
         "max" => "max",
-        _ => return None,
-    })
+        _ => return (value, None),
+    };
+    (model, Some(effort))
 }
 
 impl Model {
@@ -125,50 +132,27 @@ impl Model {
             .filter_map(|m| m.name.as_deref());
         let raw = names.clone().find(|name| placeholder_id(name).is_none());
         let id = id.or_else(|| names.filter_map(placeholder_id).next());
-        let name = id
-            .and_then(known_name)
-            .map(str::to_owned)
-            .or_else(|| {
-                raw.and_then(|raw| {
-                    let lower = raw.to_ascii_lowercase();
-                    Some(
-                        match lower.as_str() {
-                            "gemini-pro-default" | "gemini-pro-agent" => "gemini-3.1-pro",
-                            "gemini-3-flash-a"
-                            | "gemini-3-flash-b"
-                            | "gemini-3-flash-agent"
-                            | "gemini-3-flash-agent-a"
-                            | "gemini-3-flash-agent-b" => "gemini-3.5-flash-high",
-                            "gemini-3-flash-c" | "gemini-3-flash" => "gemini-3-flash-preview",
-                            "model_openai_gpt_oss_120b_medium" => "gpt-oss-120b-medium",
-                            _ => raw,
-                        }
-                        .to_owned(),
-                    )
-                })
-            })
-            .or_else(|| {
-                display.map(|name| {
-                    let id = name.split(" (")
-                        .next()
-                        .unwrap_or(name)
-                        .to_lowercase()
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join("-");
-                    if id.starts_with("claude-") {
-                        id.replace('.', "-")
-                    } else {
-                        id
-                    }
-                })
-            })
+        let known = id.and_then(known_model);
+        let raw_id = raw.map(|name| match name.to_ascii_lowercase().as_str() {
+            "gemini-pro-default" | "gemini-pro-agent" => "gemini-3.1-pro",
+            "gemini-3-flash-a" | "gemini-3-flash-b" | "gemini-3-flash-agent"
+            | "gemini-3-flash-agent-a" | "gemini-3-flash-agent-b" => "gemini-3.5-flash-high",
+            "gemini-3-flash-c" | "gemini-3-flash" => "gemini-3-flash-preview",
+            "model_openai_gpt_oss_120b_medium" => "gpt-oss-120b-medium",
+            _ => name,
+        });
+        let name = known.map(|(name, _)| name.to_owned())
+            .or_else(|| raw_id.map(|name| model_parts(name).0.to_owned()))
+            .or_else(|| display.map(|display| {
+                let name = model_parts(display).0.to_lowercase()
+                    .split_whitespace().collect::<Vec<_>>().join("-");
+                if name.starts_with("claude-") { name.replace('.', "-") } else { name }
+            }))
             .or_else(|| id.map(|id| format!("antigravity-model-{id}")))
             .unwrap_or_else(|| "unknown".into());
-        let effort = display
-            .and_then(effort)
-            .or_else(|| raw.and_then(effort))
-            .or_else(|| effort(&name))
+        let effort = display.and_then(|name| model_parts(name).1)
+            .or_else(|| raw_id.and_then(|name| model_parts(name).1))
+            .or_else(|| known.and_then(|(_, effort)| effort))
             .map(str::to_owned);
         (name, effort)
     }

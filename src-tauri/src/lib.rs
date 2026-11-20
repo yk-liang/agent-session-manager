@@ -97,7 +97,7 @@ async fn count_sessions(
         let source = agents::find_source(&agent)?;
         let filter = CatalogFilter {
             include_empty,
-            include_archived: include_archived && source.supports_archive(),
+            include_archived: include_archived && source.supports_archived_sessions(),
         };
         let catalog = source.scan_catalog(filter, &|| false)?;
         Ok(catalog.warnings.is_empty().then_some(catalog.sessions.len()))
@@ -380,7 +380,12 @@ async fn resume_in_terminal(
             .resume_command(&session_id, fork.unwrap_or(false))
             .ok_or_else(|| "该 Agent 不支持恢复会话".to_string())?;
         let full = match cwd {
-            Some(dir) => format!("cd {} && {}", agents::shell_quote(&dir), cmd),
+            Some(dir) => {
+                if !std::path::Path::new(&dir).is_dir() {
+                    return Err(format!("原工作目录不可用，无法恢复会话：{dir}"));
+                }
+                format!("cd -- {} && {}", agents::shell_quote(&dir), cmd)
+            }
             None => cmd,
         };
         agents::run_in_terminal(&full)

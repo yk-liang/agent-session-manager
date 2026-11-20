@@ -30,6 +30,7 @@ export default function Sidebar({
       <div className="sidebar-projects-header">
         <div className="sidebar-title">项目</div>
         <button
+          type="button"
           className={`project-item ${selected === null ? "active" : ""}`}
           disabled={disabled}
           onClick={() => onSelect(null)}
@@ -41,6 +42,7 @@ export default function Sidebar({
       <div className="sidebar-project-list" key={selectedAgent}>
         {projects.map((p) => (
           <button
+            type="button"
             key={p.dirName}
             className={`project-item ${selected === p.dirName ? "active" : ""}`}
             disabled={disabled}

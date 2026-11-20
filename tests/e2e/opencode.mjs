@@ -23,11 +23,15 @@ try {
   await page.addInitScript(({detail,payloads})=>{
     const calls=[];window.__OPENCODE__={calls};
     const meta=new URLSearchParams(location.search).has('no-size')?{...detail.meta,sizeBytes:undefined}:detail.meta;
+    const archived={...meta,sessionId:'ses_archived',title:'Archived conversation',archived:true};
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(cmd,args={})=>{
       calls.push({cmd,args});
-      if(cmd==='list_agents')return[{id:'opencode',displayName:'OpenCode',installed:true,supportsFork:true,deletePolicy:'permanent'}];
-      if(cmd==='catalog')return{sessions:[meta],projects:[{dirName:meta.projectDir,displayPath:meta.cwd,sessionCount:1,lastActivity:null}],warnings:[]};
-      if(cmd==='read_session')return structuredClone(detail);
+      if(cmd==='list_agents')return[{id:'opencode',displayName:'OpenCode',installed:true,supportsFork:true,supportsArchive:false,supportsArchivedSessions:true,deletePolicy:'permanent'}];
+      if(cmd==='catalog'){
+        const sessions=args.includeArchived?[meta,archived]:[meta];
+        return{sessions,projects:[{dirName:meta.projectDir,displayPath:meta.cwd,sessionCount:sessions.length,lastActivity:null}],warnings:[]};
+      }
+      if(cmd==='read_session')return structuredClone(args.sessionId===archived.sessionId?{...detail,meta:archived}:detail);
       if(cmd==='read_tool_payload'){if(!payloads[args.token])throw Error('Unknown tool reference');return structuredClone(payloads[args.token]);}
       if(cmd==='search_conversations'){
         const index=detail.events.findLastIndex(e=>typeof e.message?.content==='string'&&e.message.content.includes(args.query));
@@ -91,4 +95,14 @@ try {
   await page.locator('.session-card-sub').waitFor();
   assert.match(await page.locator('.session-card-stats').textContent(), /^\d+ 条消息$/);
   console.log(`PASS: measured session sizes render and unavailable sizes are omitted (${engine})`);
+  const archiveFilter=page.getByRole('checkbox',{name:'显示已归档',exact:true});
+  const archivedCard=page.locator('.session-card.archived');
+  assert.equal(await archivedCard.count(),0);
+  await archiveFilter.check();
+  await archivedCard.getByText('Archived conversation',{exact:true}).click();
+  await page.locator('.detail-title').filter({hasText:/^Archived conversation$/}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/取消归档/}).count(),0);
+  await archiveFilter.uncheck();
+  await archivedCard.waitFor({state:'hidden'});
+  console.log(`PASS: archived sessions can be viewed with the catalog filter (${engine})`);
 } finally {await browser?.close();rmSync(privateDir,{recursive:true,force:true});}

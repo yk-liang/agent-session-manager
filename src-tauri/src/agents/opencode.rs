@@ -12,7 +12,7 @@ mod event_tests;
 mod events;
 #[cfg(test)]
 mod model_tests;
-mod models;
+mod message_meta;
 mod storage;
 #[cfg(test)]
 mod v2_tests;
@@ -21,8 +21,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
-pub(crate) use models::model_id;
+use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
+pub(crate) use message_meta::{client_id, model_id};
 pub(crate) use storage::MESSAGE_ERROR_SQL;
 
 fn data_home() -> PathBuf {
@@ -449,20 +449,20 @@ fn query_session_rows(
 /// 不再让整个 catalog 因局部问题直接失败。
 #[cfg(test)]
 fn catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
-    cached_catalog(path, include_empty, &|| false)
+    cached_catalog(path, CatalogFilter { include_empty, ..Default::default() }, &|| false)
 }
 
-fn cached_catalog(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
+fn cached_catalog(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     let mut wal = path.as_os_str().to_os_string();
     wal.push("-wal");
     super::catalog_cache::database(
         &[path.to_path_buf(), PathBuf::from(wal)],
-        include_empty,
-        || scan_catalog_at(path, include_empty, cancelled),
+        filter,
+        || scan_catalog_at(path, filter, cancelled),
     )
 }
 
-fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
+fn scan_catalog_at(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     if !path.exists() {
         return Ok(super::Catalog {
             projectless_session_ids: Vec::new(),
@@ -513,7 +513,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
         });
     };
     super::check_catalog_cancelled(cancelled)?;
-    let mut historical_models = models::latest(conn, None, &mut warnings);
+    let mut message_metadata = message_meta::latest(conn, None, &mut warnings);
     super::check_catalog_cancelled(cancelled)?;
     let mut sizes = storage::session_sizes(conn, None);
     let mut missing_id = 0u32;
@@ -524,7 +524,7 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
             missing_id += 1;
             continue;
         }
-        if row.archived {
+        if row.archived && !filter.include_archived {
             continue;
         }
         // 子代理会话（有 parent_id）不作为普通可恢复会话展示
@@ -560,11 +560,14 @@ fn scan_catalog_at(path: &Path, include_empty: bool, cancelled: &dyn Fn() -> boo
             conn,
             &row,
             cnt,
-            include_empty || bypass_empty_filter,
+            filter.include_empty || bypass_empty_filter,
             &mut warnings,
         );
         let Some(mut meta) = meta else { continue };
-        meta.model = historical_models.remove(&row.id);
+        if let Some(message) = message_metadata.remove(&row.id) {
+            meta.model = message.model;
+            meta.client = message.client;
+        }
         meta.size_bytes = sizes.remove(&row.id);
         let mut wal = path.as_os_str().to_os_string();
         wal.push("-wal");
@@ -624,7 +627,10 @@ fn read_session_mode_at(
     });
     let mut meta =
         build_meta(conn, &row, counts, true, &mut warnings).ok_or("未找到该 OpenCode 会话")?;
-    meta.model = models::latest(conn, Some(session_id), &mut warnings).remove(session_id);
+    if let Some(message) = message_meta::latest(conn, Some(session_id), &mut warnings).remove(session_id) {
+        meta.model = message.model;
+        meta.client = message.client;
+    }
     meta.size_bytes = storage::session_sizes(conn, Some(session_id)).remove(session_id);
     let (events, issues) = events::read(conn, path, session_id, view)?;
     warnings.extend(issues);
@@ -642,14 +648,8 @@ fn search_events_at(path: &Path, meta: &SessionMeta) -> Result<Vec<Value>, Strin
     let db = open_db_scoped(path, Some(&meta.session_id))?;
     let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
     let (row, mut warnings) = session_row(&snapshot, &meta.session_id)?;
-    let directory = row
-        .directory
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .unwrap_or("(unknown)");
     if row.id != meta.session_id
-        || escape_dir(directory) != meta.project_dir
-        || row.archived
+        || project_id(&row) != meta.project_dir
         || row.is_child
     {
         return Err("会话来源已变化，请刷新后重试".into());
@@ -686,6 +686,9 @@ impl AgentSource for OpenCodeSource {
     fn supports_fork(&self) -> bool {
         true
     }
+    fn supports_archived_sessions(&self) -> bool {
+        true
+    }
     fn delete_policy(&self) -> super::DeletePolicy {
         // 委托官方 CLI 删除，直接改库，无法进废纸篓
         super::DeletePolicy::Permanent
@@ -695,7 +698,7 @@ impl AgentSource for OpenCodeSource {
         filter: crate::agents::CatalogFilter,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<super::Catalog, String> {
-        cached_catalog(&db_path(), filter.include_empty, cancelled)
+        cached_catalog(&db_path(), filter, cancelled)
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
         token
@@ -715,26 +718,41 @@ impl AgentSource for OpenCodeSource {
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         search_events_at(&db_path(), meta)
     }
-    fn delete_session(&self, _project_dir: &str, session_id: &str) -> Result<(), String> {
+    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
         if !is_valid_session_id(session_id) {
             return Err("会话 ID 无效".into());
         }
-        // 委托官方 CLI：会一并清理子代理会话，避免直接改库。
-        // 先解析 opencode 绝对路径：GUI 应用从 Finder 启动只有精简 PATH，
-        // 直接拿名字 spawn 会 ENOENT。删除是破坏性操作，找不到就显式报错
-        let bin = super::find_executable("opencode").ok_or_else(|| {
-            "找不到 opencode 可执行文件（请确认已安装；若已安装，可能是它不在应用可见的 PATH 中）"
-                .to_string()
-        })?;
-        let output = std::process::Command::new(&bin)
-            .args(["session", "delete", session_id])
-            .env(
-                "XDG_DATA_HOME",
-                data_home()
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            )
+        let path = db_path().canonicalize()
+            .map_err(|error| format!("无法定位 OpenCode 会话库：{error}"))?;
+        let db = open_db_scoped(&path, Some(session_id))?;
+        let (row, warnings) = session_row(&db, session_id)?;
+        if !warnings.is_empty() {
+            return Err(warnings.join("；"));
+        }
+        if row.is_child || project_id(&row) != project_dir {
+            return Err("OpenCode 会话所属项目已变化，请刷新列表后重试".into());
+        }
+        drop(db);
+
+        let bin = super::find_executable("opencode")
+            .ok_or("找不到 opencode 可执行文件，请检查是否已安装")?;
+        let mut command = std::process::Command::new(&bin);
+        command.args(["session", "delete", session_id]).env("OPENCODE_DB", &path);
+        if let Some(data_root) = path.parent().and_then(|dir| {
+            dir.ends_with("opencode").then(|| dir.parent()).flatten()
+        }) {
+            command.env("XDG_DATA_HOME", data_root);
+        }
+        let help = std::process::Command::new(&bin).args(["session", "delete", "--help"])
+            .output().map_err(|error| format!("无法读取 OpenCode 删除命令选项：{error}"))?;
+        if !help.status.success() {
+            return Err("当前 OpenCode CLI 不支持会话删除".into());
+        }
+        if String::from_utf8_lossy(&help.stdout).lines().any(|line| line.trim_start().starts_with("--standalone ")) {
+            // 独立进程才能保证数据库路径生效，避免连接到已运行的其他实例。
+            command.arg("--standalone");
+        }
+        let output = command
             .output()
             .map_err(|e| format!("无法运行 OpenCode（{}）： {e}", bin.display()))?;
         if !output.status.success() {
@@ -775,6 +793,10 @@ fn escape_dir(dir: &str) -> String {
     super::escape_path_id(dir)
 }
 
+fn project_id(row: &SessionRow) -> String {
+    escape_dir(row.directory.as_deref().filter(|d| !d.is_empty()).unwrap_or("(unknown)"))
+}
+
 fn build_meta(
     conn: &Connection,
     row: &SessionRow,
@@ -790,18 +812,14 @@ fn build_meta(
     if title.is_none() {
         title = first_user_text(conn, &row.id, warnings);
     }
-    let dir = row
-        .directory
-        .clone()
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "(unknown)".to_string());
     Some(SessionMeta {
         session_id: row.id.clone(),
-        project_dir: escape_dir(&dir),
+        project_dir: project_id(row),
         cwd: row.directory.clone(),
         title,
         model: None,
         version: row.version.clone(),
+        client: None,
         git_branch: None,
         entrypoint: None,
         first_ts: row.created_ms.and_then(ms_to_iso),
@@ -812,7 +830,7 @@ fn build_meta(
         assistant_text_count: assistant_text,
         size_bytes: None,
         has_transcript: true,
-        archived: false,
+        archived: row.archived,
         stats_pending: false,
         source_files: Vec::new(),
     })
@@ -870,6 +888,9 @@ mod tests {
         conn.execute("UPDATE session SET time_archived=99", [])
             .unwrap();
         assert!(catalog_at(&path, false).unwrap().sessions.is_empty());
+        let archived = cached_catalog(&path, CatalogFilter { include_archived: true, ..Default::default() }, &|| false).unwrap();
+        assert!(archived.sessions[0].archived);
+        assert!(read_session_at(&path, "ses_cached").unwrap().meta.archived);
     }
 
     #[test]
@@ -910,7 +931,7 @@ mod tests {
         assert_eq!(ms_to_iso(0), None);
         assert_eq!(
             ms_to_iso(1788417099162),
-            Some("2026-09-03T06:31:39Z".to_string())
+            Some("2026-09-03T06:31:39.162Z".to_string())
         );
     }
 
@@ -1287,6 +1308,6 @@ mod tests {
         // 占位标题被替换为首条用户消息
         assert_eq!(meta.title.as_deref(), Some("OpenCode 第一条消息"));
         assert_eq!(meta.project_dir, "-tmp-oc");
-        assert_eq!(meta.first_ts.as_deref(), Some("2026-09-03T06:30:00Z"));
+        assert_eq!(meta.first_ts.as_deref(), Some("2026-09-03T06:30:00.000Z"));
     }
 }

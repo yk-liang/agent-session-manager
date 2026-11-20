@@ -47,6 +47,7 @@ fn sample_models_dev() -> Vec<u8> {
         "openai": {
             "id": "openai",
             "models": {
+                "gpt-5.4": { "id": "gpt-5.4", "cost": { "input": 2.0, "output": 8.0, "cache_read": 0.2 } },
                 "gpt-5-codex": {
                     "id": "gpt-5-codex",
                     "cost": {
@@ -72,6 +73,15 @@ fn sample_models_dev() -> Vec<u8> {
                 "anthropic/claude-sonnet-4-5": {
                     "id": "anthropic/claude-sonnet-4-5",
                     "cost": { "input": 3.5, "output": 16.0 }
+                }
+            }
+        },
+        "alibaba-cn": {
+            "id": "alibaba-cn",
+            "models": {
+                "qwen-test-price": {
+                    "id": "qwen-test-price",
+                    "cost": { "input": 0.4, "output": 1.6 }
                 }
             }
         },
@@ -196,7 +206,6 @@ fn make_event(agent: &str, model: &str, tokens: Tokens) -> events::RequestEvent 
         details: RecordedFields {
             input_recorded: true,
             output_recorded: true,
-            availability_known: true,
             cache_read_recorded: true,
             cache_write_recorded: true,
             reasoning_recorded: true,
@@ -264,7 +273,7 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
     assert_eq!(fallback.rates.input, 3.0);
     assert_eq!(
         pricer
-            .resolve("aliyun/deepseek-chat", None, 0)
+            .resolve("deepseek/deepseek-chat", None, 0)
             .unwrap()
             .rates
             .input,
@@ -275,10 +284,16 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
         assert!(pricer.resolve(model, None, 0).is_none(), "{model}");
     }
 
-    // 冲突/挂名零/非文本单位/缺输出价全部拒绝
+    let aliyun = pricer.resolve("aliyun/qwen-test-price", None, 0).unwrap();
+    assert_eq!(aliyun.provider.as_deref(), Some("alibaba-cn"));
+    assert_eq!(aliyun.rates.input, 0.4);
+
+    // 冲突、非文本模型、不同推理费率与缺输出价按未定价处理。
     assert!(pricer.resolve("conflict-model", None, 0).is_none());
-    assert!(pricer.resolve("claude-nominal-zero", None, 0).is_none());
-    assert!(pricer.resolve("claude-audio-special", None, 0).is_none());
+    let free = pricer.resolve("claude-nominal-zero", None, 0).unwrap();
+    assert_eq!((free.rates.input, free.rates.output), (0.0, 0.0));
+    let audio = pricer.resolve("claude-audio-special", None, 0).unwrap();
+    assert_eq!((audio.rates.input, audio.rates.output), (3.0, 15.0));
     assert!(pricer.resolve("text-embedding-3-large", None, 0).is_none());
     assert!(pricer.resolve("char-billed-model", None, 0).is_none());
     assert!(pricer.resolve("reasoning-diff-model", None, 0).is_none());
@@ -523,7 +538,7 @@ fn cost_accounting_matches_agent_token_rules() {
     // Codex priority 档位按 ×2 计费；未设置 cache_write 时回落到 input 价
     let mut codex = make_event(
         "codex",
-        "gpt-5-codex",
+        "gpt-5.4",
         Tokens {
             input_tokens: 100_000,
             output_tokens: 10_000,
@@ -534,7 +549,7 @@ fn cost_accounting_matches_agent_token_rules() {
             ..Default::default()
         },
     );
-    codex.request.tier = Some("priority".into());
+    codex.request.tier = Some(" PrIoRiTy ".into());
     let codex_cost = pricer.evaluate_event_cost(&codex).unwrap();
     assert_eq!(codex_cost.multiplier, Some(2.0));
     let expected_codex = (0.02 * 4.0) + (0.08 * 0.4) + (0.01 * 16.0);
@@ -571,12 +586,16 @@ fn cost_accounting_matches_agent_token_rules() {
     let qoder_cost = pricer.evaluate_event_cost(&qoder_plain).unwrap();
     assert!((qoder_cost.total_usd - (0.1 * 3.0 + 0.01 * 15.0)).abs() < 1e-9);
 
-    // 无计量的失败请求为未知（None），绝不写成 0
+    // 无计量的失败请求费用为零，成功但缺少用量的付费请求费用未知。
     let mut failed = make_event("claude", "claude-sonnet-4-5", Tokens::default());
     failed.status = RequestOutcome::Failed;
     failed.details.input_recorded = false;
     failed.details.output_recorded = false;
+    assert_eq!(pricer.evaluate_event_cost(&failed).unwrap().total_usd, 0.0);
+    failed.status = RequestOutcome::Success;
     assert!(pricer.evaluate_event_cost(&failed).is_none());
+    failed.model = "claude-nominal-zero".into();
+    assert_eq!(pricer.evaluate_event_cost(&failed).unwrap().total_usd, 0.0);
 }
 
 #[test]
@@ -908,7 +927,11 @@ fn litellm_supports_272k_threshold_and_rejects_unparseable_special_tiers() {
             "mode": "chat",
             "input_cost_per_token": 0.000002,
             "output_cost_per_token": 0.00001,
-            "input_cost_per_token_above_custom_window": 0.000004
+            "input_cost_per_token_above_272k_tokens_decisions": 0.000004,
+            "cache_creation_input_token_cost_above_12hr_ultrafast": 0.000006,
+            "input_cost_per_audio_token_above_200k_tokens": 0.000004,
+            "input_cost_per_token_priority": -1.0,
+            "output_cost_per_token_priority": 0.00001
         },
         "openai/multi-tier-model": {
             "litellm_provider": "openai",
@@ -966,8 +989,9 @@ fn litellm_supports_272k_threshold_and_rejects_unparseable_special_tiers() {
     assert!(c2.long_context);
     assert!((c2.total_usd - 1.090004).abs() < 1e-9);
 
-    // 无法准确解析的特殊/多档费率必须按未定价处理，不可降级为普通费率
-    assert!(pricer.resolve("openai/weird-tier-model", None, 0).is_none());
+    let standard = pricer.resolve("openai/weird-tier-model", None, 0).unwrap();
+    assert!(standard.rates.service_tiers.is_empty());
+    assert!(standard.rates.long_context.is_none());
     assert!(pricer.resolve("openai/multi-tier-model", None, 0).is_none());
     assert!(pricer
         .resolve("openai/tiered-array-model", None, 0)
@@ -1121,6 +1145,10 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
     );
     assert!(price.rates.cache_write_1h.is_none());
     assert_eq!(
+        serde_json::to_value(&price.rates).unwrap()["cacheWrite12h"],
+        json!(8.0)
+    );
+    assert_eq!(
         price.rates.long_context.as_ref().unwrap().threshold,
         272_000
     );
@@ -1156,14 +1184,16 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
         .unwrap();
     assert!((flex.total_usd - (0.03 * 2.0 + 0.06 * 0.2 + 0.01 * 2.0 + 0.005 * 10.0)).abs() < 1e-9);
 
-    // batch 无完整价格、priority 超过长上下文阈值却无对应档位价、未知档位：均为未知而非 0。
+    // batch 缺少完整价格。已知倍率的 priority 可使用长上下文标准费率。
     let batch = snapshot.price_event(&gpt_56_sol_event(Some("batch"), tokens.clone()));
     assert_eq!(batch.unwrap_err(), PricingIssue::UnsupportedTier);
     let long_priority = snapshot.price_event(&gpt_56_sol_event(
         Some("priority"),
         sol_tokens(300_000, 0, 0, 10),
     ));
-    assert_eq!(long_priority.unwrap_err(), PricingIssue::UnsupportedTier);
+    let long_priority = long_priority.unwrap();
+    assert!(long_priority.long_context);
+    assert_eq!(long_priority.multiplier, Some(2.0));
     let mut fast = make_event("claude", "claude-sonnet-9", tokens.clone());
     fast.request.tier = Some("fast".into());
     assert_eq!(
@@ -1217,6 +1247,7 @@ fn duplicate_listings_differing_only_in_variants_keep_standard_price() {
         "gpt-5.6-sol": {
             "litellm_provider": "openai", "mode": "chat",
             "input_cost_per_token": 4e-6, "output_cost_per_token": 2e-5,
+            "cache_creation_input_token_cost_above_12hr": 8e-6,
             "input_cost_per_token_priority": 8e-6, "output_cost_per_token_priority": 4e-5
         },
         "openai/gpt-5.6-sol": {
@@ -1239,6 +1270,7 @@ fn duplicate_listings_differing_only_in_variants_keep_standard_price() {
         .expect("standard price kept");
     assert!(approx_f64(price.rates.input, 4.0));
     assert!(price.rates.service_tiers.is_empty());
+    assert!(price.rates.cache_write_12h.is_none());
     // 没有一致的 priority 价时，Codex 回落到已公开的 ×2 规则。
     let mut event = gpt_56_sol_event(Some("priority"), sol_tokens(1_000_000, 0, 0, 0));
     event.request.provider = None;

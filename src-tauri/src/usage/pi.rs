@@ -12,10 +12,55 @@ use std::{
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub(super) struct Context {
     project: Option<String>,
     provider: Option<String>,
     effort: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    links: Vec<EntryLink>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unlinked: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EntryLink {
+    offset: u64,
+    id: String,
+    parent: Option<String>,
+}
+
+impl Context {
+    fn add_link(&mut self, value: &Value, offset: u64) {
+        let parent = match value.get("parentId") {
+            Some(Value::Null) => Some(None),
+            Some(Value::String(id)) if !id.is_empty() => Some(Some(id.clone())),
+            _ => None,
+        };
+        if let Some((id, parent)) = text(value.get("id")).zip(parent) {
+            self.links.push(EntryLink { offset, id: id.into(), parent });
+        } else {
+            self.unlinked = true;
+        }
+    }
+
+    fn active_offsets(&self) -> Option<HashSet<u64>> {
+        let links: HashMap<_, _> = self.links.iter().map(|link| (link.id.as_str(), link)).collect();
+        if self.unlinked || links.len() != self.links.len()
+            || self.links.iter().any(|link| link.parent.as_ref().is_some_and(|id| !links.contains_key(id.as_str())))
+        {
+            return None;
+        }
+        let mut active = HashSet::new();
+        let mut next = self.links.last();
+        while let Some(link) = next {
+            if !active.insert(link.offset) {
+                return None;
+            }
+            next = link.parent.as_deref().map(|id| links[id]);
+        }
+        Some(active)
+    }
 }
 
 pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut FileCache) {
@@ -23,6 +68,9 @@ pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut File
         return;
     };
     let state = &mut file.state;
+    if kind != "session" {
+        state.pi.add_link(value, offset);
+    }
     match kind {
         "session" => {
             if let Some(id) = text(value.get("id")) {
@@ -132,82 +180,81 @@ pub(super) fn read_line(value: &Value, offset: u64, path: &Path, file: &mut File
     file.samples.push(sample);
 }
 
+fn replay_prefix<'a>(child: &'a FileCache, parent: &'a FileCache) -> HashMap<&'a str, &'a str> {
+    let Some(fork_time) = child.state.created_at else { return HashMap::new() };
+    let active = if parent.state.pi.links.is_empty() {
+        None
+    } else if let Some(offsets) = parent.state.pi.active_offsets() {
+        Some(offsets)
+    } else {
+        return HashMap::new();
+    };
+    if !child.state.pi.links.is_empty() && child.state.pi.active_offsets().is_none() {
+        return HashMap::new();
+    }
+    let mut originals: Vec<_> = parent.samples.iter()
+        .filter(|sample| active.as_ref().is_none_or(|offsets| offsets.contains(&sample.offset)))
+        .collect();
+    originals.sort_unstable_by_key(|sample| sample.offset);
+    let mut candidates: Vec<_> = child.samples.iter().collect();
+    candidates.sort_unstable_by_key(|sample| sample.offset);
+    candidates.into_iter().zip(originals)
+        .take_while(|(child, parent)| {
+            parent.timestamp > 0 && parent.timestamp <= fork_time
+                && child.timestamp == parent.timestamp && child.model == parent.model
+                && child.tokens == parent.tokens && child.request.kind == parent.request.kind
+                && child.request.stop == parent.request.stop
+        })
+        .map(|(child, parent)| (child.key.as_str(), parent.key.as_str()))
+        .collect()
+}
+
 pub(super) fn records(files: &BTreeMap<PathBuf, FileCache>) -> Vec<Sample> {
+    let parents: HashMap<_, _> = files.iter().filter_map(|(path, file)| {
+        let parent = super::normalize::parent_path(path, file, files)?;
+        Some((path, (parent, replay_prefix(file, &files[parent]))))
+    }).collect();
     let mut out = Vec::new();
     for (path, file) in files {
-        let mut root = path.clone();
+        let mut root = path;
+        let mut lineage = Vec::new();
         let mut inherited = HashSet::new();
-        let mut inherited_usage = HashMap::<_, Vec<_>>::new();
-        let mut occurrences = HashMap::<_, usize>::new();
-        let mut visited = HashSet::from([root.clone()]);
-        while let Some(parent) = super::normalize::parent_path(&root, &files[&root], files) {
-            if !visited.insert(parent.clone()) {
+        let mut visited = HashSet::from([root]);
+        while let Some((parent, replay)) = parents.get(root) {
+            if !visited.insert(*parent) {
                 break;
             }
-            let mut positions = HashMap::<_, usize>::new();
-            for sample in &files[parent].samples {
-                inherited.insert(sample.key.as_str());
-                if sample.timestamp > 0
-                    && file
-                        .state
-                        .created_at
-                        .is_some_and(|time| sample.timestamp <= time)
-                {
-                    let key = usage_identity(sample);
-                    let index = positions.entry(key.clone()).or_default();
-                    let keys = inherited_usage.entry(key).or_default();
-                    if keys.len() == *index {
-                        keys.push(sample.key.as_str());
-                    }
-                    *index += 1;
-                }
-            }
-            root = parent.clone();
+            lineage.push(replay);
+            inherited.extend(files[*parent].samples.iter().map(|sample| sample.key.as_str()));
+            root = parent;
         }
+        let origin = &files[root];
+        let identity = if origin.state.session.is_empty() {
+            origin.origin_path.as_deref().unwrap_or(root).to_string_lossy()
+        } else {
+            std::borrow::Cow::Borrowed(origin.state.session.as_str())
+        };
         for sample in &file.samples {
-            let mut sample = sample.clone();
-            if sample.timestamp > 0 && !sample.key.starts_with("response:") {
-                let identity = usage_identity(&sample);
-                let position = occurrences.entry(identity.clone()).or_default();
-                if !inherited.contains(sample.key.as_str()) {
-                    if let Some(key) = inherited_usage
-                        .get(&identity)
-                        .and_then(|keys| keys.get(*position))
-                    {
-                        sample.key = (*key).to_owned();
-                    }
-                }
-                *position += 1;
-            }
-            sample.replayed |= inherited.contains(sample.key.as_str());
+            let mut record = sample.clone();
             if !sample.key.starts_with("response:") {
-                // Pi 的 session ID 在移动/恢复文件时不变；短 entry ID 仅在同一父会话链内唯一。
-                let parent = &files[&root];
-                let identity = if parent.state.session.is_empty() {
-                    parent
-                        .origin_path
-                        .as_deref()
-                        .unwrap_or(&root)
-                        .to_string_lossy()
-                        .into_owned()
+                let key = if inherited.contains(sample.key.as_str()) {
+                    sample.key.as_str()
                 } else {
-                    parent.state.session.clone()
+                    lineage.iter().fold(sample.key.as_str(), |key, replay| {
+                        replay.get(key).copied().unwrap_or(key)
+                    })
                 };
-                sample.key = format!("{}:{}", identity, sample.key);
+                record.replayed |= inherited.contains(key);
+                record.key = if key.starts_with("response:") {
+                    key.to_owned()
+                } else {
+                    format!("{identity}:{key}")
+                };
+            } else {
+                record.replayed |= inherited.contains(sample.key.as_str());
             }
-            out.push(sample);
+            out.push(record);
         }
     }
     super::normalize::unique("pi", out)
-}
-
-fn usage_identity(sample: &Sample) -> String {
-    serde_json::to_string(&(
-        sample.timestamp,
-        &sample.model,
-        &sample.tokens,
-        &sample.request.kind,
-        &sample.request.stop,
-    ))
-    .unwrap_or_default()
 }

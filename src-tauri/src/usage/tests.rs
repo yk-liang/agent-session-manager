@@ -171,7 +171,7 @@ fn report_cache_observes_external_ledger_writes_even_with_the_same_updated_time(
 }
 
 #[test]
-fn report_cache_invalidates_for_scope_force_timezone_and_legacy_cache_writes() {
+fn report_cache_invalidates_for_scope_force_timezone_and_external_sync() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("logs");
     let other = dir.path().join("other");
@@ -181,19 +181,10 @@ fn report_cache_invalidates_for_scope_force_timezone_and_legacy_cache_writes() {
     let mut store = Store::open(Some(&db));
     assert_eq!(total(&scan("claude", &root, &mut store)), 11);
     let mut writer = Store::open(Some(&db));
-    let legacy = other.join("deleted.jsonl");
-    write(&legacy, &[family("legacy", Some(counters(20, 2)))]);
-    let parsed = cache::read_file(&legacy, "claude", None, false, &|| false)
-        .unwrap()
-        .0;
-    writer.commit(
-        &scope("claude", &[root.clone()]),
-        &BTreeMap::from([(legacy.clone(), parsed)]),
-        &BTreeSet::from([legacy.clone()]),
-        &[],
-        1,
-    );
-    fs::remove_file(legacy).unwrap();
+    let extra = other.join("deleted.jsonl");
+    write(&extra, &[family("external", Some(counters(20, 2)))]);
+    ingest::sync_at("claude", &[other.clone()], &mut writer, &|| false).unwrap();
+    fs::remove_file(extra).unwrap();
     assert_eq!(total(&scan("claude", &root, &mut store)), 33);
     assert_eq!(store.report_builds, 2);
     assert_eq!(total(&scan("claude", &other, &mut store)), 33);
@@ -244,44 +235,6 @@ fn deleting_a_session_keeps_lifetime_usage_after_restart_and_restore() {
         120,
         "restoring a source must not bill it again"
     );
-}
-
-#[test]
-fn cache_cleanup_and_legacy_cache_migration_do_not_erase_cumulative_usage() {
-    let dir = tempfile::tempdir().unwrap();
-    let logs = dir.path().join("logs");
-    let path = logs.join("session.jsonl");
-    let cache_path = dir.path().join("cache.sqlite");
-    let ledger_path = dir.path().join("durable.sqlite");
-    write(&path, &[family("msg_migration", Some(counters(100, 20)))]);
-    let parsed = cache::read_file(&path, "claude", None, false, &|| false)
-        .unwrap()
-        .0;
-    let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger_path));
-    let files = BTreeMap::from([(path.clone(), parsed)]);
-    store.commit(
-        &scope("claude", &[logs.clone()]),
-        &files,
-        &BTreeSet::from([path.clone()]),
-        &[],
-        1,
-    );
-    fs::remove_file(&path).unwrap();
-    let migrated = read_at("claude", &[logs.clone()], &mut store, false, false, &|| {
-        false
-    })
-    .unwrap()
-    .unwrap();
-    assert_eq!(total(&migrated), 120);
-    drop(store);
-    fs::remove_file(&cache_path).unwrap();
-    let mut store = Store::open_with_ledger(Some(&cache_path), Some(&ledger_path));
-    assert_eq!(total(&scan("claude", &logs, &mut store)), 120);
-    write(
-        &logs.join("restored.jsonl"),
-        &[family("msg_migration", Some(counters(100, 20)))],
-    );
-    assert_eq!(total(&scan("claude", &logs, &mut store)), 120);
 }
 
 #[test]
@@ -639,7 +592,7 @@ fn claude_and_qoder_forks_keep_global_message_and_request_ids_without_merging_ne
 }
 
 #[test]
-fn mixed_availability_survives_aggregation_stream_completion_and_legacy_ledger_loading() {
+fn mixed_availability_survives_aggregation_and_stream_completion() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("log.jsonl");
     let ledger = dir.path().join("durable.sqlite");
@@ -670,36 +623,11 @@ fn mixed_availability_survives_aggregation_stream_completion_and_legacy_ledger_l
     assert!(!complete.rows[0].details.output_incomplete);
     fs::remove_file(path).unwrap();
     drop(store);
-    // Old persisted observations have no availability marker. Explicit all-zero complete calls
-    // remain measured zero; total-only partial observations remain unknown after upgrade.
-    let db = rusqlite::Connection::open(&ledger).unwrap();
-    let mut file: Value = db
-        .query_row("SELECT data FROM usage_ledger_sources LIMIT 1", [], |r| {
-            storage::decode(r.get_ref(0)?)
-        })
-        .unwrap();
-    for sample in file["samples"].as_array_mut().unwrap() {
-        for key in [
-            "availabilityKnown",
-            "inputRecorded",
-            "outputRecorded",
-            "inputIncomplete",
-            "outputIncomplete",
-        ] {
-            sample["details"].as_object_mut().unwrap().remove(key);
-        }
-    }
-    db.execute(
-        "UPDATE usage_ledger_sources SET data=?1",
-        [file.to_string()],
-    )
-    .unwrap();
-    drop(db);
     let mut store = Store::open_with_ledger(None, Some(&ledger));
     let report = scan("claude", dir.path(), &mut store);
     assert_eq!(total(&report), 30);
     assert!(report.rows[0].details.input_recorded);
-    assert!(report.rows[0].details.output_recorded);
+    assert!(!report.rows[0].details.input_incomplete);
 }
 
 #[test]
@@ -760,13 +688,10 @@ fn cached_read_before_refresh_cannot_bypass_extraction_upgrade_for_unchanged_log
     old.samples[0].key = format!("session:{}:message:gateway_zero", old.samples[0].session);
     old.samples[0].details = RecordedFields::default();
     old.samples[0].partial = true;
-    writer.commit(
-        &scope("claude", &[root.clone()]),
-        &BTreeMap::from([(path.clone(), old)]),
-        &BTreeSet::from([path]),
-        &[],
-        1,
-    );
+    let mut history = BTreeMap::new();
+    let mut changed = BTreeSet::new();
+    ledger::absorb("claude", &mut history, &BTreeMap::from([(path, old)]), &mut changed);
+    writer.ledger().unwrap().commit("claude", &history, &changed, 1).unwrap();
     drop(writer);
     let mut store = Store::open(Some(&cache_path));
     let cached = read_at("claude", &[root.clone()], &mut store, false, false, &|| {
@@ -834,7 +759,7 @@ fn opencode_fork_with_new_ids_does_not_rebill_history_but_keeps_real_new_calls()
     legacy
         .execute(
             "UPDATE usage_ledger_sources SET data=?1",
-            [file.to_string()],
+            [storage::encode(&file).unwrap()],
         )
         .unwrap();
     drop(legacy);
@@ -927,6 +852,13 @@ fn opencode_v2_usage_handles_nested_models_compaction_forks_and_persistent_histo
         "model-switched",
         3,
         &json!({"model":{"id":"unused","providerID":"provider"},"tokens":usage}),
+    );
+    insert(
+        "msg_compacting",
+        "ses_original",
+        "compaction",
+        4,
+        &json!({"model":{"id":"summary","providerID":"provider"},"tokens":usage,"status":"running"}),
     );
     let ledger = dir.path().join("ledger.sqlite");
     let mut store = Store::open_with_ledger(None, Some(&ledger));
@@ -1120,8 +1052,9 @@ fn claude_cache_ttl_fallback_and_chatcmpl_streaming_keep_one_complete_request() 
 fn claude_counts_independent_advisor_and_fallback_attempts_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(None);
-    let usage = json!({"input_tokens":10,"output_tokens":5,"iterations":[
-        {"type":"message","input_tokens":10,"output_tokens":5},
+    let usage = json!({"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":3,
+        "cache_creation":{"ephemeral_1h_input_tokens":3},"iterations":[
+        {"type":"message","input_tokens":10,"output_tokens":5,"cache_creation":{"ephemeral_1h_input_tokens":3}},
         {"type":"advisor_message","model":"advisor-model","input_tokens":2,"output_tokens":3,"cache_read_input_tokens":4}
     ]});
     let mut value = family("msg_advisor", Some(usage));
@@ -1130,14 +1063,14 @@ fn claude_counts_independent_advisor_and_fallback_attempts_once() {
     later["message"]["usage"]["iterations"]
         .as_array_mut()
         .unwrap()
-        .insert(
-            0,
-            json!({"type":"message","input_tokens":10,"output_tokens":5}),
-        );
+        .push(json!({"type":"message","input_tokens":10,"output_tokens":5,
+            "cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":5}}));
+    later["message"]["usage"]["cache_creation_input_tokens"] = json!(10);
     let path = dir.path().join("a.jsonl");
     write(&path, &[value, later.clone()]);
     let report = scan("claude", dir.path(), &mut store);
-    assert_eq!(total(&report), 24);
+    assert_eq!(total(&report), 34);
+    assert_eq!(report.rows.iter().map(|row| row.tokens.cache_write_1h_tokens).sum::<u64>(), 8);
     assert_eq!(
         report
             .rows
@@ -1794,7 +1727,7 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
     let mut store = Store::open(None);
     let time = "2026-10-20T00:00:00Z";
     let response_time = "2026-10-20T00:00:01Z";
-    let assistant = json!({"type":"message","id":"a","timestamp":time,"message":{"role":"assistant","modelId":"m","provider":"p","timestamp":response_time,"usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"cacheWrite1h":2,"reasoning":2}}});
+    let mut assistant = json!({"type":"message","id":"a","timestamp":time,"message":{"role":"assistant","modelId":"m","provider":"p","timestamp":response_time,"usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5,"cacheWrite1h":2,"reasoning":2,"totalTokens":16}}});
     let values = vec![
         json!({"type":"session","id":"parent","cwd":"/tmp/pi-project"}),
         json!({"type":"custom","customType":"model-snapshot","data":{"provider":"p","model":"selected"}}),
@@ -1805,6 +1738,15 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         json!({"type":"branch_summary","id":"d","timestamp":time,"usage":{"input":1,"output":2}}),
         json!({"type":"message","id":"e","timestamp":time,"message":{"role":"toolResult","usage":{"input":1,"output":1}}}),
     ];
+    let mut values = values;
+    values[1]["id"] = json!("model");
+    values[1]["parentId"] = Value::Null;
+    values[2]["id"] = json!("effort");
+    values[2]["parentId"] = json!("model");
+    for (index, parent) in ["effort", "effort", "a", "c", "d"].into_iter().enumerate() {
+        values[index + 3]["parentId"] = json!(parent);
+    }
+    assistant["parentId"] = Value::Null;
     write(&dir.path().join("parent.jsonl"), &values);
     let mut copied = assistant.clone();
     copied["id"] = json!("regenerated");
@@ -1813,14 +1755,15 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         &[
             json!({"type":"session","id":"child","parentSession":"./forks/../parent.jsonl","timestamp":"2026-10-20T00:00:10Z"}),
             copied,
-            json!({"type":"usage","id":"new","timestamp":time,"usage":{"input":1,"output":1}}),
+            json!({"type":"usage","id":"new","parentId":"regenerated","timestamp":time,"provider":"p","model":"m","usage":{"input":1,"output":0,"cacheRead":2}}),
         ],
     );
     write(
         &dir.path().join("unrelated.jsonl"),
         &[json!({"type":"session","id":"other"}), assistant],
     );
-    assert_eq!(total(&scan("pi", dir.path(), &mut store)), 53);
+    assert_eq!(total(&scan("pi", dir.path(), &mut store)), 58);
+    // 被放弃的兄弟 b 仍计入父会话，且不会吞掉 fork 中外观相同的独立请求。
     let reqs = events::page(
         &mut store.ledger().unwrap().db,
         events::EventQuery::default(),
@@ -1833,6 +1776,8 @@ fn pi_counts_all_usage_kinds_and_dedupes_fork_lineage_without_merging_unrelated_
         .find(|event| event.session == "parent" && event.tokens.reasoning_tokens == 2)
         .unwrap();
     assert_eq!(parent_request.model, "p/m");
+    assert_eq!(parent_request.tokens.output_tokens, 5);
+    assert_eq!(parent_request.tokens.unclassified_tokens, 0);
     assert_eq!(parent_request.tokens.cache_write_1h_tokens, 2);
     assert_eq!(
         parent_request.request.project.as_deref(),

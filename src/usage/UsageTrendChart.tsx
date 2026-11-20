@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { formatTokens, formatCount, formatUsd } from "./format";
-import { costGapNotes, type TrendMetric } from "./metrics";
+import { costDisplay, costGapNotes, type TrendMetric } from "./metrics";
 import { TREND_METRIC_NAMES, type StackedSeries, type UsagePoint } from "./trend";
 import ChartLegend from "./ChartLegend";
 import { useTooltip, type TooltipContent } from "./UsageTooltip";
@@ -65,6 +65,13 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
   const ticks = [...new Set((hourly ? [0, 6, 12, 18, points.length - 1] : [0, Math.floor((points.length - 1) / 2), points.length - 1])
     .filter(i => i >= 0 && i < points.length))];
 
+  const formatTotal = (index: number) => {
+    const point = points[index];
+    if (metric !== "cost") return formatValue(metric, totals[index]);
+    const costUsd = point.costUsd == null && point.recordCount > 0 ? null : totals[index];
+    return costDisplay({ ...point, costUsd }).text;
+  };
+
   const content = (index: number): TooltipContent => {
     const point = points[index];
     const rows = visible
@@ -80,7 +87,7 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
     return {
       title: point.title,
       rows,
-      total: { label: hidden.size ? "显示项合计" : "合计", value: metric === "cost" && point.costUsd == null && point.recordCount > 0 ? "—" : formatValue(metric, totals[index]) },
+      total: { label: hidden.size ? "显示项合计" : "合计", value: formatTotal(index) },
       note,
     };
   };
@@ -128,7 +135,7 @@ export default function UsageTrendChart({ points, series, metric, hourly }: {
   }
   const metricName = TREND_METRIC_NAMES[metric];
   const activeText = active != null && points[active]
-    ? `${points[active].title}，${metricName}${formatValue(metric, totals[active])}`
+    ? `${points[active].title}，${metricName}${formatTotal(active)}`
     : undefined;
   return (
     <div className="usage-chart" ref={container}>

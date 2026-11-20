@@ -14,6 +14,8 @@ interface Props {
   onCancel: () => void;
 }
 
+const deletesChildSessions = new Set(["claude", "codex", "opencode", "qoder"]);
+
 export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: Props) {
   const { agent, sessions } = deletion;
   const batch = deletion.mode === "batch";
@@ -29,7 +31,7 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
           {batch ? <p>将删除 {agent.displayName} 的 <strong className="deletion-count">{sessions.length} 个会话</strong>。</p>
             : <p>「{session.title || session.sessionId.slice(0, 8) + "…"}」</p>}
           <p>{toTrash ? "可从废纸篓还原。" : "删除后无法恢复。"}</p>
-          {(agent.id === "codex" || agent.id === "opencode") && <p>子会话也会一并删除。</p>}
+          {deletesChildSessions.has(agent.id) && <p>子会话也会一并删除。</p>}
           {batch && (
             <>
               <ul className="batch-targets">

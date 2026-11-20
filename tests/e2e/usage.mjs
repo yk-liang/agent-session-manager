@@ -52,7 +52,12 @@ try {
     const rates = { longContext: long ? { ...long, input: long.input * scale, output: long.output * scale } : null, input: custom.input * scale, output: custom.output * scale, cacheRead: custom.cacheRead == null ? null : custom.cacheRead * scale, cacheWrite: custom.cacheWrite == null ? null : custom.cacheWrite * scale };
     return { source: 'custom', currency: custom.currency, originalRates: { input: custom.input, output: custom.output, cacheRead: custom.cacheRead, cacheWrite: custom.cacheWrite, longContext: long }, rates, overridesReference: model === 'gpt-fixture' ? { source: 'models.dev', provider: 'openai', modelId: 'gpt-fixture', rates: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: null } } : null };
    }
-   if (model === 'gpt-fixture') return { source: 'models.dev', provider: 'openai', modelId: 'gpt-fixture', currency: 'USD', rates: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: null } };
+   if (model === 'gpt-fixture') return { source: 'models.dev', provider: 'openai', modelId: 'gpt-fixture', currency: 'USD', rates: {
+    input: 2, output: 8, cacheRead: 0.2, cacheWrite: null,
+    longContext: { threshold: 272000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
+    serviceTiers: { batch: { input: 2, output: 10 }, flex: { input: 2, output: 10 } },
+    cacheWrite1h: 12, cacheWrite12h: 20,
+   } };
    return null;
   };
   const priceEvent = e => {
@@ -360,9 +365,13 @@ try {
    model: `provider/model-${i + 1}-with-a-long-name-for-layout-check`,
    inputTokens: (i + 1) * 100_000_000, outputTokens: (i + 1) * 10_000, totalTokens: (i + 1) * 100_010_000,
    cacheReadTokens: (i + 1) * 90_000_000, cacheWriteTokens: 10, cacheWriteRecorded: true,
+   cacheInputTokens: (i + 1) * 100_000_000, cacheInputReadTokens: (i + 1) * 90_000_000,
+   cacheInputWriteTokens: 10, cacheExcludedCount: 0,
    requestCount: (i + 1) * 100, successCount: (i + 1) * 90, failedCount: (i + 1) * 10,
    costUsd: i === 0 ? 0.000001 : (i + 1) * 0.5,
    referenceCostUsd: i === 0 ? 0.000001 : (i + 1) * 0.5, costIncomplete: i === 9,
+   unpricedCount: i === 9 ? 1 : 0, costUnknownCount: i === 9 ? 1 : 0,
+   costUsageIncompleteCount: 0, costSpecialCount: 0,
   }));
   summary.projects = [
    { ...base, agent: 'claude', key: '/workspace/core/long-project-name-for-layout-check', costUsd: 2 },
@@ -379,9 +388,10 @@ try {
  assert.equal((await cardLabels('cache'))[0], '缓存读取 / 写入');
  assert.equal((await cardValues('cache'))[0], '4.95B / 100');
  assert.deepEqual(await cardMeta('cost').locator('.usage-stat-value > span').allTextContents(), [
-  'provider/model-10-with-a-long-name-for-layout-check', '$5.00',
-  'long-project-name-for-layout-check', '$5.25',
+  'provider/model-10-with-a-long-name-for-layout-check', '≥ $5.00',
+  'long-project-name-for-layout-check', '≥ $5.25',
  ]);
+ await page.locator('.usage-stat[data-metric="cost"]').getByText('1 次请求的模型未定价，未计入费用', { exact: true }).waitFor();
  assert.deepEqual(await modelCells('.usage-models tfoot tr'), allModelsTotal);
  await page.getByRole('button', { name: '显示全部 10 项', exact: true }).click();
  assert.equal(await page.locator('.usage-models tbody tr').count(), 10);
@@ -408,6 +418,7 @@ try {
   const inputTokens = 141_906_000, outputTokens = 734_000, cacheReadTokens = 138_850_000;
   summary.rows = [{ ...summary.rows[0], model: `provider/${'very-long-model-id-'.repeat(10)}v1`,
    inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens: 0,
+   cacheInputTokens: inputTokens, cacheInputReadTokens: cacheReadTokens, cacheInputWriteTokens: 0,
    totalTokens: inputTokens + outputTokens }];
   window.__USAGE__.collector.changed();
  });
@@ -435,6 +446,7 @@ try {
   const summary = window.__USAGE__.fixture.summaries.today, row = summary.rows[0];
   const bucket = (bucketStart, successCount, failedCount) => ({ ...row, model: 'gpt-fixture', bucketStart,
    inputTokens: successCount + failedCount, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: successCount + failedCount,
+   cacheInputTokens: successCount + failedCount, cacheInputReadTokens: 0, cacheInputWriteTokens: 0,
    requestCount: successCount + failedCount, successCount, failedCount, costUsd: null, referenceCostUsd: null });
   summary.rows = [bucket(row.bucketStart, 1694, 3), bucket(row.bucketStart + 3_600_000, 1139, 0)];
   window.__USAGE__.collector.changed();
@@ -469,6 +481,12 @@ try {
  await page.getByRole('tab', { name: '模型价格', exact: true }).click();
  const pricesTable = page.locator('.prices-table');
  await pricesTable.waitFor();
+ const extraRules = pricesTable.getByRole('row').filter({ hasText: 'gpt-fixture' }).locator('.price-rules');
+ await pricesTable.getByRole('columnheader', { name: '额外规则', exact: true }).waitFor();
+ assert.deepEqual(await extraRules.locator('dt').allTextContents(), ['>272K', 'batch', 'flex', 'cache_write_1h', 'cache_write_12h']);
+ assert.deepEqual(await extraRules.locator('dd').allTextContents(), [
+  '$8 / $30 / $0.8 / $10', '$2 / $10 / - / -', '$2 / $10 / - / -', '- / - / - / $12', '- / - / - / $20',
+ ]);
  const priceReads = () => page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'get_model_prices').length);
  const initialReads = await priceReads();
  const tableNode = await pricesTable.elementHandle();
@@ -484,7 +502,7 @@ try {
  await page.getByRole('tooltip').getByText('报价依次采用自定义价格、内置价格、Models.dev 参考价和 LiteLLM 参考价。', { exact: true }).waitFor();
  await page.keyboard.press('Escape');
  const freePriceRow = pricesTable.getByRole('row').filter({ hasText: 'local/demo:free' });
- assert.equal(await freePriceRow.locator('.price-tag').textContent(), '内置');
+ assert.equal(await freePriceRow.locator('.status-tag').textContent(), '内置');
  assert.equal(await freePriceRow.getByText('$0', { exact: true }).count(), 4);
  await freePriceRow.getByRole('button', { name: '设置价格', exact: true }).click();
  assert.equal(await page.getByLabel('输入单价', { exact: true }).inputValue(), '0');
@@ -501,13 +519,18 @@ try {
  const refSearchInput = page.getByRole('searchbox', { name: '搜索参考价', exact: true });
  await refSearchInput.fill('gpt');
  await page.waitForFunction(() => window.__USAGE__.calls.filter(c => c.cmd === 'search_reference_prices').length === 1);
- await page.getByRole('button', { name: 'CNY (¥)', exact: true }).click();
- await page.getByLabel('输入单价', { exact: true }).fill('7000');
- await page.getByLabel('输出单价', { exact: true }).fill('14000');
+ await page.getByLabel('输入单价', { exact: true }).fill('1000');
+ await page.getByLabel('输出单价', { exact: true }).fill('2000');
  await page.getByRole('checkbox', { name: '长上下文价格' }).check();
  await page.getByLabel('输入阈值（Token）').fill('200000');
- await page.getByLabel('长上下文输入单价', { exact: true }).fill('14000');
- await page.getByLabel('长上下文输出单价', { exact: true }).fill('28000');
+ await page.getByLabel('长上下文输入单价', { exact: true }).fill('2000');
+ await page.getByLabel('长上下文输出单价', { exact: true }).fill('4000');
+ await page.getByRole('button', { name: 'CNY (¥)', exact: true }).click();
+ assert.equal(await page.getByLabel('输入单价', { exact: true }).inputValue(), '7000');
+ assert.equal(await page.getByLabel('输出单价', { exact: true }).inputValue(), '14000');
+ assert.equal(await page.getByLabel('长上下文输入单价', { exact: true }).inputValue(), '14000');
+ assert.equal(await page.getByLabel('长上下文输出单价', { exact: true }).inputValue(), '28000');
+ assert.equal(await page.getByLabel('输入阈值（Token）').inputValue(), '200000');
  await page.waitForTimeout(250);
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'search_reference_prices').length), 1, 'editing currency/rates must not re-fire reference search');
  await refSearchInput.fill('');
@@ -524,15 +547,15 @@ try {
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'get_model_prices').length) - pricesBeforeSave, 1, 'custom price save must trigger exactly one model prices reload');
  assert.ok((await claudeRow.textContent()).includes('¥7,000'));
  assert.ok((await claudeRow.textContent()).includes('$1,000'));
- assert.ok((await claudeRow.textContent()).includes('>200K ¥14,000'));
+ assert.equal(await claudeRow.locator('.price-rules dt').textContent(), '>200K');
+ assert.equal(await claudeRow.locator('.price-rules dd').textContent(), '¥14,000 / ¥28,000 / - / -');
  await claudeRow.getByRole('button', { name: '编辑', exact: true }).click();
  assert.equal(await page.getByLabel('长上下文输入单价', { exact: true }).inputValue(), '14000');
  await page.getByRole('button', { name: '取消', exact: true }).click();
  // 部分参考价刷新失败保留旧缓存并给出明确反馈
  await page.evaluate(() => { window.__USAGE__.failLitellmRefresh = true; });
  await page.getByRole('button', { name: '更新参考价', exact: true }).click();
- await page.locator('.prices-inline-error').waitFor();
- assert.match(await page.locator('.prices-inline-error').textContent(), /LiteLLM/);
+ await page.locator('.prices-panel').getByRole('alert').filter({ hasText: 'LiteLLM' }).waitFor();
  // 960px 最小宽度下模型价格页无横向溢出
  await page.setViewportSize({ width: 960, height: 900 });
  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

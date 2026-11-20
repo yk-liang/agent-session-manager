@@ -21,10 +21,10 @@ test("temporary workspaces merge without losing same-ID sessions from different 
 
 test("projectless groups use explicit IDs, keep real projects and preserve source identity", () => {
   const sessions = [
-    {sessionId:"a",projectDir:"dir-a",cwd:"/tmp/a",lastTs:"2026-10-16T00:00:00Z"},
-    {sessionId:"b",projectDir:"dir-b",cwd:"/tmp/b",lastTs:"2026-10-15T00:00:00Z"},
-    {sessionId:"named",projectDir:"dir-a",cwd:"/tmp/a",lastTs:"2026-10-16T01:00:00Z"},
-    {sessionId:"manual",projectDir:"manual",cwd:"/Users/demo/Documents/Codex/manual",lastTs:null},
+    {sessionId:"a",projectDir:"dir-a",cwd:"/tmp/a",lastTs:"2026-10-16T00:00:00.125Z"},
+    {sessionId:"b",projectDir:"dir-b",cwd:"/tmp/b",lastTs:"2026-10-16T08:00:00+08:00"},
+    {sessionId:"named",projectDir:"dir-a",cwd:"/tmp/a",lastTs:"2026-10-16T00:00:00.500Z"},
+    {sessionId:"manual",projectDir:"manual",cwd:"/Users/demo/Documents/Codex/manual",lastTs:"2026-10-16T08:00:00+08:00"},
   ];
   const before = JSON.stringify(sessions);
   const keys = sessions.map(sessionKey);
@@ -40,7 +40,8 @@ test("projectless groups use explicit IDs, keep real projects and preserve sourc
   assert.equal(groups[0].displayPath,"未归属项目");
   assert.equal(groups[0].sessionCount,2);
   assert.equal(groups[0].lastActivity,sessions[0].lastTs);
-  assert.equal(groups.find(g=>g.dirName==="dir-a").sessionCount,1);
+  assert.equal(groups[1].dirName, "dir-a");
+  assert.equal(groups[1].sessionCount, 1);
   assert.equal(groups.reduce((n,g)=>n+g.sessionCount,0),4);
   assert.deepEqual(byGroup.get("dir-a"), [sessions[2]]);
   assert.deepEqual(byGroup.get("manual"), [sessions[3]]);

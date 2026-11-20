@@ -81,7 +81,7 @@ pub(crate) fn read(token: &str) -> Result<Value, String> {
     }
     let record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let mut events = Vec::new();
-    convert_response_item(&record["payload"], None, None, &mut events);
+    response::convert(&record["payload"], None, None, &mut events);
     events
         .first()
         .and_then(|e| e.pointer("/message/content/0"))

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const SUMMARY_CACHE_KIND: &str = "codex-history-v4";
+const SUMMARY_CACHE_KIND: &str = "codex-history-v6";
 
 pub(super) struct Scan {
     root: PathBuf,

@@ -15,7 +15,7 @@ use super::events::RequestEvent;
 use catalog::{model_key, SourceCatalog};
 use chrono::Utc;
 pub use resolve::PricingSnapshot;
-pub(super) use resolve::BUILTIN_SOURCE;
+pub(super) use resolve::{BUILTIN_SOURCE, NO_USAGE_SOURCE};
 use std::{
     collections::BTreeMap,
     path::PathBuf,

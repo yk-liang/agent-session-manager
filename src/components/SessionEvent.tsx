@@ -1,11 +1,13 @@
-import { createContext, memo, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Brain, ChevronDown, ChevronRight, FileOutput, FileText, Wrench, type LucideIcon } from "lucide-react";
 import * as api from "../api";
+import { matchRanges } from "../conversationText";
 import type { ContentBlock } from "../types";
 import { attachmentLabel, isAttachment, messageBlockText, visibleBlockKind, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
 import { formatMessageTimestamp } from "../utils";
 import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
+import Notice from "./Notice";
 import { payloadText, ToolInput, ToolOutput, ToolSection } from "./ToolPayload";
 import UiIcon from "./UiIcon";
 
@@ -52,17 +54,20 @@ export const DetailState = createContext({
 });
 export const RowKey = createContext("");
 function LongText({ text, query = "", code = false, markdown = false }: { text: string; query?: string; code?: boolean; markdown?: boolean }) {
-  const [limit, setLimit] = useState(1500);
-  const long = text.length > 3000;
-  const complete = !long || limit >= text.length;
-  const matchOffset = query ? text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()) : -1;
-  const start = !complete && matchOffset >= limit ? Math.max(0, matchOffset - 400) : 0;
-  const visible = complete ? text : text.slice(start, start + limit);
-  const displayed = (start > 0 ? "…" : "") + visible + (!complete ? "…" : "");
-  return <><MessageText text={displayed} query={query} markdown={markdown}
-    fallback={code ? <pre className="code">{displayed}</pre> : undefined} />
-    {!complete && <button type="button" className="content-action content-expand"
-      onClick={() => setLimit(Math.max(limit + 15000, start + limit + 15000))}>显示更多</button>}
+  const [extra, setExtra] = useState(0);
+  const [showEarlier, setShowEarlier] = useState(false);
+  const initialLimit = 1500;
+  const match = useMemo(() => text.length > 3000 && query ? matchRanges(text, query, 1)[0] : undefined, [text, query]);
+  const offset = match && match[1] > initialLimit ? Math.max(0, match[0] - 400) : 0;
+  const start = showEarlier ? 0 : offset;
+  const end = text.length <= 3000 ? text.length : Math.max(offset + initialLimit, match?.[1] ?? 0) + extra;
+  const displayed = (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+  return <>
+    {start > 0 && <button type="button" className="content-action btn-ghost btn-sm" onClick={() => setShowEarlier(true)}>显示前文</button>}
+    <MessageText text={displayed} query={query} markdown={markdown}
+      fallback={code ? <pre className="code">{displayed}</pre> : undefined} />
+    {end < text.length && <button type="button" className="content-expand btn-sm"
+      onClick={() => setExtra(value => value + 15000)}>显示更多</button>}
   </>;
 }
 function ToolContent({ block, input = false, failed = false }: { block: ContentBlock; input?: boolean; failed?: boolean }) {
@@ -88,9 +93,11 @@ function ToolContent({ block, input = false, failed = false }: { block: ContentB
     return () => { cancelled = true; };
   }, [token, payloads, attempt]);
   if (error || !loaded) return <ToolSection kind={input ? "input" : failed ? "error" : "output"}>
-    {error ? <div className="tool-payload-message" role="alert">
-      {error} <button type="button" onClick={() => { setLoadedPayload(undefined); setAttempt(value => value + 1); }}>重试</button>
-    </div> : <div className="tool-loading tool-payload-message" role="status">正在读取…</div>}
+    {error ? <Notice tone="error" action={{ label: "重试", onClick: () => {
+      setLoadedPayload(undefined);
+      setAttempt(value => value + 1);
+    } }}>{error}</Notice>
+      : <div className="tool-loading tool-payload-message" role="status">正在读取…</div>}
   </ToolSection>;
   if (input) return <ToolInput value={loaded.input} onCopyError={onCopyError} />;
   return <ToolResult result={loaded} markdown={markdown} failed={failed || !!loaded.is_error} onCopyError={onCopyError} />;
@@ -123,7 +130,8 @@ function Collapsible({
   const rowKey = useContext(RowKey);
   const key = `${rowKey}:${persistKey}`;
   const [open, setOpen] = useState(() => expanded.has(key));
-  const description = summary ?? (open ? undefined : preview);
+  const headingSummary = summary?.trim();
+  const description = headingSummary || (open ? undefined : preview);
   const toggle = () => { if (open) expanded.delete(key); else expanded.add(key); setOpen(!open); };
   return (
     <div className={`collapsible ${kind}${error ? " error" : ""}`}>
@@ -131,10 +139,11 @@ function Collapsible({
         <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
         <span className="collapsible-type" title={label}>
           <UiIcon icon={icon} size={16} />
-          <span className="sr-only">{label}</span>
+          <span className={kind === "context" ? undefined : "sr-only"}>{label}</span>
         </span>
         {name && <code className="collapsible-name" title={name}>{name}</code>}
-        {description && <span className="collapsible-preview" title={description}>{description}</span>}
+        {description && <span className="collapsible-preview" title={description}
+          aria-hidden={kind === "context" && !headingSummary ? true : undefined}>{description}</span>}
         {trailing && <span className="collapsible-status">{trailing}</span>}
       </button>
       {open && <div className="collapsible-body">{children}</div>}
@@ -204,23 +213,23 @@ function ResponseGroup({ parts, markdown }: {
   return <div className={`response-group${failed ? " error" : ""}`}>{rows}</div>;
 }
 
-function MessageBubble({ role, timestamp, blocks, copyText, markdown, query }: {
+function MessageBubble({ role, timestamp, blocks, markdown, query }: {
   role: "user" | "assistant";
   timestamp?: string;
   blocks: SessionBlock[];
-  copyText: string;
   markdown: boolean;
   query: string;
 }) {
   const { onCopyError } = useContext(DetailState);
   const time = timestamp && formatMessageTimestamp(timestamp);
+  const copyText = blocks.flatMap(({ content }) => messageBlockText(content) ?? []).join("\n\n");
   return <div className={`message ${role}`}>
     <div className={`msg ${role}`}>{blocks.map(({ index, content }) => content.type === "text"
       ? <div key={index} className="msg-text"><LongText text={content.text?.trim() ?? ""} query={query} markdown={markdown} /></div>
       : <Attachment key={index} block={content} />)}</div>
     <div className="message-actions">
       {time && <time dateTime={timestamp}>{time}</time>}
-      <CopyButton className="message-copy" value={copyText} label="复制消息" onError={onCopyError} />
+      <CopyButton className="message-copy btn-icon btn-ghost" value={copyText} label="复制消息" onError={onCopyError} />
     </div>
   </div>;
 }
@@ -237,7 +246,9 @@ export const EventView = memo(function EventView({ row, visibility, renderMarkdo
     const text = event.message?.content;
     if (typeof text !== "string" || !text.trim()) return null;
     return <Collapsible kind="context" persistKey="context" label={event.context?.label ?? "运行上下文"} icon={FileText}
-      summary={event.context?.summary}><LongText text={text} code /></Collapsible>;
+      summary={event.context?.summary} preview={text.trim().slice(0, 320).replace(/\s+/g, " ").slice(0, 240)}>
+      <LongText text={text} code />
+    </Collapsible>;
   }
   if (type === "system") {
     const text = String(event.content ?? event.subtype ?? "").trim();
@@ -247,7 +258,6 @@ export const EventView = memo(function EventView({ row, visibility, renderMarkdo
   const parts: ReactNode[] = [];
   let activity: SessionBlock[] = [];
   let message: SessionBlock[] = [];
-  const copyText = blocks.flatMap(({ content }) => messageBlockText(content) ?? []).join("\n\n");
   const flushActivity = () => {
     if (!activity.length) return;
     parts.push(<ResponseGroup key={activity[0].index} parts={activity} markdown={renderMarkdown} />);
@@ -256,7 +266,7 @@ export const EventView = memo(function EventView({ row, visibility, renderMarkdo
   const flushMessage = () => {
     if (!message.length) return;
     parts.push(<MessageBubble key={message[0].index} role={type} timestamp={timestamp} blocks={message}
-      copyText={copyText} markdown={renderMarkdown} query={highlightQuery} />);
+      markdown={renderMarkdown} query={highlightQuery} />);
     message = [];
   };
 

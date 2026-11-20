@@ -79,7 +79,7 @@ pub(crate) fn read<T>(
     .map_err(|error| format!("读取 Antigravity 会话库 {} 失败：{error}", path.display()))
 }
 
-fn snapshot<T>(path: &Path, load: impl FnOnce(&Connection) -> ReadResult<T>) -> ReadResult<T> {
+pub(super) fn snapshot<T>(path: &Path, load: impl FnOnce(&Connection) -> ReadResult<T>) -> ReadResult<T> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let error = match open(path, flags) {
         Ok(connection) => return load(&connection),
@@ -119,6 +119,14 @@ pub(crate) fn session_id(path: &Path) -> ReadResult<&str> {
         .ok_or_else(|| "会话文件名无效".into())
 }
 
+pub(crate) fn client_id(path: &Path) -> Option<&str> {
+    path.parent()?
+        .parent()?
+        .file_name()?
+        .to_str()
+        .filter(|name| name.starts_with("antigravity"))
+}
+
 pub(crate) fn trajectory(connection: &Connection) -> ReadResult<(Trajectory, u64)> {
     let data: Vec<u8> = if has_table(connection, "trajectory_metadata_blob")? {
         connection
@@ -144,14 +152,15 @@ pub(crate) fn trajectory(connection: &Connection) -> ReadResult<(Trajectory, u64
 
 fn workspace(trajectory: &Message<'_>) -> std::io::Result<Option<String>> {
     let workspace = trajectory.message(1)?;
-    let Some(uri) = workspace.text(1) else {
-        return Ok(None);
-    };
+    Ok(workspace.text(1).and_then(file_path).or_else(|| trajectory.text(7).and_then(file_path)))
+}
+
+pub(super) fn file_path(uri: &str) -> Option<String> {
     let Some(path) = uri
         .strip_prefix("file://")
         .filter(|path| path.starts_with('/'))
     else {
-        return Ok(uri.starts_with('/').then(|| uri.to_owned()));
+        return uri.starts_with('/').then(|| uri.to_owned());
     };
     let mut decoded = Vec::with_capacity(path.len());
     let mut remaining = path.as_bytes();
@@ -170,7 +179,5 @@ fn workspace(trajectory: &Message<'_>) -> std::io::Result<Option<String>> {
         decoded.push(byte);
         remaining = rest;
     }
-    Ok(String::from_utf8(decoded)
-        .ok()
-        .or_else(|| Some(path.to_owned())))
+    String::from_utf8(decoded).ok().or_else(|| Some(path.to_owned()))
 }

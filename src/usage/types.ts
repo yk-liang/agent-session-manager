@@ -39,11 +39,10 @@ export interface UsageRequestMetrics {
   costSpecialCount?: number;
   costIncomplete: boolean;
   cacheReadIncomplete: boolean;
-  cacheRateUnavailable: boolean;
-  latencySumMs?: number;
-  latencyCount?: number;
-  tpsSum?: number;
-  tpsCount?: number;
+  cacheInputTokens: number | null;
+  cacheInputReadTokens: number;
+  cacheInputWriteTokens: number;
+  cacheExcludedCount: number;
 }
 export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics {
   agent: string;
@@ -130,6 +129,7 @@ export interface TierRates {
 export interface PriceRates extends TierRates {
   /** 1 小时缓存写入单价；只用于日志明确记录为 1 小时 TTL 的写入。 */
   cacheWrite1h?: number | null;
+  cacheWrite12h?: number | null;
   /** priority / flex / batch 档位单价；只用于记录为该档位的请求。 */
   serviceTiers?: Record<string, TierRates>;
 }
@@ -165,7 +165,7 @@ export interface ResolvedPrice {
 
 export interface EventCost {
   totalUsd: number;
-  source: PriceSource;
+  source: PriceSource | "no_usage";
   currency: PricingCurrency;
   inputUsd: number;
   cacheReadUsd: number;
@@ -258,10 +258,10 @@ export interface RequestEvent extends Omit<UsageTokens, "totalTokens"> {
   pricingIssue?: PricingIssue | null;
 }
 export type StatusCounts = Record<RequestOutcome, number>;
-/** 筛选结果在本地时间对齐的等长时段内的请求数，覆盖全部分页。 */
+/** 筛选结果在本地时间对齐的时段内的请求数，覆盖全部分页。 */
 export interface RequestTimelineData {
-  start: number;
-  step: number;
+  bounds: number[];
+  daysPerBucket?: number;
   success: number[];
   failed: number[];
   /** 缺少发生时间的记录，按时间倒序排在最后。 */

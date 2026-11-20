@@ -9,31 +9,20 @@ struct Context<'a> {
     text: &'a str,
 }
 
-fn block<'a>(text: &'a str, tag: &str) -> Option<(&'a str, &'a str)> {
-    let prefix = format!("<{tag}");
-    let after = text.strip_prefix(&prefix)?;
-    if !after.starts_with('>') && !after.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let body = text.find('>')? + 1;
-    let closing = format!("</{tag}>");
-    let end = body + text[body..].find(&closing)? + closing.len();
-    Some((&text[..end], &text[end..]))
-}
+use super::super::context::block;
 
 fn page_context(text: &str) -> Option<Context<'_>> {
     let tag = "external_codex_apps_open_page";
-    let (raw, rest) = block(text, tag)?;
+    let (raw, body, rest) = block(text, tag)?;
     // Only a complete, standalone state notification is metadata. Quoted markup,
     // malformed payloads and messages discussing the notification remain text.
     if !rest.trim().is_empty() {
         return None;
     }
-    let value: Value = serde_json::from_str(
-        raw.strip_prefix(&format!("<{tag}>"))?
-            .strip_suffix(&format!("</{tag}>"))?,
-    )
-    .ok()?;
+    if !raw.starts_with("<external_codex_apps_open_page>") {
+        return None;
+    }
+    let value: Value = serde_json::from_str(body).ok()?;
     if value.as_object()?.len() != 1 {
         return None;
     }
@@ -67,22 +56,27 @@ fn user_parts(mut text: &str) -> (Vec<Context<'_>>, &str) {
             (0, text)
         };
         let mut found = None;
-        for (tag, label) in [
-            ("environment_context", "运行环境"),
-            ("user_instructions", "用户预设指令"),
-            ("turn_context", "轮次上下文"),
-            ("recommended_plugins", "插件上下文"),
-            ("skill", "技能上下文"),
-            ("INSTRUCTIONS", "项目指令"),
+        for (tag, kind, label) in [
+            ("environment_context", "environment", "运行环境"),
+            ("user_instructions", "environment", "用户预设指令"),
+            ("turn_context", "environment", "轮次上下文"),
+            ("recommended_plugins", "environment", "插件上下文"),
+            ("skill", "environment", "技能上下文"),
+            ("INSTRUCTIONS", "environment", "项目指令"),
+            ("guardian_tool_descriptions", "instructions", "审查工具说明"),
+            ("send_user_message_question_reply", "runtime", "交互问答记录"),
+            ("turn_aborted", "runtime", "轮次中断记录"),
+            ("user_action", "runtime", "用户操作记录"),
+            ("in-app-browser-context", "page", "浏览器上下文"),
         ] {
             if prefix > 0 && tag != "INSTRUCTIONS" {
                 continue;
             }
-            if let Some((_, rest)) = block(candidate, tag) {
+            if let Some((_, _, rest)) = block(candidate, tag) {
                 let end = original.len() - rest.len();
                 found = Some((
                     Context {
-                        kind: "environment",
+                        kind,
                         label,
                         summary: None,
                         text: &original[..end],
@@ -155,8 +149,23 @@ pub(super) fn convert_message_content(
     cwd: Option<&str>,
     out: &mut Vec<Value>,
 ) {
+    let mut image_markup = Vec::new();
+    if role == "user" {
+        for (index, parts) in items.windows(3).enumerate() {
+            let opening = parts[0]["text"].as_str().unwrap_or_default().trim();
+            if opening.strip_prefix("<image").is_some_and(|tag| {
+                tag.starts_with([' ', '>']) && tag.ends_with('>') && !tag[..tag.len() - 1].contains('>')
+            }) && matches!(parts[1]["type"].as_str(), Some("image" | "input_image"))
+                && parts[2]["text"].as_str().is_some_and(|s| s.trim() == "</image>")
+            {
+                image_markup.extend([index, index + 2]);
+            }
+        }
+    }
+    let text = super::response::text_of_content(items.iter().enumerate()
+        .filter_map(|(index, part)| (!image_markup.contains(&index)).then_some(part)));
     let start = out.len();
-    convert_message(role, &super::text_of_content(items), ts, cwd, out);
+    convert_message(role, &text, ts, cwd, out);
     if !matches!(role, "user" | "assistant") {
         return;
     }
@@ -179,6 +188,23 @@ pub(super) fn convert_message_content(
     } else {
         out.push(json!({"type":role,"timestamp":ts,"cwd":cwd,"message":{"role":role,"content":attachments}}));
     }
+}
+
+pub(super) fn compaction(text: Option<&str>, ts: Option<&str>, cwd: Option<&str>) -> Value {
+    let text = text.filter(|text| !text.trim().is_empty());
+    json!({"type":"context","timestamp":ts,"cwd":cwd,
+        "context":{"kind":"compaction","label":"压缩摘要","summary":"上下文已压缩"},
+        "message":{"role":"system","content":text.unwrap_or("已记录上下文压缩")}})
+}
+
+pub(super) fn turn_aborted(reason: Option<&str>, error: Option<&str>) -> String {
+    let status = match reason {
+        Some("interrupted") => "轮次已中断",
+        Some("replaced") => "轮次已被替换",
+        _ => "轮次已终止",
+    };
+    error.filter(|s| !s.trim().is_empty())
+        .map_or_else(|| status.to_owned(), |error| format!("{status}：{error}"))
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ mod history;
 #[cfg(test)]
 mod history_tests;
 mod projects;
+mod response;
 mod storage;
 mod tool_output;
 
@@ -40,7 +41,8 @@ fn sessions_root() -> PathBuf {
 }
 
 fn escape_cwd(cwd: &str) -> String {
-    super::escape_path_id(cwd)
+    let normalized = super::workspace_groups::normalized(Path::new(cwd));
+    super::escape_path_id(&normalized.to_string_lossy())
 }
 
 /// 会话来源三态。官方协议中 source 可以是字符串（cli/vscode/exec/
@@ -69,6 +71,7 @@ struct ParsedRollout {
     session_id: String,
     cwd: Option<String>,
     version: Option<String>,
+    git_branch: Option<String>,
     /// 有效历史中最近一次记录的模型；未记录时保持未知，不使用当前配置推测。
     model: Option<String>,
     /// 写入方标识：codex_cli / Codex Desktop 等（不能用于区分交互性）
@@ -93,105 +96,6 @@ struct ParsedRollout {
     size_bytes: u64,
     /// 正文字节数；压缩页只读文件头时未知，完整读取后补齐，供分页边界与删除复核使用。
     decoded_size_bytes: Option<u64>,
-}
-
-fn text_of_content(items: &[Value]) -> String {
-    let mut text = String::new();
-    for item in items {
-        let t = item.get("type").and_then(Value::as_str).unwrap_or("");
-        if matches!(t, "input_text" | "output_text" | "text" | "summary_text") {
-            if let Some(s) = item.get("text").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(s);
-            }
-        }
-    }
-    text
-}
-
-fn parse_arguments(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
-}
-
-fn convert_response_item(
-    payload: &Value,
-    ts: Option<&str>,
-    cwd: Option<&str>,
-    out: &mut Vec<Value>,
-) {
-    let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    match kind {
-        "message" => {
-            let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
-            let items = payload.get("content").and_then(Value::as_array);
-            let Some(items) = items else { return };
-            context::convert_message_content(role, items, ts, cwd, out);
-        }
-        "reasoning" => {
-            let summary = payload.get("summary").and_then(Value::as_array);
-            let thinking = summary
-                .map(|items| text_of_content(items))
-                .unwrap_or_default();
-            if thinking.trim().is_empty() {
-                return;
-            }
-            out.push(json!({
-                "type": "assistant",
-                "timestamp": ts,
-                "cwd": cwd,
-                "message": {
-                    "role": "assistant",
-                    "content": [{ "type": "thinking", "thinking": thinking }],
-                },
-            }));
-        }
-        "function_call" | "custom_tool_call" => {
-            let name = payload.get("name").and_then(Value::as_str).unwrap_or("?");
-            let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
-            let input = if kind == "function_call" {
-                parse_arguments(
-                    payload
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .unwrap_or("{}"),
-                )
-            } else {
-                json!(payload.get("input").and_then(Value::as_str).unwrap_or(""))
-            };
-            out.push(json!({
-                "type": "assistant",
-                "timestamp": ts,
-                "cwd": cwd,
-                "message": {
-                    "role": "assistant",
-                    "content": [{ "type": "tool_use", "id": call_id, "name": name, "input": input }],
-                },
-            }));
-        }
-        "function_call_output" | "custom_tool_call_output" => {
-            let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
-            let output = &payload["output"];
-            let is_error = payload.get("output").is_some_and(tool_output::failed);
-            let content = tool_output::content(output);
-            out.push(json!({
-                "type": "user",
-                "timestamp": ts,
-                "cwd": cwd,
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
-                        "content": content,
-                        "is_error": is_error,
-                    }],
-                },
-            }));
-        }
-        _ => {}
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,6 +153,32 @@ struct ModelContext {
     model: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RuntimeEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    thread_id: Option<String>,
+    thread_settings: Option<ModelContext>,
+    reason: Option<String>,
+    error: Option<RuntimeError>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeError {
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Compacted {
+    message: Option<String>,
+}
+
+fn update_model(model: &mut Option<String>, next: Option<String>) {
+    if let Some(next) = next.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
+        *model = Some(next);
+    }
+}
+
 fn read_rollout(
     path: &Path,
     mode: ReadMode,
@@ -270,6 +200,7 @@ fn read_rollout(
         session_id: String::new(),
         cwd: None,
         version: None,
+        git_branch: None,
         model: None,
         originator: None,
         source: SourceKind::Missing,
@@ -291,6 +222,7 @@ fn read_rollout(
     };
 
     let mut bad_lines = 0;
+    let mut seen_meta = false;
     let mut line = Vec::new();
     let mut offset = 0u64;
     loop {
@@ -345,21 +277,47 @@ fn read_rollout(
             parsed.last_ts = Some(ts.into());
         }
         let raw_payload = envelope.payload.map(|v| v.get()).unwrap_or("null");
-        if matches!(rtype, "turn_context" | "token_usage_record") {
-            // 只反序列化模型字段，避免加载较大的指令正文。
-            if let Ok(context) = serde_json::from_str::<ModelContext>(raw_payload) {
-                if let Some(model) = context
-                    .model
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                {
-                    parsed.model = Some(model);
+        let collect_events = matches!(mode, ReadMode::Events | ReadMode::View);
+        match rtype {
+            "turn_context" | "token_usage_record" => {
+                if let Ok(context) = serde_json::from_str::<ModelContext>(raw_payload) {
+                    update_model(&mut parsed.model, context.model);
                 }
+                continue;
             }
-            continue;
-        }
-        if !matches!(rtype, "session_meta" | "response_item") {
-            continue;
+            "event_msg" => {
+                if let Ok(event) = serde_json::from_str::<RuntimeEvent>(raw_payload) {
+                    match event.kind.as_str() {
+                        "thread_settings_applied"
+                            if event.thread_id.as_deref().is_none_or(|id| id == parsed.session_id) =>
+                        {
+                            update_model(&mut parsed.model, event.thread_settings.and_then(|s| s.model));
+                        }
+                        "turn_aborted" if collect_events => {
+                            let text = context::turn_aborted(
+                                event.reason.as_deref(),
+                                event.error.as_ref().and_then(|e| e.message.as_deref()),
+                            );
+                            parsed.events.push(json!({"type":"system","timestamp":ts,"cwd":parsed.cwd,
+                                "content":text}));
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            "compacted" => {
+                if collect_events {
+                    let data = serde_json::from_str::<Compacted>(raw_payload).ok();
+                    parsed.events.push(context::compaction(
+                        data.as_ref().and_then(|p| p.message.as_deref()), ts, parsed.cwd.as_deref()));
+                }
+                continue;
+            }
+            "session_meta" if seen_meta => continue,
+            "session_meta" => seen_meta = true,
+            "response_item" if mode != ReadMode::Header => {}
+            _ => continue,
         }
         let shallow: ToolHeader<'_> = serde_json::from_str(raw_payload).unwrap_or_default();
         let tool = matches!(
@@ -404,6 +362,7 @@ fn read_rollout(
                         .and_then(Value::as_str)
                         .map(|s| s.to_string())
                         .unwrap_or_default();
+                    parsed.git_branch = p.pointer("/git/branch").and_then(Value::as_str).map(str::to_owned);
                     parsed.cwd = p.get("cwd").and_then(Value::as_str).map(|s| s.to_string());
                     parsed.version = p
                         .get("cli_version")
@@ -441,7 +400,7 @@ fn read_rollout(
                         .get("forked_from_id")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    if mode == ReadMode::Header && !parsed.session_id.is_empty() {
+                    if mode == ReadMode::Header {
                         break;
                     }
                 }
@@ -463,7 +422,7 @@ fn read_rollout(
                         let role = if call { "assistant" } else { "user" };
                         new_events.push(json!({"type":role,"timestamp":ts,"message":{"role":role,"content":[block]}}));
                     } else {
-                        convert_response_item(p, ts, parsed.cwd.as_deref(), &mut new_events);
+                        response::convert(p, ts, parsed.cwd.as_deref(), &mut new_events);
                     }
                     if let Some(id) = p.get("id").and_then(Value::as_str) {
                         let position = envelope
@@ -479,7 +438,7 @@ fn read_rollout(
                             });
                         }
                     }
-                    for ev in &new_events {
+                    for ev in &mut new_events {
                         match ev.get("type").and_then(Value::as_str) {
                             Some("user") => {
                                 let content = &ev["message"]["content"];
@@ -494,6 +453,11 @@ fn read_rollout(
                                 }
                             }
                             Some("assistant") => {
+                                if collect_events {
+                                    if let Some(model) = &parsed.model {
+                                        ev["message"]["model"] = json!(model);
+                                    }
+                                }
                                 parsed.assistant_count += 1;
                                 if ev
                                     .pointer("/message/content")
@@ -505,7 +469,7 @@ fn read_rollout(
                             _ => {}
                         }
                     }
-                    if matches!(mode, ReadMode::Events | ReadMode::View) {
+                    if collect_events {
                         parsed.events.extend(new_events);
                     }
                 }
@@ -602,7 +566,8 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         title: thread_name.cloned().or_else(|| p.first_user_text.clone()),
         model: p.model.clone(),
         version: p.version.clone(),
-        git_branch: None,
+        client: p.originator.clone(),
+        git_branch: p.git_branch.clone(),
         entrypoint: None,
         first_ts: p.first_ts.clone(),
         last_ts: p.last_ts.clone(),
@@ -806,13 +771,17 @@ mod tests {
             .tempfile()
             .unwrap();
         let lines = [
-            r#"{"timestamp":"2026-09-03T01:00:00Z","type":"session_meta","payload":{"id":"abcdef01","cwd":"/tmp/demo","cli_version":"0.30.0"}}"#,
-            r#"{"timestamp":"2026-09-03T01:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\ncli\n</environment_context>\n帮我写个函数"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}}"#,
-            r#"{"timestamp":"2026-09-03T01:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"先分析需求"}]}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:00Z","type":"session_meta","payload":{"id":"abcdef01","cwd":"/tmp/demo","originator":"Codex Desktop","cli_version":"0.30.0","git":{"branch":"main"}}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\ncli\n</environment_context>\n帮我写个函数"},{"type":"input_text","text":"<image name=fixture>"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"</image>"}]}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:01.100Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"abcdef01","thread_settings":{"model":"fixture-model"}}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"先分析需求"}],"content":[{"type":"reasoning_text","text":"核对正文"}]}}"#,
             r#"{"timestamp":"2026-09-03T01:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"cmd\":[\"ls\"]}"}}"#,
-            r#"{"timestamp":"2026-09-03T01:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"{\"output\":\"file.txt\"}"}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Chunk ID: abc\nWall time: 0.1 seconds\nProcess exited with code 2\nFinal output:\nfile.txt"}}"#,
             r#"{"timestamp":"2026-09-03T01:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成了"}]}}"#,
-            r#"{"timestamp":"2026-09-03T01:00:06Z","type":"event_msg","payload":{"type":"token_count"}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:06Z","type":"session_meta","payload":{"id":"parent","cwd":"/tmp/other"}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:07Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"fixture"}}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:08Z","type":"compacted","payload":{"message":"压缩正文"}}"#,
+            r#"{"timestamp":"2026-09-03T01:00:09Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#,
         ];
         for line in lines {
             writeln!(f, "{line}").unwrap();
@@ -874,6 +843,7 @@ mod tests {
                 session_id: "x".into(),
                 cwd: None,
                 version: None,
+                git_branch: None,
                 model: None,
                 originator: None,
                 source,
@@ -1045,8 +1015,11 @@ mod tests {
         assert_eq!(p.session_id, "abcdef01");
         assert_eq!(p.cwd.as_deref(), Some("/tmp/demo"));
         assert_eq!(p.version.as_deref(), Some("0.30.0"));
+        assert_eq!(to_meta(&p, None).client.as_deref(), Some("Codex Desktop"));
         assert_eq!(p.real_user_count, 1);
-        assert_eq!(p.assistant_count, 3); // reasoning + tool_use + message
+        assert_eq!(p.git_branch.as_deref(), Some("main"));
+        assert_eq!(p.model.as_deref(), Some("fixture-model"));
+        assert_eq!(p.assistant_count, 4);
         assert_eq!(p.assistant_text_count, 1); // 只有 message 含正文
         assert_eq!(p.first_user_text.as_deref(), Some("帮我写个函数"));
 
@@ -1064,12 +1037,21 @@ mod tests {
                 "assistant",
                 "assistant",
                 "user",
-                "assistant"
+                "assistant",
+                "assistant",
+                "context",
+                "system",
             ]
         );
 
         assert_eq!(p.events[1]["message"]["content"][0]["text"], "帮我写个函数");
         assert_eq!(p.events[1]["message"]["content"][1]["type"], "input_image");
+
+        assert_eq!(p.events[2]["message"]["content"][0]["thinking"], "先分析需求\n\n核对正文");
+        assert_eq!(p.events[2]["message"]["model"], "fixture-model");
+        assert_eq!(p.events[6]["message"]["content"][0]["name"], "web_search");
+        assert_eq!(p.events[7]["message"]["content"], "压缩正文");
+        assert_eq!(p.events[8]["content"], "轮次已中断");
 
         let tool_use = &p.events[3]["message"]["content"][0];
         assert_eq!(tool_use["type"], "tool_use");
@@ -1078,7 +1060,8 @@ mod tests {
 
         let tool_result = &p.events[4]["message"]["content"][0];
         assert_eq!(tool_result["type"], "tool_result");
-        assert_eq!(tool_result["content"], "file.txt");
+        assert_eq!(tool_result["is_error"], true);
+        assert!(tool_result["content"].as_str().unwrap().ends_with("file.txt"));
     }
 
     /// 集成测试：注入临时目录作为会话根，走完 catalog/read/delete 全链路。

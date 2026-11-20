@@ -16,14 +16,14 @@ fn snapshot(
     if targets.is_empty() {
         return Err("缺少待删会话文件，已中止删除".into());
     }
-    let canonical_roots: Vec<_> = roots
-        .iter()
-        .map(|root| {
-            root.canonicalize()
-                .map(|canonical| (root, canonical))
-                .map_err(|e| source_error(root, e))
-        })
-        .collect::<Result<_, _>>()?;
+    let mut canonical_roots = Vec::new();
+    for root in roots {
+        match root.canonicalize() {
+            Ok(canonical) => canonical_roots.push((root, canonical)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(source_error(root, error)),
+        }
+    }
     let mut paths = BTreeSet::new();
     for target in targets {
         let canonical = target
@@ -138,7 +138,7 @@ mod tests {
             let mut store = Store::open_with_ledger(None, Some(&ledger));
             let targets =
                 crate::agents::claude_family::deletion_targets(&root, "project", "aaaa").unwrap();
-            preserve_at(agent, &[root], &mut store, &targets, || {
+            preserve_at(agent, &[temp.path().join("missing"), root], &mut store, &targets, || {
                 fs::remove_file(&parent).unwrap();
                 fs::remove_dir_all(&children).unwrap();
                 Ok(())

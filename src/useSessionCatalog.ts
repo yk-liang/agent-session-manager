@@ -7,7 +7,7 @@ import type { AgentInfo, CatalogFilter } from "./types";
 
 export function useSessionCounts(agents: AgentInfo[], filter: CatalogFilter, cache: AgentCatalogCache, activeAgent: string | null) {
   useSyncExternalStore(cache.subscribe, cache.countVersion);
-  const scopes = agents.map(agent => ({ id: agent.id, filter: catalogFilterFor(filter, agent.supportsArchive) }));
+  const scopes = agents.map(agent => ({ id: agent.id, filter: catalogFilterFor(filter, agent.supportsArchivedSessions) }));
   return {
     counts: new Map(scopes.map(({ id, filter }) => [id, cache.count(id, filter) ?? null] as const)),
     refresh() {

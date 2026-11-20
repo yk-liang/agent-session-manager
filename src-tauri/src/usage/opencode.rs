@@ -4,7 +4,7 @@ use super::{
     request_parse::{at, elapsed_ms, string, RequestError, RequestMeta, RequestOutcome},
     types::*,
 };
-use crate::agents::opencode::{model_id, open_db, MESSAGE_ERROR_SQL};
+use crate::agents::opencode::{client_id, model_id, open_db, MESSAGE_ERROR_SQL};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const PARSER_VERSION: u8 = 11;
+pub(super) const PARSER_VERSION: u8 = 12;
 
 struct ForkBoundary {
     parent: String,
@@ -81,6 +81,16 @@ pub(super) fn read(
     } else {
         "NULL"
     };
+    // 投影保留了 v2 的角色，压缩状态仍在原表。混合库的 v1 行也有 sort_order。
+    let completed_compaction = if seq_column == "sort_order" {
+        " AND NOT EXISTS (SELECT 1 FROM main.session_message v2
+            WHERE v2.id=message.id AND v2.session_id=message.session_id
+              AND v2.type='compaction'
+              AND CASE WHEN json_valid(v2.data)
+                  THEN json_extract(v2.data,'$.status') IS NOT 'completed' ELSE 1 END)"
+    } else {
+        ""
+    };
     let session_created = session_column("time_created");
     let directory = session_column("directory");
     let version = session_column("version");
@@ -101,7 +111,7 @@ pub(super) fn read(
                 WHERE CASE WHEN type='object' THEN length(trim(json_extract(value,'$.native.sessionID')))>0 END LIMIT 1)) END,
         'tokens',json_extract(data,'$.tokens')), {session_created}, {seq_column} FROM message
         WHERE json_valid(data) AND (json_extract(data,'$.role')='assistant'
-            OR json_extract(data,'$.role')='compaction') ORDER BY session_id,time_created,id");
+            OR (json_extract(data,'$.role')='compaction'{completed_compaction})) ORDER BY session_id,time_created,id");
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -194,7 +204,7 @@ fn request_meta(v: &Value, path: &Path, time: i64) -> RequestMeta {
         provider,
         native_session,
         project: string(&v["directory"]).or_else(|| string(&v["path"]["cwd"])),
-        client: string(&v["agent"]).or_else(|| string(&v["mode"])),
+        client: client_id(v),
         kind: Some(
             if v["role"] == "compaction" {
                 "compaction"

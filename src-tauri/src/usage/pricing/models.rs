@@ -34,14 +34,14 @@ impl Pricer {
         {
             let mut stmt = db
                 .prepare(
-                    &format!("SELECT agent, model, nullif(trim(json_extract(data, '$.request.provider')),'') AS provider,
-                        COUNT(*), SUM(COALESCE(json_extract(data, '$.inputTokens'), 0)
+                    &format!("SELECT agent, coalesce(nullif(trim(model), ''), 'unknown') AS model_name, nullif(trim(json_extract(data, '$.request.provider')),'') AS provider,
+                        COUNT(CASE WHEN json_extract(data, '$.request.scope') IN ('request', 'error') THEN 1 END), SUM(COALESCE(json_extract(data, '$.inputTokens'), 0)
                                    + COALESCE(json_extract(data, '$.outputTokens'), 0)
                                    + COALESCE(json_extract(data, '$.unclassifiedTokens'), 0))
                      FROM usage_request_events
-                     WHERE (?1 IS NULL OR agent = ?1) AND model <> 'unknown' AND trim(model) <> ''
+                     WHERE (?1 IS NULL OR agent = ?1)
                        AND {DISTINCT_REQUESTS}
-                     GROUP BY agent, model, provider"),
+                     GROUP BY agent, model_name, provider"),
                 )
                 .map_err(|_| "无法查询模型价格列表")?;
             let mut rows = stmt

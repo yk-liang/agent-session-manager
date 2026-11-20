@@ -1,7 +1,24 @@
 import type { SessionMeta } from "./types";
 
+export function clientLabel(agentName: string, client?: string | null, version?: string | null): string {
+  const recorded = client?.trim();
+  const name = !recorded ? agentName
+    : recorded.toLowerCase().startsWith(agentName.toLowerCase()) ? recorded
+    : recorded === "cli" ? `${agentName} CLI`
+    : `${agentName} (${recorded})`;
+  return [name, version?.trim()].filter(Boolean).join(" ");
+}
+
 export function sessionKey(session: Pick<SessionMeta, "projectDir" | "sessionId">): string {
   return JSON.stringify([session.projectDir, session.sessionId]);
+}
+
+export function compareTimestamps(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  const left = a ? Date.parse(a) : NaN;
+  const right = b ? Date.parse(b) : NaN;
+  if (!Number.isFinite(left)) return Number.isFinite(right) ? -1 : 0;
+  return Number.isFinite(right) ? left - right : 1;
 }
 
 export function relativeTime(iso: string | null): string {

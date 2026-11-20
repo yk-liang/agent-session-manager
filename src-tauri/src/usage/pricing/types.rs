@@ -65,16 +65,16 @@ pub struct TierRates {
 }
 
 impl TierRates {
-    fn validate(&self) -> bool {
+    pub(super) fn validate(&self) -> bool {
         let opt = |v: Option<f64>| v.is_none_or(valid_nonneg_rate);
-        valid_positive_rate(self.input)
-            && valid_positive_rate(self.output)
+        valid_nonneg_rate(self.input)
+            && valid_nonneg_rate(self.output)
             && opt(self.cache_read)
             && opt(self.cache_write)
             && self.long_context.as_ref().is_none_or(|long| {
                 long.threshold > 0
-                    && valid_positive_rate(long.input)
-                    && valid_positive_rate(long.output)
+                    && valid_nonneg_rate(long.input)
+                    && valid_nonneg_rate(long.output)
                     && opt(long.cache_read)
                     && opt(long.cache_write)
             })
@@ -93,7 +93,7 @@ impl TierRates {
     }
 }
 
-/// 标准档及可选的服务档位、长上下文和 1 小时缓存写入价格，单位为美元 / 百万 Token。
+/// 标准档及可选的服务档位、长上下文和缓存写入 TTL 价格，单位为美元 / 百万 Token。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rates {
@@ -107,6 +107,9 @@ pub struct Rates {
     pub long_context: Option<LongContextRates>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<f64>,
+    /// 目录参考价，供价格表展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_12h: Option<f64>,
     /// 键为 "priority" / "flex" / "batch"。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub service_tiers: BTreeMap<String, TierRates>,
@@ -128,6 +131,7 @@ impl Rates {
             return Err("参考价缺少有效的标准文本费率".into());
         }
         if self.cache_write_1h.is_some_and(|v| !valid_nonneg_rate(v))
+            || self.cache_write_12h.is_some_and(|v| !valid_nonneg_rate(v))
             || !self.service_tiers.values().all(TierRates::validate)
         {
             return Err("参考价特殊档位费率无效".into());
@@ -143,6 +147,7 @@ impl Rates {
     pub fn approx_eq(&self, other: &Self) -> bool {
         self.standard_eq(other)
             && approx_opt_f64(self.cache_write_1h, other.cache_write_1h)
+            && approx_opt_f64(self.cache_write_12h, other.cache_write_12h)
             && self.service_tiers.len() == other.service_tiers.len()
             && self
                 .service_tiers
@@ -155,6 +160,9 @@ impl Rates {
         if !approx_opt_f64(self.cache_write_1h, other.cache_write_1h) {
             self.cache_write_1h = None;
         }
+        if !approx_opt_f64(self.cache_write_12h, other.cache_write_12h) {
+            self.cache_write_12h = None;
+        }
         self.service_tiers
             .retain(|k, v| other.service_tiers.get(k).is_some_and(|o| v.approx_eq(o)));
     }
@@ -162,10 +170,6 @@ impl Rates {
 
 pub fn valid_nonneg_rate(value: f64) -> bool {
     value.is_finite() && (0.0..=MAX_USD_RATE).contains(&value)
-}
-
-pub fn valid_positive_rate(value: f64) -> bool {
-    value.is_finite() && value > 0.0 && value <= MAX_USD_RATE
 }
 
 pub fn approx_f64(a: f64, b: f64) -> bool {
@@ -450,6 +454,7 @@ pub struct BillableEvent<'a> {
     pub details: &'a crate::usage::types::RecordedFields,
     pub provider: Option<&'a str>,
     pub tier: Option<&'a str>,
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

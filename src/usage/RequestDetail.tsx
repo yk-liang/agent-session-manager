@@ -2,6 +2,7 @@ import type { RequestEvent, RequestMetadata } from "./types";
 import { formatDateTime } from "./format";
 import { requestErrorText } from "./metrics";
 import CopyButton from "../components/CopyButton";
+import { clientLabel } from "../utils";
 
 const routineStops = new Set(["end_turn", "stop", "tool_use", "tool-calls"]);
 
@@ -12,8 +13,9 @@ function requestTime({ startedAt, finishedAt }: RequestMetadata) {
   if (finishedAt) return `结束 ${format(finishedAt)}`;
 }
 
-export default function RequestDetail({ event, session, project, copyFeedback }: {
+export default function RequestDetail({ event, agentName, session, project, copyFeedback }: {
   event: RequestEvent;
+  agentName: string;
   session: string;
   project: string | null;
   copyFeedback: { onCopied: () => void; onError: () => void };
@@ -26,19 +28,19 @@ export default function RequestDetail({ event, session, project, copyFeedback }:
     request.ttftScope === "turn" && request.ttftMs != null && "首字延迟按整轮对话计算",
   ].filter(Boolean).join("，");
   const stop = request.stop && !routineStops.has(request.stop) ? request.stop : undefined;
-  const client = [request.client?.trim(), request.version?.trim()].filter(Boolean).join(" ");
+  const client = clientLabel(agentName, request.client, request.version);
   const parentSession = request.parentSessionId !== session ? request.parentSessionId : undefined;
   const copyValue = (value: string, label: string) => (
     <div className="request-detail-copy">
       <code>{value}</code>
-      <CopyButton className="request-copy" value={value} label={`复制${label}`} {...copyFeedback} />
+      <CopyButton className="btn-icon btn-ghost" value={value} label={`复制${label}`} {...copyFeedback} />
     </div>
   );
   const fields = ([
     ["错误信息", failed && (error ? (
       <div className="request-detail-copy request-failure-detail" role="region" aria-label="错误信息">
         <pre>{error}</pre>
-        <CopyButton className="request-copy" value={error} label="复制错误信息" {...copyFeedback} />
+        <CopyButton className="btn-icon btn-ghost" value={error} label="复制错误信息" {...copyFeedback} />
       </div>
     ) : "未记录错误信息")],
     ["请求 ID", request.requestId && copyValue(request.requestId, "请求 ID")],

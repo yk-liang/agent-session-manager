@@ -1,6 +1,6 @@
 //! 可丢弃的摘要索引：只保存元数据与文件版本，不复制正文或工具输出。
 use super::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
@@ -13,28 +13,54 @@ impl Store {
             .mode(0o700)
             .create(parent)
             .ok()?;
-        // 不跟随缓存文件符号链接；损坏、只读或权限异常时直接回退到日志解析。
-        fs::OpenOptions::new()
+        let path = parent.canonicalize().ok()?.join(path.file_name()?);
+        let path = path.as_path();
+        let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .ok()?;
-        if !fs::symlink_metadata(path).ok()?.is_file() {
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.nlink() != 1 {
             return None;
         }
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).ok()?;
-        let db = Connection::open(path).ok()?;
-        db.busy_timeout(std::time::Duration::from_millis(50)).ok()?;
+        if meta.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(fs::Permissions::from_mode(0o600)).ok()?;
+        }
+        let meta = file.metadata().ok()?;
+        match Self::connect(path) {
+            Ok(store) => Some(store),
+            Err(error) if matches!(error.sqlite_error_code(),
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)) => {
+                let current = fs::symlink_metadata(path).ok()?;
+                if !current.is_file() || current.ino() != meta.ino() || current.dev() != meta.dev()
+                    || current.nlink() != 1
+                    || current.ctime() != meta.ctime() || current.ctime_nsec() != meta.ctime_nsec()
+                {
+                    return None;
+                }
+                file.set_len(0).ok()?;
+                Self::connect(path).ok()
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn connect(path: &std::path::Path) -> rusqlite::Result<Self> {
+        let db = Connection::open_with_flags(path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
+        db.busy_timeout(std::time::Duration::from_millis(50))?;
         db.execute_batch(
             "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
             CREATE TABLE IF NOT EXISTS summaries (key TEXT PRIMARY KEY, revision TEXT NOT NULL,
                 meta TEXT NOT NULL, touched INTEGER NOT NULL);",
-        )
-        .ok()?;
-        Some(Self(Mutex::new(db)))
+        )?;
+        Ok(Self(Mutex::new(db)))
     }
+
     fn key(kind: &str, paths: &[PathBuf]) -> String {
         // 解析语义改变时升级版本，旧索引不参与读取。
         let bytes = serde_json::to_vec(&(3, kind, paths)).unwrap_or_default();
@@ -102,7 +128,7 @@ pub(super) fn store() -> Option<&'static Store> {
 mod tests {
     use super::*;
     #[test]
-    fn disk_survives_reopen_but_rejects_changes_and_broken_database() {
+    fn disk_survives_reopen_and_rebuilds_a_broken_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.sqlite");
         let log = dir.path().join("log");
@@ -132,6 +158,10 @@ mod tests {
         );
         drop(reopened);
         fs::write(&path, "broken cache").unwrap();
-        assert!(Store::open(&path).is_none());
+        let rebuilt = Store::open(&path).unwrap();
+        let rev = revisions(&paths).unwrap();
+        assert!(rebuilt.get("test", &paths, &rev).is_none());
+        rebuilt.put("test", &paths, &rev, &meta);
+        assert!(rebuilt.get("test", &paths, &rev).is_some());
     }
 }

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 import UiIcon from "./UiIcon";
 import ConfirmDialog from "./ConfirmDialog";
+import Modal from "./Modal";
+import Notice from "./Notice";
 import FileDiff from "./ConfigFileDiff";
 import FileEditor from "./ConfigFileEditor";
 import HelpTip from "./HelpTip";
@@ -213,15 +215,6 @@ export default function ConfigPanel({
     }
   };
 
-  useEffect(() => {
-    if (!preview) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) setPreview(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [preview, busy]);
-
   if (!workspace)
     return (
       <div className="config-panel">
@@ -233,14 +226,8 @@ export default function ConfigPanel({
             </h1>
           </div>
         </div>
-        {notice && (
-          <div role="alert" className="config-notice error">
-            {notice.text}
-          </div>
-        )}
-        <p className="hint">
-          {loading ? "正在读取配置…" : <button onClick={onRetry}>重试</button>}
-        </p>
+        {notice && <Notice tone="error" action={{ label: "重试", onClick: onRetry, disabled: loading }}>{notice.text}</Notice>}
+        {loading && <p className="hint" role="status">正在读取配置…</p>}
       </div>
     );
 
@@ -266,7 +253,8 @@ export default function ConfigPanel({
             {displayName}
             {workspace.profiles.length > 0 && (
               <span
-                className={`config-status ${matching.length ? "matched" : ""}`}
+                className="status-tag config-status"
+                data-tone={matching.length ? "success" : undefined}
                 title={
                   matching.length
                     ? "与当前配置一致的方案"
@@ -280,6 +268,7 @@ export default function ConfigPanel({
         </div>
         <div className="config-page-actions">
           <button
+            type="button"
             className="primary"
             disabled={
               disabled ||
@@ -331,25 +320,14 @@ export default function ConfigPanel({
       )}
 
       {dirty && (
-        <div className="config-notice warning" role="status">
-          {dirtyKeys.size} 个文件未保存
-        </div>
+        <Notice tone="warning">{dirtyKeys.size} 个文件未保存</Notice>
       )}
       {notice && (
-        <div
-          className={`config-notice ${notice.error ? "error" : "success"}`}
-          role={notice.error ? "alert" : "status"}
-        >
+        <Notice tone={notice.error ? "error" : "success"}
+          action={loadFailed ? { label: "重试", onClick: onRetry, disabled: working } : undefined}
+          onDismiss={loadFailed ? undefined : () => setNotice(null)}>
           {notice.text}
-          {loadFailed && <button onClick={onRetry} disabled={working}>重试</button>}
-          {!loadFailed && <button
-            className="notice-dismiss"
-            aria-label="关闭提示"
-            onClick={() => setNotice(null)}
-          >
-            <UiIcon icon={X} />
-          </button>}
-        </div>
+        </Notice>
       )}
       {workspace.warnings.length > 0 && (
         <details className="config-warnings">
@@ -360,7 +338,7 @@ export default function ConfigPanel({
         </details>
       )}
 
-      <section className="config-section" aria-labelledby="profiles-title">
+      <section aria-labelledby="profiles-title">
         <div className="config-section-heading">
           <div className="config-heading-label">
             <h2 id="profiles-title">配置方案</h2>
@@ -420,7 +398,7 @@ export default function ConfigPanel({
                   <div className="profile-name">
                     {profile.name}
                     {matching.includes(profile.name) && (
-                      <span className="status-tag green">当前</span>
+                      <span className="status-tag" data-tone="success">当前</span>
                     )}
                   </div>
                   <div className="profile-meta">
@@ -429,6 +407,7 @@ export default function ConfigPanel({
                 </div>
                 <div className="profile-actions">
                   <button
+                    type="button"
                     className="primary"
                     disabled={disabled || dirty}
                     onClick={() => void startPreview("profile", profile.name)}
@@ -436,7 +415,8 @@ export default function ConfigPanel({
                     应用
                   </button>
                   <button
-                    className="text-button"
+                    type="button"
+                    className="btn-icon btn-ghost danger"
                     aria-label={`删除方案 ${profile.name}`}
                     title="删除方案"
                     disabled={disabled}
@@ -451,12 +431,12 @@ export default function ConfigPanel({
         )}
       </section>
 
-      <section className="config-section" aria-labelledby="files-title">
+      <section aria-labelledby="files-title">
         <div className="config-section-heading">
           <div className="config-heading-label">
             <h2 id="files-title">配置文件</h2>
           </div>
-          {!validFiles && <span className="status-tag amber">格式有误</span>}
+          {!validFiles && <span className="status-tag" data-tone="warning">格式有误</span>}
         </div>
         {workspace.files.length === 0 && (
           <div className="config-empty">暂无配置文件</div>
@@ -475,14 +455,15 @@ export default function ConfigPanel({
       </section>
 
       <section
-        className="config-section config-history"
+        className="config-history"
         aria-labelledby="backups-title"
       >
         <div className="config-section-heading">
           <div className="config-heading-label">
             <h2 id="backups-title">
               <button
-                className="history-toggle"
+                type="button"
+                className="btn-ghost history-toggle"
                 disabled={workspace.backups.length === 0}
                 aria-expanded={historyOpen}
                 aria-controls="config-backup-list"
@@ -515,7 +496,7 @@ export default function ConfigPanel({
                   <p>{backup.files.join("、")}</p>
                 </div>
                 <span className="backup-time">{dateLabel(backup.createdAt)}</span>
-                <button
+                <button type="button" className="btn-sm"
                   disabled={disabled || dirty}
                   onClick={() => void startPreview("backup", backup.id)}
                 >
@@ -527,7 +508,8 @@ export default function ConfigPanel({
         )}
         {historyOpen && workspace.backups.length > 5 && (
           <button
-            className="text-button history-more"
+            type="button"
+            className="btn-ghost btn-sm history-more"
             onClick={() => setAllBackups(!allBackups)}
           >
             {allBackups
@@ -546,6 +528,7 @@ export default function ConfigPanel({
             </>
           }
           confirmLabel="删除方案"
+          busy={working}
           onConfirm={() => void remove()}
           onCancel={() => {
             if (!working) setDeleteTarget(null);
@@ -554,74 +537,43 @@ export default function ConfigPanel({
       )}
 
       {preview && (
-        <div
-          className="modal-overlay"
-          onClick={() => {
-            if (!busy) setPreview(null);
-          }}
-        >
-          <div
-            className="modal config-change-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={preview.title}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="config-change-heading">
-              <div>
-                <h2>{preview.title}</h2>
-              </div>
-              <button
-                aria-label="关闭差异预览"
-                disabled={busy}
-                onClick={() => setPreview(null)}
-              >
-                <UiIcon icon={X} />
-              </button>
-            </div>
-            <p className="hint">
-              {changedFiles.length
-                ? `${changedFiles.length} 个文件将变更`
-                : "配置一致"}
-            </p>
-            {previewError && (
-              <div className="config-notice error" role="alert">
-                {previewError}
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    void startPreview(preview.kind, preview.target)
-                  }
-                >
-                  重新预览
-                </button>
-              </div>
-            )}
-            <div className="config-change-files">
-              {preview.files.map((file) => (
-                <FileDiff key={file.key} file={file} />
-              ))}
-            </div>
-            <div className="modal-actions">
-              <button disabled={busy} onClick={() => setPreview(null)}>
-                取消
-              </button>
-              <button
-                className="primary"
-                disabled={
-                  working || !!previewError || changedFiles.length === 0
-                }
-                onClick={() => void applyPreview()}
-              >
-                {busy
-                  ? "处理中…"
-                  : preview.kind === "profile"
-                    ? "应用方案"
-                    : "恢复备份"}
-              </button>
-            </div>
+        <Modal title={preview.title} className="config-change-modal" closeLabel="关闭差异预览"
+          busy={busy} onClose={() => setPreview(null)}>
+          <p className="hint">
+            {changedFiles.length
+              ? `${changedFiles.length} 个文件将变更`
+              : "配置一致"}
+          </p>
+          {previewError && (
+            <Notice tone="error" action={{
+              label: "重新预览", disabled: busy, onClick: () => void startPreview(preview.kind, preview.target),
+            }}>{previewError}</Notice>
+          )}
+          <div className="config-change-files">
+            {preview.files.map((file) => (
+              <FileDiff key={file.key} file={file} />
+            ))}
           </div>
-        </div>
+          <div className="modal-actions">
+            <button type="button" disabled={busy} onClick={() => setPreview(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={
+                working || !!previewError || changedFiles.length === 0
+              }
+              onClick={() => void applyPreview()}
+            >
+              {busy
+                ? "处理中…"
+                : preview.kind === "profile"
+                  ? "应用方案"
+                  : "恢复备份"}
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );

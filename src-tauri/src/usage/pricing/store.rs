@@ -105,8 +105,8 @@ pub fn load_custom_prices(dir: &Path) -> Result<BTreeMap<String, CustomPriceReco
     };
     let parsed: CustomPriceFile =
         serde_json::from_slice(&bytes).map_err(|_| "自定义价格文件损坏，已保留原文件")?;
-    if parsed.version > 1 {
-        return Err("自定义价格文件来自较新版本，请先升级应用".into());
+    if parsed.version != 1 {
+        return Err("不支持的自定义价格文件版本，已保留原文件".into());
     }
     for (key, record) in &parsed.prices {
         if key.trim().is_empty() {

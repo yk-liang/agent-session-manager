@@ -1,4 +1,4 @@
-//! 历史模型取自已保存的助手消息，并保留提供商限定。
+//! 已保存的助手消息提供模型和客户端标识。
 use super::storage;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -32,12 +32,24 @@ pub(crate) fn model_id(message: &Value) -> Option<String> {
     })
 }
 
+pub(crate) fn client_id(message: &Value) -> Option<String> {
+    text(message.get("agent"))
+        .or_else(|| text(message.get("mode")))
+        .map(|name| name.chars().take(2048).collect())
+}
+
+#[derive(Default)]
+pub(super) struct MessageMetadata {
+    pub model: Option<String>,
+    pub client: Option<String>,
+}
+
 /// 一次读取轻量消息元数据，不连接 part 表，也不逐会话扫描工具输出。
 pub(super) fn latest(
     conn: &Connection,
     session: Option<&str>,
     warnings: &mut Vec<String>,
-) -> HashMap<String, String> {
+) -> HashMap<String, MessageMetadata> {
     let filter = if session.is_some() {
         "session_id=?1 AND "
     } else {
@@ -46,11 +58,12 @@ pub(super) fn latest(
     let order = storage::order_column(conn);
     let query = format!(
         "SELECT session_id,json_object('role','assistant','modelID',json_extract(data,'$.modelID'),
-        'providerID',json_extract(data,'$.providerID'),'model',json_extract(data,'$.model'))
+        'providerID',json_extract(data,'$.providerID'),'model',json_extract(data,'$.model'),
+        'agent',json_extract(data,'$.agent'),'mode',json_extract(data,'$.mode'))
         FROM message WHERE {filter}json_valid(data) AND json_extract(data,'$.role')='assistant'
         ORDER BY {order},id"
     );
-    let read = || -> Result<HashMap<String, String>, rusqlite::Error> {
+    let read = || -> Result<HashMap<String, MessageMetadata>, rusqlite::Error> {
         let mut stmt = conn.prepare(&query)?;
         let decode =
             |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
@@ -59,16 +72,20 @@ pub(super) fn latest(
         } else {
             stmt.query_map([], decode)?
         };
-        let mut models = HashMap::new();
+        let mut messages = HashMap::<String, MessageMetadata>::new();
         for row in rows {
             let (id, data) = row?;
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                let meta = messages.entry(id).or_default();
                 if let Some(model) = from_message(&value) {
-                    models.insert(id, model);
+                    meta.model = Some(model);
+                }
+                if let Some(client) = client_id(&value) {
+                    meta.client = Some(client);
                 }
             }
         }
-        Ok(models)
+        Ok(messages)
     };
     read().unwrap_or_else(|_| {
         warnings.push("OpenCode 历史模型读取失败，当前保留其他会话信息".into());

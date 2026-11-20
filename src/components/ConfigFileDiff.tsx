@@ -4,6 +4,8 @@ import UiIcon from "./UiIcon";
 import { configDiff } from "../configDiff";
 import type { ConfigFileChange } from "../types";
 
+const actionTones = { create: "success", replace: "warning", remove: "error", unchanged: undefined };
+
 const actionLabels = {
   create: "创建",
   replace: "覆盖",
@@ -39,7 +41,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
     <details className="config-diff-file" open={file.action !== "unchanged"}>
       <summary>
         <UiIcon icon={ChevronRight} className="details-caret" />
-        <span className={`change-tag ${file.action}`}>
+        <span className="status-tag" data-tone={actionTones[file.action]}>
           {actionLabels[file.action]}
         </span>
         <strong>{file.label}</strong>
@@ -91,7 +93,8 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
           </div>
           {rows.length >= 24 && (
             <button
-              className="text-button diff-expand"
+              type="button"
+              className="btn-ghost btn-sm diff-expand"
               onClick={() => setShowAll(!showAll)}
             >
               {showAll ? "收起未改动的行" : "展开完整差异"}

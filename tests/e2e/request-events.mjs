@@ -86,7 +86,8 @@ try {
         if (timeline) {
           for (const event of filtered) {
             const buckets = timeline[event.status];
-            const i = Math.max(0, Math.min(buckets.length - 1, Math.floor((event.time - timeline.start) / timeline.step)));
+            const next = timeline.bounds.findIndex(bound => bound > event.time);
+            const i = next < 0 ? buckets.length - 1 : Math.max(0, next - 1);
             buckets[i]++;
           }
         }
@@ -101,13 +102,16 @@ try {
     }) };
   }, fixture);
   await page.goto(baseURL);
-  await page.getByRole('button', { name: '用量', exact: true }).click();
+  const usageTab = page.getByRole('button', { name: '用量', exact: true });
+  await usageTab.click();
+  assert.equal(await usageTab.getAttribute('aria-current'), 'page');
   const requestTab = page.getByRole('tab', { name: '请求记录', exact: true });
   const tabColor = () => requestTab.evaluate(el => getComputedStyle(el).color);
   const resting = await tabColor();
   await requestTab.hover();
   assert.equal(await tabColor(), resting);
   await requestTab.click();
+  assert.equal(await requestTab.getAttribute('aria-selected'), 'true');
   await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
   const table = page.locator('.request-events');
   const cacheWriteColumn = table.getByRole('columnheader', { name: '缓存写入', exact: true });
@@ -132,8 +136,8 @@ try {
   await page.evaluate(() => getSelection().removeAllRanges());
   await assertTripleClickSelects(codex.locator('.request-project > small'), '/fixture/codex');
   await assertTripleClickSelects(sessionId);
-  assert.ok((await codex.textContent()).includes('≈ 50.0 t/s'));
-  assert.equal(await codex.locator('.request-timing small').textContent(), '400ms · ≈ 2.00s');
+  assert.equal(await codex.locator('.request-timing > span').textContent(), '~50.0 t/s');
+  assert.equal(await codex.locator('.request-timing small').textContent(), '400ms · ~2.00s');
   const timing = event => table.locator(`tr[data-event-id=${JSON.stringify(event.id)}] .request-timing small`);
   assert.equal(await timing(successes[0]).textContent(), '1.67s · 3.53s');
   assert.equal(await timing(successes[1]).textContent(), '3.53s');
@@ -174,7 +178,7 @@ try {
   assert.deepEqual((await detail.locator('dt').allTextContents()).slice(0, 4), ['请求 ID', '会话', '类型', '父会话']);
   assert.equal(await detailValue('会话').locator('code').textContent(), 'worker');
   assert.equal(await detailValue('类型').textContent(), 'agent:builtin:web-fetch');
-  assert.equal(await detailValue('客户端').textContent(), '2.1.309');
+  assert.equal(await detailValue('客户端').textContent(), 'Claude Code 2.1.309');
   assert.equal(await detailValue('父会话').locator('code').textContent(), 'session-one');
   assert.equal(await detailValue('项目').locator('code').textContent(), longProject);
   await assertTripleClickSelects(detailValue('项目').locator('code'), longProject);
@@ -269,7 +273,7 @@ try {
   }
   await results.getByRole('option', { name: '成功', exact: true }).click();
   await page.getByText('第 1–50 条，共 108 条', { exact: true }).waitFor();
-  assert.equal(await table.locator('.request-result.success').count(), 50);
+  assert.equal(await table.locator('.request-result[data-tone="success"]').count(), 50);
   await chooseOption(page, '请求结果', { label: '失败' });
   await page.getByText('第 1–1 条，共 1 条', { exact: true }).waitFor();
   const failed = table.locator('tbody > tr').first();
@@ -278,7 +282,7 @@ try {
   assert.equal(await failed.locator('td').nth(9).textContent(), '—');
   assert.equal(await failed.locator('.request-project').textContent(), '未记录');
   const failureText = 'HTTP 503 overloaded\nThe provider is temporarily unavailable.\nTry again in a moment.';
-  await failed.locator('.request-result.failed').hover();
+  await failed.locator('.request-result[data-tone="error"]').hover();
   const failureTip = page.getByRole('tooltip');
   await failureTip.getByText('错误信息', { exact: true }).waitFor();
   assert.equal(await failureTip.locator('pre').textContent(), failureText);
@@ -297,8 +301,9 @@ try {
   await failureDetail.locator('[data-copied="true"]').waitFor();
   assert.ok(await page.evaluate(value => window.__EVENTS__.calls.some(c => c.cmd.includes('clipboard') && c.args.text === value), failureText));
   assert.doesNotMatch(await table.locator('.request-detail').textContent(), /费用明细|日志文件/);
+  assert.equal(await failed.locator('.request-cost .usage-num').textContent(), '$0.00');
   await failed.locator('.request-cost .tip-trigger').hover();
-  await page.getByRole('tooltip').getByText(/缺少完整的输入或输出 Token/).waitFor();
+  await page.getByRole('tooltip').getByText('失败请求未记录 Token 用量', { exact: true }).waitFor();
   await page.keyboard.press('Escape');
   await page.evaluate(() => { window.__EVENTS__.failCopy = true; });
   await table.locator('.request-session').click();
@@ -360,13 +365,19 @@ try {
   const beforeSync = await readingOffset();
   await page.evaluate(() => {
     const state = window.__EVENTS__, latest = state.fixture.events[0];
+    state.delay = true;
+    state.release = null;
     state.fixture.events.unshift(...Array.from({ length: 50 }, (_, i) => ({ ...latest, id: `new-fixture-${i}`, time: latest.time + 1000 * (50 - i) })));
     state.revision = '2'; state.collector.changed();
   });
+  await page.waitForFunction(() => !!window.__EVENTS__.release);
+  await scroller.evaluate(el => { el.scrollTop += 10; });
+  const afterScroll = await readingOffset();
+  await page.evaluate(() => { window.__EVENTS__.release(); window.__EVENTS__.release = null; });
   await page.getByText('第 101–150 条，共 160 条', { exact: true }).waitFor();
   assert.equal(await table.locator(`tr[data-event-id="${readerId}"] .request-expand`).getAttribute('aria-expanded'), 'true');
   const afterSync = await readingOffset();
-  assert.ok(Math.abs(afterSync.offset - beforeSync.offset) <= 1, 'background sync preserves the visible request position');
+  assert.ok(Math.abs(afterSync.offset - afterScroll.offset) <= 1, 'a dropped refresh retries at the new scroll position without another revision');
   assert.equal(afterSync.left, beforeSync.left);
   assert.equal((await rowIds()).length, 50);
   assert.ok(await page.evaluate(id => window.__EVENTS__.calls.some(c => c.cmd === 'read_request_events' && c.args.query.anchor === id), readerId));
@@ -376,7 +387,7 @@ try {
     state.collector.changed();
   });
   await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
-  assert.ok(Math.abs((await readingOffset()).offset - beforeSync.offset) <= 1);
+  assert.ok(Math.abs((await readingOffset()).offset - afterScroll.offset) <= 1);
   await table.getByRole('button', { name: '首页', exact: true }).click();
   await page.getByText('第 1–50 条，共 110 条', { exact: true }).waitFor();
   assert.equal(await table.locator('.request-detail-row').count(), 0);

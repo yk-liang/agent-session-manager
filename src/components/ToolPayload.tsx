@@ -1,7 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
-import "../toolPayload.css";
 
 type SectionKind = "input" | "output" | "error";
 type CopyError = (error: unknown) => void;
@@ -51,10 +50,10 @@ export function ToolInput({ value, onCopyError }: { value: unknown; onCopyError:
   const command = commandText(value);
   const showingCommand = !!command && !showRaw;
   return <ToolSection kind="input" title={showingCommand ? "命令" : undefined} actions={<>
-    {command && <button type="button" className="content-action" onClick={() => setShowRaw(!showRaw)}>
+    {command && <button type="button" className="content-action btn-ghost btn-sm" onClick={() => setShowRaw(!showRaw)}>
       {showRaw ? "查看命令" : "原始 JSON"}
     </button>}
-    {raw && <CopyButton className="content-action" label={showingCommand ? "复制命令" : "复制输入"}
+    {raw && <CopyButton className="content-action btn-ghost btn-sm" label={showingCommand ? "复制命令" : "复制输入"}
       value={showingCommand ? command : raw} onError={onCopyError} />}
   </>}>
     {showingCommand ? <CommandPreview command={command} /> : raw
@@ -90,7 +89,7 @@ export function ToolOutput({ text, markdown, error, onCopyError, children }: {
   return <ToolSection kind={error ? "error" : "output"} actions={<>
     {!children && text && <span>{lineCount} 行</span>}
     {showMore && truncated && <span>预览</span>}
-    {text && <CopyButton className="content-action" label="复制输出" value={text} onError={onCopyError} />}
+    {text && <CopyButton className="content-action btn-ghost btn-sm" label="复制输出" value={text} onError={onCopyError} />}
   </>}>
     {children || (text ? <div className="tool-output-frame" data-capped={showMore && !expanded || undefined}>
       <div className="tool-output" data-expanded={expanded} tabIndex={0} role="region" aria-label="工具输出">
@@ -100,7 +99,7 @@ export function ToolOutput({ text, markdown, error, onCopyError, children }: {
         </div>} />
       </div>
     </div> : <p className="tool-loading tool-payload-message">无输出</p>)}
-    {showMore && <button type="button" className="content-action content-expand" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+    {showMore && <button type="button" className="content-expand btn-sm" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
       {expanded ? "收起输出" : `展开全部 ${lineCount} 行`}
     </button>}
   </ToolSection>;

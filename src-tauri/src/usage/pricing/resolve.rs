@@ -11,6 +11,7 @@ use std::{
 };
 
 pub(in crate::usage) const BUILTIN_SOURCE: &str = "builtin";
+pub(in crate::usage) const NO_USAGE_SOURCE: &str = "no_usage";
 
 fn is_free_model(model: &str) -> bool {
     let model = model.trim();
@@ -31,7 +32,7 @@ pub struct PricingSnapshot {
 
 enum ReferenceMatch {
     Absent,
-    ListedUnpriced,
+    Conflicting,
     Priced(ReferenceSummary, BTreeSet<String>),
 }
 
@@ -59,6 +60,7 @@ impl PricingSnapshot {
         let provider = prefix.or(provider_hint);
         let bare = key.rsplit('/').next().unwrap_or(&key);
         let base = base_model(bare);
+        let base = snapshot_base(base).unwrap_or(base);
         let alias = alias_target(base, at_ms);
         let custom = |model: &str, hint| {
             self.lookup_custom(model, hint)
@@ -108,15 +110,15 @@ impl PricingSnapshot {
                 return Some(reference_to_resolved(price, tiers))
             }
             ReferenceMatch::Absent if base != bare => {
-                let reference = reference(base).priced();
+                let reference = reference(base);
                 if let Some((record, matched_as)) = custom(base, provider) {
                     return Some(custom_to_resolved(
                         record,
                         matched_as,
-                        reference.map(|(price, _)| price),
+                        reference.priced().map(|(price, _)| price),
                     ));
                 }
-                if let Some((price, tiers)) = reference {
+                if let Some((price, tiers)) = reference.priced() {
                     return Some(reference_to_resolved(price, tiers));
                 }
             }
@@ -148,10 +150,21 @@ impl PricingSnapshot {
             details: &event.details,
             provider: event.request.provider.as_deref(),
             tier: event.request.tier.as_deref(),
+            failed: event.status == crate::usage::request_parse::RequestOutcome::Failed,
         })
     }
 
     pub fn price(&self, event: BillableEvent<'_>) -> Result<EventCost, PricingIssue> {
+        if event.failed && event.tokens.total() == 0
+            && event.tokens.cache_read_tokens == 0
+            && event.tokens.cache_write_tokens == 0
+            && event.tokens.reasoning_tokens == 0
+        {
+            return Ok(EventCost {
+                source: NO_USAGE_SOURCE.into(),
+                ..Default::default()
+            });
+        }
         let price = self.resolve(event.model, event.provider, event.time);
         if price
             .as_ref()
@@ -161,6 +174,26 @@ impl PricingSnapshot {
                 source: BUILTIN_SOURCE.into(),
                 ..Default::default()
             });
+        }
+
+        let tier = event.tier.map(|name| name.trim().to_ascii_lowercase());
+        let tier = match (event.agent, tier.as_deref()) {
+            ("codex", Some("fast")) => Some("priority"),
+            (_, tier) => service_tier(tier),
+        };
+        if let Some(price) = &price {
+            let rates = &price.rates;
+            if tier.is_none() && rates.long_context.is_none()
+                && rates.input == 0.0 && rates.output == 0.0
+                && [rates.cache_read, rates.cache_write, rates.cache_write_1h]
+                    .into_iter().flatten().all(|rate| rate == 0.0)
+            {
+                return Ok(EventCost {
+                    source: price.source.clone(),
+                    currency: price.currency,
+                    ..Default::default()
+                });
+            }
         }
 
         let details = event.details;
@@ -190,23 +223,19 @@ impl PricingSnapshot {
 
         let price = price.ok_or(PricingIssue::Unpriced)?;
 
-        // Codex priority 缺少档位价格时使用标准价的两倍。
-        let tier = if event.agent == "codex" && event.tier == Some("fast") {
-            Some("priority")
-        } else {
-            service_tier(event.tier)
-        };
+        let base_long = price.rates.long_context.as_ref();
+        let above_base = base_long.is_some_and(|long| tokens.input_tokens > long.threshold);
         let (rates, multiplier) = match tier {
             None => (price.rates.standard(), 1.0),
             Some(name) => match price.rates.service_tiers.get(name) {
-                Some(rates) => (rates.clone(), 1.0),
-                None if name == "priority" && event.agent == "codex" => {
-                    (price.rates.standard(), 2.0)
-                }
-                None => return Err(PricingIssue::UnsupportedTier),
+                Some(rates) if !above_base || rates.long_context.is_some() => (rates.clone(), 1.0),
+                _ if name == "priority" && event.agent == "codex" => (
+                    price.rates.standard(),
+                    codex_priority_multiplier(&price).ok_or(PricingIssue::UnsupportedTier)?,
+                ),
+                _ => return Err(PricingIssue::UnsupportedTier),
             },
         };
-        let base_long = price.rates.long_context.as_ref();
         let (input, output, read, write, long_context) = match &rates.long_context {
             Some(long) if tokens.input_tokens > long.threshold => (
                 long.input,
@@ -215,13 +244,6 @@ impl PricingSnapshot {
                 long.cache_write,
                 true,
             ),
-            // 超过标准阈值时需要该档位的长上下文价格。
-            None if multiplier == 1.0
-                && tier.is_some()
-                && base_long.is_some_and(|l| tokens.input_tokens > l.threshold) =>
-            {
-                return Err(PricingIssue::UnsupportedTier)
-            }
             _ => (
                 rates.input,
                 rates.output,
@@ -268,7 +290,7 @@ impl PricingSnapshot {
 
         Ok(EventCost {
             total_usd,
-            source: if tier.is_some_and(|name| price.litellm_tiers.contains(name)) {
+            source: if multiplier == 1.0 && tier.is_some_and(|name| price.litellm_tiers.contains(name)) {
                 litellm::SOURCE_ID.into()
             } else {
                 price.source
@@ -340,8 +362,8 @@ impl PricingSnapshot {
                 matched => matched,
             };
             match matched {
-                MatchOutcome::Absent => {}
-                MatchOutcome::ListedUnpriced => return ReferenceMatch::ListedUnpriced,
+                MatchOutcome::Absent | MatchOutcome::ListedUnpriced => {}
+                MatchOutcome::Conflicting => return ReferenceMatch::Conflicting,
                 MatchOutcome::Priced {
                     provider,
                     model_id,
@@ -354,6 +376,8 @@ impl PricingSnapshot {
                                 catalog.match_model(&format!("{provider}/{model_id}"), None)
                             })
                         {
+                            rates.cache_write_1h = rates.cache_write_1h.or(other.cache_write_1h);
+                            rates.cache_write_12h = rates.cache_write_12h.or(other.cache_write_12h);
                             for (tier, rate) in other.service_tiers {
                                 if !rates.service_tiers.contains_key(&tier) {
                                     tiers.insert(tier.clone());
@@ -385,12 +409,23 @@ impl PricingSnapshot {
 /// 由调用方按“目录未定价的档位”处理，不会套用标准价。
 fn service_tier(tier: Option<&str>) -> Option<&str> {
     let tier = tier.map(str::trim).filter(|t| !t.is_empty())?;
-    match tier.to_ascii_lowercase().as_str() {
+    match tier {
         "standard" | "default" | "auto" | "on_demand" => None,
-        "priority" => Some("priority"),
-        "flex" => Some("flex"),
-        "batch" | "batches" => Some("batch"),
+        "batches" => Some("batch"),
         _ => Some(tier),
+    }
+}
+
+fn codex_priority_multiplier(price: &ResolvedPrice) -> Option<f64> {
+    if price.provider.as_deref().map(catalog::normalize_provider).as_deref() != Some("openai") {
+        return None;
+    }
+    let model = catalog::bare_model_key(price.model_id.as_deref()?);
+    match model.as_str() {
+        "gpt-5.5" => Some(2.5),
+        "gpt-5.4" | "gpt-5.3-codex" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+        | "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna" => Some(2.0),
+        _ => None,
     }
 }
 
@@ -434,7 +469,7 @@ fn alias_target(key: &str, at_ms: i64) -> Option<&'static str> {
                 .find(|(since, _)| at_ms >= *since)
                 .map(|(_, target)| *target)
         }
-        "deepseek-v4.1-flash" | "deepseek-v4.1-flash-1017" => Some("deepseek-flash"),
+        "deepseek-v4.1-flash" => Some("deepseek-flash"),
         "gemini-4-argon-trial" => Some("gemini-4-argon"),
         _ => None,
     }
@@ -451,6 +486,23 @@ fn base_model(model: &str) -> &str {
             .then_some(base)
         })
         .unwrap_or(model)
+}
+
+fn snapshot_base(model: &str) -> Option<&str> {
+    if model == "deepseek-v4.1-flash-1017" {
+        return Some("deepseek-v4.1-flash");
+    }
+    for (length, format) in [(8, "%Y%m%d"), (10, "%Y-%m-%d")] {
+        let Some((base, suffix)) = model.split_at_checked(model.len().saturating_sub(length)) else {
+            continue;
+        };
+        if let Some(base) = base.strip_suffix('-') {
+            if suffix.starts_with("20") && NaiveDate::parse_from_str(suffix, format).is_ok() {
+                return Some(base);
+            }
+        }
+    }
+    None
 }
 
 fn reference_to_resolved(

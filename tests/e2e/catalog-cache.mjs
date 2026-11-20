@@ -103,7 +103,7 @@ try {
   await assertProjectDetail("cached refresh pending");
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder", true));
   await waitLoaded();
-  await page.locator(".catalog-error").waitFor();
+  await page.getByRole("alert", { name: "无法读取会话列表", exact: true }).waitFor();
   assert.equal(await cards.count(), 2);
   await assertProjectDetail("cached refresh failed");
   await reload();

@@ -14,21 +14,19 @@ fn main() {
         .windows(2)
         .find(|a| a[0] == "--storage")
         .map(|a| std::path::PathBuf::from(&a[1]))
-        .expect("usage_perf --storage <private directory>");
-    if args.iter().any(|a| a == "--cold") {
-        assert!(
-            !dir.join("cache.sqlite3").exists(),
-            "Cold measurements require an empty storage directory; no data is removed"
-        );
+        .expect("usage_perf --storage <private directory> [--cold | --report-only]");
+    let report_only = args.iter().any(|a| a == "--report-only");
+    let ledger = dir.join("ledger.sqlite3");
+    if report_only {
+        assert!(ledger.is_file(), "Report requires an existing isolated ledger");
+    } else if args.iter().any(|a| a == "--cold") {
+        assert!(!dir.join("cache.sqlite3").exists() && !ledger.exists(),
+            "Cold measurements require an empty storage directory");
     }
-    let open = || {
-        usage::Store::open_with_ledger(
-            Some(&dir.join("cache.sqlite3")),
-            Some(&dir.join("ledger.sqlite3")),
-        )
-    };
+    let cache = dir.join("cache.sqlite3");
+    let open = || usage::Store::open_with_ledger((!report_only).then_some(cache.as_path()), Some(&ledger));
     let mut store = open();
-    for agent in usage::AGENTS {
+    for agent in usage::AGENTS.into_iter().filter(|_| !report_only) {
         let roots = usage::roots(agent).unwrap();
         let started = Instant::now();
         let first = usage::ingest::sync_at(agent, &roots, &mut store, &|| false).unwrap();
@@ -78,9 +76,26 @@ fn main() {
     ] {
         let started = Instant::now();
         let result = usage::summary::read_from(&mut store, query, &|| false).unwrap();
+        let by_agent: std::collections::BTreeMap<_, _> = usage::AGENTS.into_iter().map(|agent| {
+            let rows: Vec<_> = result.rows.iter().filter(|row| row.agent == agent).collect();
+            let cost_usd = rows.iter().filter_map(|row| row.metrics.cost_usd).reduce(|a, b| a + b);
+            (agent, serde_json::json!({
+                "records": rows.iter().map(|row| row.record_count).sum::<u64>(),
+                "requests": rows.iter().map(|row| row.metrics.request_count).sum::<u64>(),
+                "token_total": rows.iter().map(|row| row.usage.total_tokens).sum::<u64>(),
+                "cost_usd": cost_usd,
+                "cost_unknown": rows.iter().map(|row| row.metrics.cost_unknown_count).sum::<u64>(),
+                "unpriced": rows.iter().map(|row| row.metrics.unpriced_count).sum::<u64>(),
+                "usage_incomplete": rows.iter().map(|row| row.metrics.cost_usage_incomplete_count).sum::<u64>(),
+                "special_unpriced": rows.iter().map(|row| row.metrics.cost_special_count).sum::<u64>(),
+            }))
+        }).collect();
         println!(
             "{}",
-            serde_json::json!({"query":label,"query_ms":started.elapsed().as_secs_f64()*1000.,"groups":result.rows.len(),"token_total":result.rows.iter().map(|r|r.usage.total_tokens).sum::<u64>()})
+            serde_json::json!({"query":label,"query_ms":started.elapsed().as_secs_f64()*1000.,"groups":result.rows.len(),"by_agent":by_agent,"token_total":result.rows.iter().map(|r|r.usage.total_tokens).sum::<u64>()})
         );
     }
+    let db = rusqlite::Connection::open_with_flags(ledger, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let pricing = usage::pricing::global().list_model_prices_from_db(&db, None).unwrap().catalog;
+    println!("{}", serde_json::json!({"pricing":pricing}));
 }

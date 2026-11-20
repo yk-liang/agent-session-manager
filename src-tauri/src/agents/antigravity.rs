@@ -1,6 +1,8 @@
 pub(crate) mod models;
 pub(crate) mod proto;
 pub(crate) mod storage;
+mod steps;
+mod summaries;
 mod transcript;
 
 use super::{
@@ -62,7 +64,7 @@ pub(crate) fn conversation_dirs() -> Vec<PathBuf> {
 }
 
 pub(crate) fn is_conversation(name: &str) -> bool {
-    name != "conversation_summaries.db" && name.ends_with(".db")
+    name != summaries::DATABASE && name.ends_with(".db")
 }
 
 fn is_cli(path: &Path) -> bool {
@@ -108,23 +110,32 @@ fn candidate_files(roots: &[PathBuf], warnings: &mut Vec<String>) -> Vec<PathBuf
 fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bool) -> Result<Catalog, String> {
     let mut warnings = Vec::new();
     let mut sessions = BTreeMap::<_, SessionMeta>::new();
-    for path in candidate_files(roots, &mut warnings) {
+    for root in roots {
         super::check_catalog_cancelled(cancelled)?;
-        let sources = [path.clone(), super::scanning::sqlite_wal_path(&path)];
-        match super::catalog_cache::summary("antigravity-v1", &sources, || {
-            let detail = transcript::read(&path, false)?;
-            Ok((detail.meta, detail.warnings))
-        }) {
-            Ok((meta, ws)) => {
-                warnings.extend(ws);
-                if include_empty || meta.real_user_count > 0 {
-                    let key = (meta.project_dir.clone(), meta.session_id.clone());
-                    if sessions.get(&key).is_none_or(|old| prefer(&meta, old)) {
-                        sessions.insert(key, meta);
+        let index = load_index(root, &mut warnings);
+        for path in candidate_files(std::slice::from_ref(root), &mut warnings) {
+            super::check_catalog_cancelled(cancelled)?;
+            let summary = path.file_stem().and_then(|name| name.to_str()).and_then(|id| index.get(id));
+            if summary.is_some_and(|entry| entry.child) {
+                continue;
+            }
+            let sources = [path.clone(), super::scanning::sqlite_wal_path(&path)];
+            match super::catalog_cache::summary("antigravity-v3", &sources, || {
+                let detail = transcript::read(&path, false)?;
+                Ok((detail.meta, detail.warnings))
+            }) {
+                Ok((mut meta, ws)) => {
+                    warnings.extend(ws);
+                    if include_empty || meta.real_user_count > 0 {
+                        summaries::apply(&mut meta, &path, summary);
+                        let key = (meta.project_dir.clone(), meta.session_id.clone());
+                        if sessions.get(&key).is_none_or(|old| prefer(&meta, old)) {
+                            sessions.insert(key, meta);
+                        }
                     }
                 }
+                Err(error) => warnings.push(error),
             }
-            Err(error) => warnings.push(error),
         }
     }
     let mut catalog = assemble_catalog(
@@ -140,14 +151,21 @@ fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bo
     Ok(catalog)
 }
 
+fn load_index(root: &Path, warnings: &mut Vec<String>) -> std::collections::HashMap<String, summaries::Summary> {
+    summaries::read(&summaries::path(root)).unwrap_or_else(|error| {
+        warnings.push(error);
+        Default::default()
+    })
+}
+
 fn prefer(next: &SessionMeta, old: &SessionMeta) -> bool {
     (
-        &next.last_ts,
+        super::timestamp(next.last_ts.as_deref()),
         next.user_count,
         next.assistant_count,
         next.entrypoint.as_deref() == Some("cli"),
     ) > (
-        &old.last_ts,
+        super::timestamp(old.last_ts.as_deref()),
         old.user_count,
         old.assistant_count,
         old.entrypoint.as_deref() == Some("cli"),
@@ -175,11 +193,17 @@ impl AgentSource for AntigravitySource {
             .or_else(|| roots.first())
             .cloned()
     }
-    fn watch_roots(&self) -> Vec<PathBuf> {
-        conversation_dirs()
-            .into_iter()
-            .filter(|root| root.is_dir())
-            .collect()
+    fn watch_locations(&self) -> Vec<(PathBuf, AgentWatchPaths)> {
+        conversation_dirs().into_iter().flat_map(|root| {
+            let index_root = summaries::path(&root).parent().unwrap_or(&root).to_path_buf();
+            [
+                (root, self.watch_paths()),
+                (index_root, AgentWatchPaths {
+                    root_files: vec![summaries::DATABASE, summaries::DATABASE_WAL],
+                    ..Default::default()
+                }),
+            ]
+        }).collect()
     }
     fn watch_paths(&self) -> AgentWatchPaths {
         AgentWatchPaths {
@@ -201,30 +225,39 @@ impl AgentSource for AntigravitySource {
             if path.file_stem().and_then(|stem| stem.to_str()) != Some(session_id) {
                 continue;
             }
+            let index = path.parent().map(|root| load_index(root, &mut warnings)).unwrap_or_default();
+            let summary = index.get(session_id);
+            if summary.is_some_and(|entry| entry.child) {
+                continue;
+            }
             match transcript::read(&path, true) {
-                Ok(next) if next.meta.project_dir == project_dir => {
-                    if detail
-                        .as_ref()
-                        .is_none_or(|old| prefer(&next.meta, &old.meta))
+                Ok(mut next) => {
+                    summaries::apply(&mut next.meta, &path, summary);
+                    if next.meta.project_dir == project_dir
+                        && detail.as_ref().is_none_or(|old| prefer(&next.meta, &old.meta))
                     {
                         detail = Some(next);
                     }
                 }
-                Ok(_) => {}
                 Err(error) => warnings.push(error),
             }
         }
-        detail.ok_or_else(|| {
-            warnings
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| "Antigravity 会话不存在或项目已变化".into())
-        })
+        if let Some(mut detail) = detail {
+            detail.warnings.extend(warnings);
+            return Ok(detail);
+        }
+        Err(warnings.into_iter().next()
+            .unwrap_or_else(|| "Antigravity 会话不存在或项目已变化".into()))
     }
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         let path = meta.source_files.first().ok_or("缺少会话文件定位信息")?;
-        let detail = transcript::read(path, true)?;
-        if detail.meta.session_id != meta.session_id || detail.meta.project_dir != meta.project_dir
+        let root = path.parent().ok_or("缺少会话目录")?;
+        let index = summaries::read(&summaries::path(root)).unwrap_or_default();
+        let summary = index.get(&meta.session_id);
+        let mut detail = transcript::read(path, true)?;
+        summaries::apply(&mut detail.meta, path, summary);
+        if summary.is_some_and(|entry| entry.child)
+            || detail.meta.session_id != meta.session_id || detail.meta.project_dir != meta.project_dir
         {
             return Err("会话来源已变化，请刷新后重试".into());
         }

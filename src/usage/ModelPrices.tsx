@@ -1,8 +1,11 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, Plus, RotateCw, Search, X } from "lucide-react";
+import Notice from "../components/Notice";
+import SearchField from "../components/SearchField";
+import Segmented from "../components/Segmented";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoaderCircle, Plus, RotateCw } from "lucide-react";
 import * as api from "../api";
 import type { AgentInfo } from "../types";
-import type { ModelPriceRow, ModelPricesResponse, ResolvedPrice } from "./types";
+import type { ModelPriceRow, ModelPricesResponse, PricingCurrency, ResolvedPrice, TierRates } from "./types";
 import { CNY_PER_USD, formatTokens, formatCount, formatDateTime, formatRate } from "./format";
 import { sourceName } from "./metrics";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -40,48 +43,59 @@ function formatPriceUpdateTime(ms: number | null): string {
   return ms ? formatDateTime(ms) : "未获取";
 }
 
-function variantNotes(price: ResolvedPrice): string[] {
-  const rates = price.rates;
-  return [
-    rates.cacheWrite1h != null && `1 小时缓存写入 ${formatRate(rates.cacheWrite1h)}`,
-    ...Object.entries(rates.serviceTiers ?? {}).map(
-      ([tier, tierRates]) => `${tier} ${formatRate(tierRates.input)} / ${formatRate(tierRates.output)}`,
-    ),
-  ].filter((note): note is string => !!note);
-}
+const rateFields = ["input", "output", "cacheRead", "cacheWrite"] as const;
 
 function renderRateCell(
   price: ResolvedPrice | null,
-  field: "input" | "output" | "cacheRead" | "cacheWrite",
+  field: typeof rateFields[number],
 ) {
   if (!price) return "—";
-  const rates = price.originalRates ?? price.rates;
-  const base = rates[field];
-  const long = rates.longContext;
+  const base = (price.originalRates ?? price.rates)[field];
   return (
     <span className="price-rate-cell">
       <span>{formatRate(base, price.currency)}</span>
       {price.currency === "CNY" && base != null && <small>{formatRate(price.rates[field], "USD")}</small>}
-      {long && long[field] != null && (
-        <small title={`输入超过 ${formatTokens(long.threshold)} Token`}>
-          &gt;{formatTokens(long.threshold)} {formatRate(long[field], price.currency)}
-        </small>
-      )}
     </span>
   );
 }
 
+function PriceRules({ price }: { price: ResolvedPrice | null }) {
+  if (!price) return "—";
+  const rules: [string, string][] = [];
+  function addRule(label: string, rates: Partial<TierRates>, currency: PricingCurrency = "USD") {
+    rules.push([label, rateFields.map(field => {
+      const rate = rates[field];
+      return rate == null ? "-" : formatRate(rate, currency);
+    }).join(" / ")]);
+  }
+  const long = (price.originalRates ?? price.rates).longContext;
+  if (long) addRule(`>${formatTokens(long.threshold)}`, long, price.currency);
+  for (const [tier, rates] of Object.entries(price.rates.serviceTiers ?? {})) {
+    addRule(tier, rates);
+    if (rates.longContext) {
+      addRule(`${tier} >${formatTokens(rates.longContext.threshold)}`, rates.longContext);
+    }
+  }
+  const { cacheWrite1h, cacheWrite12h } = price.rates;
+  if (cacheWrite1h != null) addRule("cache_write_1h", { cacheWrite: cacheWrite1h });
+  if (cacheWrite12h != null) addRule("cache_write_12h", { cacheWrite: cacheWrite12h });
+  if (rules.length === 0) return "—";
+  return <dl className="price-rules">
+    {rules.map(([label, rates]) => <Fragment key={label}><dt>{label}</dt><dd>{rates}</dd></Fragment>)}
+  </dl>;
+}
+
 function renderSourceCell(price: ResolvedPrice | null) {
   if (!price) {
-    return <span className="price-tag warn">未定价</span>;
+    return <span className="status-tag" data-tone="warning">未定价</span>;
   }
   if (price.source === "builtin") {
-    return <span className="price-tag ok">{sourceName(price.source)}</span>;
+    return <span className="status-tag" data-tone="success">{sourceName(price.source)}</span>;
   }
   if (price.source === "custom") {
     return (
       <div className="price-source-cell">
-        <span className="price-tag info">
+        <span className="status-tag" data-tone="info">
           自定义（{price.currency}）
         </span>
         {price.overridesReference && (
@@ -93,18 +107,12 @@ function renderSourceCell(price: ResolvedPrice | null) {
       </div>
     );
   }
-  const variants = variantNotes(price);
   return (
     <div className="price-source-cell">
-      <span className="price-tag ok">{sourceName(price.source)}</span>
+      <span className="status-tag" data-tone="success">{sourceName(price.source)}</span>
       <small title={`${price.provider ?? ""}/${price.modelId ?? ""}`}>
         {price.provider ? `${price.provider}/${price.modelId ?? ""}` : price.modelId}
       </small>
-      {variants.length > 0 && (
-        <small className="price-variants">
-          {variants.join(" · ")}
-        </small>
-      )}
     </div>
   );
 }
@@ -262,12 +270,10 @@ export default memo(function ModelPrices({
     <section className="usage-section prices-panel" aria-label="模型价格" hidden={!active}>
       <div className="prices-heading">
         <div className="prices-title">
-          <h2>
-            模型价格
-            <HelpTip label="定价规则">
-              报价依次采用自定义价格、内置价格、Models.dev 参考价和 LiteLLM 参考价。
-            </HelpTip>
-          </h2>
+          <h2>模型价格</h2>
+          <HelpTip label="定价规则">
+            报价依次采用自定义价格、内置价格、Models.dev 参考价和 LiteLLM 参考价。
+          </HelpTip>
         </div>
         <div className="prices-actions">
           <button type="button" className="button-with-icon" onClick={() => setEditor({ row: null })}>
@@ -307,50 +313,15 @@ export default memo(function ModelPrices({
         </div>
       )}
 
-      {data?.catalog.customError && (
-        <div className="prices-inline-error" role="alert">无法读取自定义价格文件。</div>
-      )}
-      {error && (
-        <div className="prices-inline-error" role="alert">
-          <span>无法读取模型价格。</span>
-          <button type="button" onClick={() => void load()}>重试</button>
-        </div>
-      )}
-      {actionError && (
-        <div className="prices-inline-error" role="alert">
-          <span>{actionError}</span>
-          <button type="button" onClick={() => setActionError("")} aria-label="关闭提示">
-            <UiIcon icon={X} />
-          </button>
-        </div>
-      )}
+      {data?.catalog.customError && <Notice tone="error">无法读取自定义价格文件。</Notice>}
+      {error && <Notice tone="error" action={{ label: "重试", onClick: () => void load() }}>无法读取模型价格。</Notice>}
+      {actionError && <Notice tone="error" onDismiss={() => setActionError("")}>{actionError}</Notice>}
 
       <div className="prices-toolbar">
-        <div className="usage-segmented" role="group" aria-label="定价状态筛选">
-          {statusLabels.map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={statusFilter === id}
-              onClick={() => onStatusFilterChange(id)}
-            >
-              {label}
-              <span className="prices-filter-count">{formatCount(counts[id])}</span>
-            </button>
-          ))}
-        </div>
-        <div className="search-field prices-search">
-          <UiIcon icon={Search} size={16} className="search-icon" />
-          <input
-            type="search"
-            className="control-input"
-            value={query}
-            placeholder="搜索模型、提供商或来源"
-            aria-label="搜索模型价格"
-            onChange={e => setQuery(e.target.value)}
-          />
-          {query && <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setQuery("")}><UiIcon icon={X} /></button>}
-        </div>
+        <Segmented label="定价状态筛选" value={statusFilter} onChange={onStatusFilterChange}
+          options={statusLabels.map(([id, label]) => [id, <>{label}<span className="prices-filter-count">{formatCount(counts[id])}</span></>])} />
+        <SearchField className="prices-search" value={query} onChange={setQuery}
+          aria-label="搜索模型价格" placeholder="搜索模型、提供商或来源" />
       </div>
 
       <div className="prices-table-wrap" tabIndex={0} role="region" aria-label="模型价格表">
@@ -363,6 +334,7 @@ export default memo(function ModelPrices({
               <col style={{ width: 98 }} />
               <col style={{ width: 98 }} />
               <col style={{ width: 98 }} />
+              <col style={{ width: 310 }} />
               <col style={{ width: 196 }} />
               <col style={{ width: 132 }} />
             </colgroup>
@@ -374,6 +346,7 @@ export default memo(function ModelPrices({
                 <th className="numeric">输出 / 1M</th>
                 <th className="numeric">缓存读取 / 1M</th>
                 <th className="numeric">缓存写入 / 1M</th>
+                <th title="每百万 Token 的输入 / 输出 / 缓存读取 / 缓存写入单价">额外规则</th>
                 <th>报价来源</th>
                 <th className="actions-col">操作</th>
               </tr>
@@ -408,16 +381,17 @@ export default memo(function ModelPrices({
                   <td className="numeric">{renderRateCell(row.price, "output")}</td>
                   <td className="numeric">{renderRateCell(row.price, "cacheRead")}</td>
                   <td className="numeric">{renderRateCell(row.price, "cacheWrite")}</td>
+                  <td><PriceRules price={row.price} /></td>
                   <td>{renderSourceCell(row.price)}</td>
                   <td className="actions-col">
                     <div className="prices-row-actions">
-                      <button type="button" className="prices-link" onClick={() => setEditor({ row })}>
+                      <button type="button" className="btn-ghost btn-sm btn-accent" onClick={() => setEditor({ row })}>
                         {hasEditableCustomPrice(row.price) ? "编辑" : "设置价格"}
                       </button>
                       {hasEditableCustomPrice(row.price) && (
                         <button
                           type="button"
-                          className="prices-link danger"
+                          className="btn-ghost btn-sm danger"
                           onClick={() => setDeleting(row)}
                         >
                           删除

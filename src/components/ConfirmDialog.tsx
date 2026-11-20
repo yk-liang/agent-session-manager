@@ -1,9 +1,10 @@
-import { useEffect, useId } from "react";
+import Modal from "./Modal";
 
 interface Props {
   title: string;
   message: React.ReactNode;
   confirmLabel?: string;
+  busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -12,30 +13,19 @@ export default function ConfirmDialog({
   title,
   message,
   confirmLabel = "确认",
+  busy = false,
   onConfirm,
   onCancel,
 }: Props) {
-  const titleId = useId();
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title" id={titleId}>{title}</div>
+    <Modal title={title} busy={busy} onClose={onCancel}>
         <div className="modal-body">{message}</div>
         <div className="modal-actions">
-          <button onClick={onCancel} autoFocus>取消</button>
-          <button className="danger solid" onClick={onConfirm}>
+          <button type="button" onClick={onCancel} autoFocus disabled={busy}>取消</button>
+          <button type="button" className="danger solid" onClick={onConfirm} disabled={busy}>
             {confirmLabel}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

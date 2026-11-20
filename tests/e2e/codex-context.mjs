@@ -26,7 +26,7 @@ try {
     const archived = new Set();
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       window.__CONTEXT_CALLS__.push({ cmd, args });
-      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, supportsArchive: true, deletePolicy: 'permanent' }];
+      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, supportsArchive: true, supportsArchivedSessions: true, deletePolicy: 'permanent' }];
       if (cmd === 'catalog') {
         const catalog = structuredClone(args.includeEmpty ? fixture.all : fixture.catalog);
         for (const session of catalog.sessions) session.archived = archived.has(session.sessionId);

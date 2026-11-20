@@ -126,7 +126,7 @@ const OPENCODE_CONFIG = {
   ],
 };
 const CODEX_DETAIL = {
-  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4" },
+  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4", client: "Codex Desktop", version: "0.99.0" },
   events: [
     { type: "user", uuid: "cu1", message: { role: "user", content: "codex 用户消息" } },
     { type: "assistant", uuid: "ca1", message: { role: "assistant", content: "codex 助手正文" } },
@@ -136,7 +136,7 @@ const mock = {
   list_agents: [
     { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
     { id: "claude", displayName: "Claude Code", installed: true, supportsFork: false, dataDir: "/Users/demo/.claude", deletePolicy: "trash" },
-    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, supportsArchive: true, dataDir: "/Users/demo/.codex", deletePolicy: "permanent" },
+    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, supportsArchive: true, supportsArchivedSessions: true, dataDir: "/Users/demo/.codex", deletePolicy: "permanent" },
     { id: "opencode", displayName: "OpenCode", installed: true, supportsFork: false, dataDir: "/Users/demo/.config/opencode", deletePolicy: "permanent" },
     { id: "pi", displayName: "Pi", installed: true, supportsFork: false, dataDir: "/Users/demo/.pi/agent", deletePolicy: "trash" },
   ],
@@ -285,8 +285,8 @@ page.on("pageerror", (e) => {
 
 await page.goto(baseURL);
 await page.waitForSelector(".session-card", { timeout: 10000 });
-assert.equal(await page.locator('.session-card .badge').first().textContent(), "mode-xyz");
-assert.ok((await page.locator('.session-card .badge').first().getAttribute('title')).includes('mode-xyz'));
+assert.equal(await page.locator('.session-card .model-label').first().textContent(), "mode-xyz");
+assert.ok((await page.locator('.session-card .model-label').first().getAttribute('title')).includes('mode-xyz'));
 await page.getByRole('searchbox').fill('mode-xyz');
 assert.equal(await page.locator('.session-card').count(), 1);
 await page.getByRole('searchbox').fill('');
@@ -314,8 +314,10 @@ await page.getByRole('button', {name: /^复制会话 ID：/}).click();
 assert.equal(await page.evaluate(()=>window.__COPIED_TEXT__), SESSION_DETAIL.meta.sessionId);
 assert.equal(await page.locator('.detail-meta .model-label').count(), 0);
 await page.getByRole('button', {name:'更多信息',exact:true}).click();
-assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "mode-xyz");
-assert.ok((await page.getByRole('group',{name:'会话信息'}).textContent()).includes('/tmp/demo'));
+const sessionInfo = page.getByRole('group',{name:'会话信息'});
+assert.equal(await sessionInfo.locator('.model-label').textContent(), "mode-xyz");
+assert.ok((await sessionInfo.textContent()).includes('/tmp/demo'));
+assert.equal(await sessionInfo.locator('dt').filter({ hasText: /^客户端$/ }).locator('..').locator('dd').textContent(), 'Qoder 1.1.41');
 await page.keyboard.press('Escape');
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);
 // 再次选择同一会话：重读期间保留原正文，直到新响应返回（新请求 1.2s 后才返回）
@@ -354,6 +356,7 @@ const codexText = (await page.locator(".detail-body").textContent()) ?? "";
 assert.equal(await page.locator('.detail-meta .model-label').count(),0);
 await page.getByRole('button',{name:'更多信息',exact:true}).click();
 assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "gpt-5.4");
+assert.equal(await sessionInfo.locator('dt').filter({ hasText: /^客户端$/ }).locator('..').locator('dd').textContent(), 'Codex Desktop 0.99.0');
 await page.locator('.detail-title').click();
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);
 console.log("STEP1e codex detail:", codexText.includes("codex 助手正文") ? "OK" : "FAILED");
@@ -585,6 +588,7 @@ assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 3);
 assert.ok((await page.locator(".modal-body").textContent()).includes("将删除 Qoder 的 3 个会话。"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
 assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "无法恢复" : "废纸篓还原"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
@@ -622,7 +626,8 @@ await page.evaluate(() => {
   window.__PENDING_DELETES__.shift()();
 });
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
-await page.locator(".catalog-error", { hasText: "mock catalog refresh failure" }).waitFor();
+await page.getByRole("alert", { name: "无法读取会话列表", exact: true })
+  .locator(".read-error-summary", { hasText: "mock catalog refresh failure" }).waitFor();
 assert.equal(await page.locator(".session-card").count(), 2);
 assert.equal(await page.locator(".session-card input:checked").count(), 1);
 assert.ok((await page.locator(".sidebar-projects-header").textContent()).includes("2 个会话"));

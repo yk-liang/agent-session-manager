@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, ListFilter, LoaderCircle, Tags } from "lucide-react";
 import { useDelayedBusy } from "../useDelayedBusy";
 import { requestRecordCounts } from "./metrics";
@@ -8,6 +8,8 @@ import type { UsageSummary } from "./types";
 import ModelPrices, { type PriceStatusFilter } from "./ModelPrices";
 import RequestEvents, { defaultRequestSelection, type RequestSelection } from "./RequestEvents";
 import UiIcon from "../components/UiIcon";
+import Notice from "../components/Notice";
+import Segmented from "../components/Segmented";
 import UsageAnalysis from "./UsageAnalysis";
 import UsageSyncStatus, { formatSyncProgress } from "./UsageSyncStatus";
 import { useUsageDate, useUsageSummary, useUsageSync } from "./useUsageData";
@@ -21,26 +23,11 @@ const periods: [UsagePeriod, string][] = [
   ["month", "近 30 天"],
   ["all", "全部"],
 ];
-const subTabs: { id: UsageTab; label: string; icon: typeof BarChart3 }[] = [
-  { id: "analysis", label: "统计分析", icon: BarChart3 },
-  { id: "events", label: "请求记录", icon: ListFilter },
-  { id: "prices", label: "模型价格", icon: Tags },
-];
-function UsageNotice({ className, tone, busy = false, children, action }: {
-  className: string;
-  tone: "info" | "error";
-  busy?: boolean;
-  children: ReactNode;
-  action?: { label: string; onClick: () => void; disabled?: boolean };
-}) {
-  return (
-    <div className={`usage-notice ${tone} ${className}`} role={tone === "error" ? "alert" : "status"}>
-      {busy && <UiIcon icon={LoaderCircle} className="usage-spin" />}
-      <p>{children}</p>
-      {action && <button type="button" disabled={action.disabled} onClick={action.onClick}>{action.label}</button>}
-    </div>
-  );
-}
+const subTabs = [
+  ["analysis", <><UiIcon icon={BarChart3} />统计分析</>],
+  ["events", <><UiIcon icon={ListFilter} />请求记录</>],
+  ["prices", <><UiIcon icon={Tags} />模型价格</>],
+] as const;
 
 export default function UsagePanel({
   agents,
@@ -120,36 +107,9 @@ export default function UsagePanel({
     <main ref={pageRef} className={`usage-page${subTab === "events" ? " fill" : ""}`}>
       <div className="usage-content">
         <div className="usage-toolbar">
-          <div className="usage-subtabs" role="tablist" aria-label="用量视图">
-            {subTabs.map(({ id, label, icon }) => (
-              <button
-                key={id}
-                type="button"
-                role="tab"
-                aria-selected={subTab === id}
-                onClick={() => switchTab(id)}
-              >
-                <UiIcon icon={icon} />
-                <span>{label}</span>
-              </button>
-            ))}
-          </div>
-
+          <Segmented label="用量视图" tabs options={subTabs} value={subTab} onChange={switchTab} />
           <div className="usage-filters">
-            {subTab !== "prices" && (
-              <div className="usage-periods" role="group" aria-label="时间范围">
-                {periods.map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    aria-pressed={period === id}
-                    onClick={() => setPeriod(id)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
+            {subTab !== "prices" && <Segmented label="时间范围" options={periods} value={period} onChange={setPeriod} />}
             <UsageSyncStatus
               agents={agents}
               synced={synced}
@@ -161,23 +121,23 @@ export default function UsagePanel({
         </div>
 
         {queryError && subTab !== "prices" && (
-          <UsageNotice
+          <Notice
             className="usage-query-error"
             tone="error"
             action={{ label: "重试", onClick: retrySummary }}
           >
             无法读取用量{summary ? "，已保留上次结果" : ""}。
-          </UsageNotice>
+          </Notice>
         )}
         {subTab !== "prices" && unsyncedAgents.length > 0 && (canShowUsage || showImportProgress || !loadingHistory) && (
-          <UsageNotice className="usage-coverage" tone="info" busy={showImportProgress && syncingSelectedHistory}>
+          <Notice className="usage-coverage" icon={showImportProgress && syncingSelectedHistory ? <UiIcon icon={LoaderCircle} className="usage-spin" /> : undefined}>
             {syncingSelectedHistory
               ? `正在同步 ${pendingHistoryNames} 的历史用量${progressText}。`
               : pendingHistoryAgents.length > 0
                 ? `${pendingHistoryNames} 尚未完成首次同步。`
                 : "部分 Agent 的首次同步失败。"}
             {canShowUsage && "以下为已同步的用量。"}
-          </UsageNotice>
+          </Notice>
         )}
         {subTab === "analysis" ? (
           <UsageAnalysis

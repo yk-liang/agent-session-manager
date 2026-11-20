@@ -1,7 +1,10 @@
 //! 当前 Agent 的原生文件事件：不读取日志正文、不轮询，后台时停止向界面发送通知。
+use crate::agents::workspace_groups::normalized;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,7 +27,11 @@ impl WatchSpec {
     }
 
     pub fn from_paths(agent: &str, root: PathBuf, paths: crate::agents::AgentWatchPaths) -> Self {
-        let root = root.canonicalize().unwrap_or(root);
+        let root = std::path::absolute(&root).unwrap_or(root);
+        let root = root.ancestors().find_map(|ancestor| {
+            let canonical = ancestor.canonicalize().ok()?;
+            Some(canonical.join(root.strip_prefix(ancestor).ok()?))
+        }).unwrap_or(root);
         Self {
             agent: agent.to_string(),
             root,
@@ -43,13 +50,15 @@ impl WatchSpec {
         if event.need_rescan() {
             return true;
         }
+        let root = normalized(&self.root);
         event.paths.iter().any(|path| {
-            if path == &self.root {
+            let path = normalized(path);
+            if root.starts_with(&path) {
                 return true;
             }
             for directory in &self.paths.transcript_dirs {
-                let tree = self.root.join(directory);
-                if path == &tree {
+                let tree = root.join(directory);
+                if path == tree {
                     return true;
                 }
                 if let Ok(relative) = path.strip_prefix(&tree) {
@@ -71,7 +80,7 @@ impl WatchSpec {
                         || event.kind.is_remove() && path.extension().is_none();
                 }
             }
-            if path.parent() != Some(self.root.as_path()) {
+            if path.parent() != Some(root.as_path()) {
                 return false;
             }
             let name = path
@@ -88,25 +97,43 @@ impl WatchSpec {
         })
     }
 
-    pub(crate) fn targets(&self) -> Vec<(PathBuf, RecursiveMode)> {
+    pub(crate) fn targets(&self) -> BTreeMap<PathBuf, RecursiveMode> {
+        let mut targets = BTreeMap::new();
+        self.add_targets(&mut targets);
+        targets
+    }
+
+    fn add_targets(&self, targets: &mut BTreeMap<PathBuf, RecursiveMode>) {
         if !self.members.is_empty() {
-            let mut seen = std::collections::HashSet::new();
-            return self
-                .members
-                .iter()
-                .flat_map(|s| s.targets())
-                .filter(|(p, _)| seen.insert(p.clone()))
-                .collect();
+            for member in &self.members {
+                member.add_targets(targets);
+            }
+            return;
         }
-        let mut targets = vec![(self.root.clone(), RecursiveMode::NonRecursive)];
+
+        if let Some(parent) = self.root.ancestors().find(|path| path.is_dir()) {
+            targets.entry(parent.to_path_buf()).or_insert(RecursiveMode::NonRecursive);
+        }
         for directory in &self.paths.transcript_dirs {
             let tree = self.root.join(directory);
             if tree.is_dir() {
-                targets.push((tree, RecursiveMode::Recursive));
+                targets.insert(tree, RecursiveMode::Recursive);
             }
         }
-        targets
     }
+
+    fn registration_changed(&self, event: &Event) -> bool {
+        if !self.members.is_empty() {
+            return self.members.iter().any(|member| member.registration_changed(event));
+        }
+        let root = normalized(&self.root);
+        event.need_rescan() || event.paths.iter().any(|path| {
+            let path = normalized(path);
+            root.starts_with(&path) || self.paths.transcript_dirs.iter()
+                .any(|directory| root.join(directory) == path)
+        })
+    }
+
 }
 
 #[derive(Clone, Serialize)]
@@ -118,15 +145,47 @@ pub struct ChangeSignal {
     pub error: Option<String>,
 }
 
-#[derive(Default)]
-struct WatchState {
-    generation: u64,
-    watcher: Option<RecommendedWatcher>,
+enum WatchMessage {
+    Event(notify::Result<Event>),
+    Stop,
+}
+
+struct WatchWorker(mpsc::Sender<WatchMessage>);
+
+impl Drop for WatchWorker {
+    fn drop(&mut self) {
+        let _ = self.0.send(WatchMessage::Stop);
+    }
+}
+
+fn register_targets(
+    watcher: &mut RecommendedWatcher,
+    current: &mut BTreeMap<PathBuf, RecursiveMode>,
+    desired: BTreeMap<PathBuf, RecursiveMode>,
+) -> Option<String> {
+    current.retain(|path, mode| {
+        if desired.get(path) == Some(mode) {
+            return true;
+        }
+        let _ = watcher.unwatch(path);
+        false
+    });
+    let mut warning = None;
+    for (path, mode) in desired {
+        if current.get(&path) == Some(&mode) {
+            continue;
+        }
+        match watcher.watch(&path, mode) {
+            Ok(()) => { current.insert(path, mode); }
+            Err(error) => warning = Some(format!("无法监听会话目录 {}：{error}", path.display())),
+        }
+    }
+    warning
 }
 
 #[derive(Clone)]
 pub struct SessionWatcher {
-    state: Arc<Mutex<WatchState>>,
+    state: Arc<Mutex<Option<WatchWorker>>>,
     generation: Arc<AtomicU64>,
     foreground: Arc<AtomicBool>,
 }
@@ -134,7 +193,7 @@ pub struct SessionWatcher {
 impl Default for SessionWatcher {
     fn default() -> Self {
         Self {
-            state: Arc::new(Mutex::new(WatchState::default())),
+            state: Arc::new(Mutex::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
             foreground: Arc::new(AtomicBool::new(true)),
         }
@@ -155,10 +214,8 @@ impl SessionWatcher {
         let spec = agent
             .map(|agent| {
                 let source = crate::agents::find_source(&agent)?;
-                let mut members: Vec<_> = source
-                    .watch_roots()
-                    .into_iter()
-                    .map(|root| WatchSpec::from_paths(source.id(), root, source.watch_paths()))
+                let mut members: Vec<_> = source.watch_locations().into_iter()
+                    .map(|(root, paths)| WatchSpec::from_paths(source.id(), root, paths))
                     .collect();
                 Ok::<_, String>(match members.len() {
                     0 => None,
@@ -184,55 +241,86 @@ impl SessionWatcher {
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // IPC 在线程池中完成次序可能颠倒；过期的停止/启动请求不能覆盖最新选择。
-        if generation < state.generation {
+        if generation < self.generation.load(Ordering::SeqCst) {
             return Ok(());
         }
-        state.generation = generation;
         self.generation.store(generation, Ordering::SeqCst);
-        state.watcher = None;
+        *state = None;
         let Some(spec) = spec else {
             return Ok(());
         };
-        let targets = spec.targets();
-        let active_generation = self.generation.clone();
-        let foreground = self.foreground.clone();
-        let mut last_signal: Option<Instant> = None;
-        let mut error_sent = false;
-        let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
-            if active_generation.load(Ordering::SeqCst) != generation
-                || !foreground.load(Ordering::SeqCst)
-            {
-                return;
+        let (tx, rx) = mpsc::channel();
+        let event_tx = tx.clone();
+        let mut watcher = notify::recommended_watcher(move |result| {
+            let _ = event_tx.send(WatchMessage::Event(result));
+        }).map_err(|error| format!("无法启动会话监听：{error}"))?;
+        let mut registered = BTreeMap::new();
+        if let Some(error) = register_targets(&mut watcher, &mut registered, spec.targets()) {
+            if registered.is_empty() {
+                return Err(error);
             }
-            let error = match result {
-                Ok(event) if spec.relevant(&event) => None,
-                Ok(_) => return,
-                Err(error) if !error_sent => {
-                    error_sent = true;
-                    Some(error.to_string())
-                }
-                Err(_) => return,
-            };
-            // 原生事件也可能成批涌入；最多每 400ms 通知一次，正文仍由界面安静期后检查。
-            if error.is_none()
-                && last_signal.is_some_and(|last| last.elapsed() < Duration::from_millis(400))
-            {
-                return;
-            }
-            last_signal = Some(Instant::now());
-            emit(ChangeSignal {
-                agent: spec.agent.clone(),
-                generation,
-                error,
-            });
-        })
-        .map_err(|error| format!("无法启动会话监听：{error}"))?;
-        for (path, recursive) in targets {
-            watcher
-                .watch(&path, recursive)
-                .map_err(|error| format!("无法监听会话目录：{error}"))?;
+            eprintln!("{error}");
         }
-        state.watcher = Some(watcher);
+
+        let selection = self.generation.clone();
+        let foreground = self.foreground.clone();
+        std::thread::Builder::new().name("session-watch".into()).spawn(move || {
+            let interval = Duration::from_millis(400);
+            let mut last_signal: Option<Instant> = None;
+            let mut pending = false;
+            let mut error_sent = false;
+            let send = |error| {
+                if foreground.load(Ordering::SeqCst) && selection.load(Ordering::SeqCst) == generation {
+                    emit(ChangeSignal { agent: spec.agent.clone(), generation, error });
+                }
+            };
+            loop {
+                if selection.load(Ordering::SeqCst) != generation {
+                    break;
+                }
+                let message = if pending {
+                    let remaining = interval.saturating_sub(last_signal.unwrap().elapsed());
+                    if remaining.is_zero() {
+                        send(None);
+                        last_signal = Some(Instant::now());
+                        pending = false;
+                        continue;
+                    }
+                    rx.recv_timeout(remaining)
+                } else {
+                    rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                };
+                match message {
+                    Ok(WatchMessage::Event(Ok(event))) if spec.relevant(&event) => {
+                        if spec.registration_changed(&event) {
+                            if let Some(error) = register_targets(&mut watcher, &mut registered, spec.targets()) {
+                                if !error_sent {
+                                    send(Some(error));
+                                    error_sent = true;
+                                }
+                            }
+                        }
+                        if !foreground.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        if last_signal.is_none_or(|last| last.elapsed() >= interval) {
+                            send(None);
+                            last_signal = Some(Instant::now());
+                            pending = false;
+                        } else {
+                            pending = true;
+                        }
+                    }
+                    Ok(WatchMessage::Event(Err(error))) if !error_sent => {
+                        send(Some(error.to_string()));
+                        error_sent = true;
+                    }
+                    Ok(WatchMessage::Event(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }).map_err(|error| format!("无法启动会话监听线程：{error}"))?;
+        *state = Some(WatchWorker(tx));
         Ok(())
     }
 }
@@ -294,11 +382,11 @@ mod tests {
         assert!(!spec.relevant(&change(root.join("session_index.jsonl"))));
         assert!(spec
             .targets()
-            .contains(&(root.join("records"), RecursiveMode::Recursive)));
+            .get(&root.join("records")) == Some(&RecursiveMode::Recursive));
         assert!(
             WatchSpec::from_paths("custom-agent", root.clone(), Default::default())
                 .targets()
-                .contains(&(root, RecursiveMode::NonRecursive))
+                .get(&root) == Some(&RecursiveMode::NonRecursive)
         );
     }
 
@@ -306,7 +394,6 @@ mod tests {
     fn native_events_observe_new_directories_and_appends_and_stop_after_unwatch() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("projects")).unwrap();
         let watch = SessionWatcher::default();
         let (tx, rx) = std::sync::mpsc::channel();
         watch
@@ -319,15 +406,13 @@ mod tests {
             )
             .unwrap();
         let project = dir.path().join("projects/new-project");
-        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
         let file = project.join("aaaa.jsonl");
         std::fs::write(&file, "{}\n").unwrap();
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(5)).unwrap().agent,
             "qoder"
         );
-        std::thread::sleep(Duration::from_millis(450));
-        while rx.try_recv().is_ok() {}
         writeln!(
             std::fs::OpenOptions::new()
                 .append(true)
@@ -350,6 +435,6 @@ mod tests {
                 |_| panic!("stale watcher resumed"),
             )
             .unwrap();
-        assert!(watch.state.lock().unwrap().watcher.is_none());
+        assert!(watch.state.lock().unwrap().is_none());
     }
 }

@@ -102,7 +102,8 @@ try {
 
   await page.evaluate(() => { window.__FEEDBACK__.copyMode = 'success'; });
   const userMessage = page.locator('.message.user');
-  const agentMessage = page.locator('.message.assistant').last();
+  const agentBubbles = page.locator('.message.assistant');
+  const agentMessage = agentBubbles.last();
   const footer = (message) => message.locator('.message-actions');
   const reservedHeight = await userMessage.evaluate(el => el.offsetHeight - el.querySelector('.msg').offsetHeight);
   assert.ok(reservedHeight >= 24);
@@ -117,7 +118,9 @@ try {
   await copyMessage.press('Enter');
   await copyMessage.locator('.lucide-check').waitFor();
   assert.equal(await footer(agentMessage).locator('time').textContent(), '2026-10-28 09:08:06');
-  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '# 回答\n' + '原文'.repeat(1800) + '\n\n第二段');
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '第二段');
+  await agentBubbles.first().getByRole('button', { name: '复制消息', exact: true }).press('Enter');
+  await page.waitForFunction(() => window.__FEEDBACK__.copied.at(-1) === '# 回答\n' + '原文'.repeat(1800));
   await page.clock.runFor(2100);
   await copyMessage.locator('.lucide-copy').waitFor();
   assert.equal(await userMessage.evaluate(el => el.offsetHeight - el.querySelector('.msg').offsetHeight), reservedHeight);
@@ -133,12 +136,12 @@ try {
   await page.locator('.session-card', { hasText: 'refreshed session' }).waitFor();
   await page.evaluate(() => { const s = window.__FEEDBACK__; s.failCatalog = true; s.changed(); });
   await page.clock.fastForward(12000);
-  await page.locator('.catalog-error').waitFor();
+  await page.getByRole('alert', { name: '无法读取会话列表', exact: true }).waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   await page.evaluate(() => { window.__FEEDBACK__.failCatalog = false; });
   await page.getByRole('button', { name: '重试', exact: true }).click();
   await page.locator('.session-list[aria-busy="false"]').waitFor();
-  assert.equal(await page.locator('.catalog-error').count(), 0);
+  assert.equal(await page.getByRole('alert', { name: '无法读取会话列表', exact: true }).count(), 0);
   console.log(`PASS: file changes update sessions without a refresh button; failures preserve data and offer a contextual retry (${engine})`);
 
   await page.evaluate(() => { const state = window.__FEEDBACK__; state.holdSync = true; void state.collector.check(); });

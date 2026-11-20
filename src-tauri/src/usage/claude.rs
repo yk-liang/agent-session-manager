@@ -222,6 +222,23 @@ fn iteration_usage(item: &Value) -> &Value {
     item.get("usage").unwrap_or(item)
 }
 
+pub(super) fn message_cache_creation(usage: &Value) -> Option<(u64, u64)> {
+    let iterations = usage["iterations"].as_array()?;
+    let mut splits = iterations.iter().filter(|item| item["type"] == "message").peekable();
+    splits.peek()?;
+    splits.try_fold((0u64, 0u64), |(short, long), item| {
+        let ttl = iteration_usage(item).get("cache_creation")?.as_object()?;
+        let tokens = |key| ttl.get(key).map_or(Some(0), Value::as_u64);
+        if !ttl.contains_key("ephemeral_5m_input_tokens") && !ttl.contains_key("ephemeral_1h_input_tokens") {
+            return None;
+        }
+        Some((
+            short.saturating_add(tokens("ephemeral_5m_input_tokens")?),
+            long.saturating_add(tokens("ephemeral_1h_input_tokens")?),
+        ))
+    })
+}
+
 fn read_iterations(usage: &Value, primary: &Sample, samples: &mut Vec<Sample>) {
     let Some(iterations) = usage["iterations"].as_array() else {
         return;

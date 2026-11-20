@@ -7,7 +7,6 @@ use serde_json::Value;
 #[serde(rename_all = "lowercase")]
 pub enum RequestOutcome {
     #[default]
-    #[serde(alias = "unknown")]
     Success,
     Failed,
 }
@@ -106,15 +105,7 @@ impl RequestMeta {
     }
 
     pub(super) fn normalize_codex_kind(&mut self) {
-        if !matches!(self.kind.as_deref(), None | Some("cli" | "vscode")) {
-            return;
-        }
-        let kind = match self.client.as_deref() {
-            Some("codex-tui" | "codex_cli_rs" | "codex_cli") => "cli",
-            Some("codex_exec") => "exec",
-            _ => return,
-        };
-        if self.kind.as_deref() != Some(kind) {
+        if let Some(kind) = codex_client_kind(self.kind.as_deref(), self.client.as_deref()) {
             self.kind = Some(kind.into());
         }
     }
@@ -206,14 +197,7 @@ impl RequestMeta {
     pub(super) fn merge_codex(&mut self, next: &Self) {
         let compacted = self.kind.as_deref() == Some("compaction")
             || next.kind.as_deref() == Some("compaction");
-        self.clear_legacy_codex_timing();
-        if next.timing.as_deref() == Some(codex::LEGACY_ESTIMATE) {
-            let mut next = next.clone();
-            next.clear_legacy_codex_timing();
-            self.merge(&next);
-        } else {
-            self.merge(next);
-        }
+        self.merge(next);
         if compacted {
             self.mark_compaction();
         }
@@ -234,21 +218,21 @@ impl RequestMeta {
         self.ttft_scope = None;
     }
 
-    pub(super) fn clear_legacy_codex_timing(&mut self) {
-        if self.timing.as_deref() == Some(codex::LEGACY_ESTIMATE) {
-            let turn_ttft = self
-                .ttft_ms
-                .filter(|_| self.ttft_scope.as_deref() == Some("turn"));
-            self.clear_timing();
-            self.ttft_ms = turn_ttft;
-            self.ttft_scope = turn_ttft.map(|_| "turn".into());
-        }
-    }
-
     pub(super) fn duration(&mut self) {
         if let Some((start, end)) = self.started_at.zip(self.finished_at) {
             self.latency_ms = elapsed_ms(start, end);
         }
+    }
+}
+
+pub(super) fn codex_client_kind(kind: Option<&str>, client: Option<&str>) -> Option<&'static str> {
+    if !matches!(kind, None | Some("cli" | "vscode")) {
+        return None;
+    }
+    match client {
+        Some("codex-tui" | "codex_cli_rs" | "codex_cli") => Some("cli"),
+        Some("codex_exec") => Some("exec"),
+        _ => None,
     }
 }
 

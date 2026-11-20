@@ -47,7 +47,7 @@ pub fn normalize_provider(provider: &str) -> String {
         "anthropic" => "anthropic".into(),
         "deepseek" => "deepseek".into(),
         "xai" | "x-ai" => "xai".into(),
-        "alibaba" | "alibaba-cn" | "dashscope" | "qwen" => "alibaba".into(),
+        "alibaba" | "alibaba-cn" | "aliyun" | "dashscope" | "qwen" => "alibaba".into(),
         "zhipuai" | "zhipu" | "zai" | "bigmodel" => "zhipuai".into(),
         "moonshotai" | "moonshot" => "moonshotai".into(),
         "minimax" => "minimax".into(),
@@ -108,8 +108,8 @@ pub enum MatchOutcome {
         model_id: String,
         rates: Rates,
     },
-    /// 目录中存在该模型，但价格冲突、缺失或计费单位不受支持；禁止退回后缀兜底。
     ListedUnpriced,
+    Conflicting,
     Absent,
 }
 
@@ -252,17 +252,24 @@ impl SourceCatalog {
         if indices.is_empty() {
             return MatchOutcome::Absent;
         }
-        let first = &self.listings[indices[0]];
-        let Some(first_rates) = &first.rates else {
+        let mut priced = indices.iter().filter_map(|&index| {
+            let listing = &self.listings[index];
+            Some((listing, listing.rates.as_ref()?))
+        });
+        let Some((first, first_rates)) = priced.next() else {
             return MatchOutcome::ListedUnpriced;
         };
         let mut rates = first_rates.clone();
-        for &index in &indices[1..] {
-            match &self.listings[index].rates {
-                // 同名条目（如 `gpt-x` 与 `openai/gpt-x`）只在特殊档位上不同时，标准价仍然可用。
-                Some(other) if other.standard_eq(first_rates) => rates.keep_common_variants(other),
-                _ => return MatchOutcome::ListedUnpriced,
+        for (_, other) in priced {
+            if !other.standard_eq(first_rates) {
+                return MatchOutcome::Conflicting;
             }
+            rates.keep_common_variants(other);
+        }
+        if indices.iter().any(|&index| self.listings[index].rates.is_none()
+            && self.listings[index].normalized_provider != first.normalized_provider)
+        {
+            return MatchOutcome::ListedUnpriced;
         }
         MatchOutcome::Priced {
             provider: first.provider.clone(),

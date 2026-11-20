@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowDown, ArrowUp, ListTree, PanelRightClose, PanelRightOpen, X } from "lucide-react";
 import UiIcon from "./UiIcon";
+import useDismiss from "./useDismiss";
 
 type Entry = { idx: number; text: string };
 
@@ -40,15 +41,10 @@ export function useSessionOutline(
       container.scrollTop += row.top - bounds.top - (container.clientHeight - row.height) / 2;
     }
   }, [active, collapsed, open]);
-  useEffect(() => {
-    if (!open) return;
-    const closeOutside = ({ target }: PointerEvent) => {
-      if (button.current?.contains(target as Node) || panel.current?.contains(target as Node)) return;
-      setOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOutside);
-    return () => document.removeEventListener("pointerdown", closeOutside);
-  }, [open]);
+  useDismiss(open, [button, panel], reason => {
+    setOpen(false);
+    if (reason === "escape") button.current?.focus({ preventScroll: true });
+  });
 
   const jump = useCallback((index: number, focus = true) => {
     const overlay = !!button.current?.getClientRects().length;
@@ -57,7 +53,7 @@ export function useSessionOutline(
   }, [onJump]);
   const items = useMemo(() => entries.map(({ idx }, index) => (
     <li key={idx}>
-      <button ref={active === idx ? currentItem : undefined} type="button" className="toc-item"
+      <button ref={active === idx ? currentItem : undefined} type="button" className="toc-item btn-ghost"
         title={snippets[index]} aria-label={`第 ${index + 1} 条提问：${snippets[index]}`}
         aria-current={active === idx ? "location" : undefined} data-passed={index < current}
         onClick={() => jump(idx)}>
@@ -71,12 +67,6 @@ export function useSessionOutline(
   )), [active, current, entries, jump, snippets]);
   const onKeyDown = (event: KeyboardEvent) => {
     if (!entries.length || event.defaultPrevented || event.nativeEvent.isComposing) return;
-    if (event.key === "Escape" && open && button.current?.getClientRects().length) {
-      event.stopPropagation();
-      setOpen(false);
-      button.current?.focus();
-      return;
-    }
     if (event.metaKey || event.ctrlKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const backwards = event.key === "ArrowUp";
     const element = event.target as HTMLElement;
@@ -98,7 +88,7 @@ export function useSessionOutline(
   const toggleLabel = collapsed ? "展开导览" : "收起导览";
   return {
     onKeyDown,
-    trigger: <button ref={button} type="button" className="outline-toggle button-with-icon"
+    trigger: <button ref={button} type="button" className="outline-toggle button-with-icon btn-sm btn-ghost"
       aria-controls={id} aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <UiIcon icon={ListTree} />对话导览
     </button>,
@@ -107,14 +97,14 @@ export function useSessionOutline(
         <div className="toc-heading">
           <div className="toc-title"><strong>对话导览</strong><span className="status-tag">{entries.length} 条提问</span></div>
           <div className="toc-controls">
-            <button type="button" title="上一条提问（Alt + ↑）" aria-label="上一条提问" disabled={!previous} onClick={() => previous && jump(previous.idx, false)}><UiIcon icon={ArrowUp} /></button>
-            <button type="button" title="下一条提问（Alt + ↓）" aria-label="下一条提问" disabled={!next} onClick={() => next && jump(next.idx, false)}><UiIcon icon={ArrowDown} /></button>
+            <button type="button" className="btn-icon btn-ghost" title="上一条提问（Alt + ↑）" aria-label="上一条提问" disabled={!previous} onClick={() => previous && jump(previous.idx, false)}><UiIcon icon={ArrowUp} /></button>
+            <button type="button" className="btn-icon btn-ghost" title="下一条提问（Alt + ↓）" aria-label="下一条提问" disabled={!next} onClick={() => next && jump(next.idx, false)}><UiIcon icon={ArrowDown} /></button>
           </div>
-          <button type="button" className="toc-control toc-collapse" title={toggleLabel} aria-label={toggleLabel}
+          <button type="button" className="toc-collapse btn-icon btn-ghost" title={toggleLabel} aria-label={toggleLabel}
             aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}>
             <UiIcon icon={collapsed ? PanelRightOpen : PanelRightClose} />
           </button>
-          <button type="button" className="toc-control toc-close" title="关闭导览" aria-label="关闭导览"
+          <button type="button" className="toc-close btn-icon btn-ghost" title="关闭导览" aria-label="关闭导览"
             onClick={() => { setOpen(false); button.current?.focus(); }}><UiIcon icon={X} /></button>
         </div>
       </div>

@@ -1,11 +1,12 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
-import { ChevronRight, Search, X } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import UiIcon from "./UiIcon";
 import { formatSize, formatLocalDateTime, relativeTime, sessionKey, shortPath } from "../utils";
 import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
+import SearchField from "./SearchField";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
 import { Checkbox, CheckboxField } from "./Checkbox";
@@ -118,40 +119,26 @@ export default function SessionList({
   return (
     <div className="session-list" aria-busy={busy}>
       <div className="search-box">
-        <div className="search-field">
-          <UiIcon icon={Search} size={16} className="search-icon" />
-          <input
-            type="search"
-            className="control-input"
-            placeholder="搜索会话或正文…"
-            aria-label="搜索会话或正文"
-            maxLength={256}
-            value={search}
-            onChange={(e) => onSearch(e.target.value)}
-            disabled={disabled}
-          />
-          {search && <button type="button" className="search-clear" aria-label="清除搜索" title="清除搜索" onClick={() => onSearch("")} disabled={disabled}>
-            <UiIcon icon={X} />
-          </button>}
-        </div>
+        <SearchField placeholder="搜索会话或正文…" aria-label="搜索会话或正文"
+          maxLength={256} value={search} onChange={onSearch} disabled={disabled} />
         {(searchPending || searchSkipped > 0 || searchError) && (
           <div className={`search-status${searchSkipped || searchError ? " warning" : ""}`} role="status" title={searchError ?? undefined}>
-            {searchPending ? "正在搜索正文…" : searchError ? <>无法搜索正文 <button onClick={onRetrySearch} disabled={disabled}>重试</button></> : `无法搜索 ${searchSkipped} 个会话`}
+            {searchPending ? "正在搜索正文…" : searchError ? <>无法搜索正文 <button type="button" onClick={onRetrySearch} disabled={disabled}>重试</button></> : `无法搜索 ${searchSkipped} 个会话`}
           </div>
         )}
-        {loadError && <ReadDiagnostics className="catalog-error" title="无法读取会话列表" errors={[loadError]} retry={onRetryLoad} busy={disabled || busy} />}
-        {warnings.length > 0 && <ReadDiagnostics className="catalog-warnings" title="部分会话无法读取" errors={warnings} retry={onRetryLoad} busy={disabled || busy} />}
+        {loadError && <ReadDiagnostics title="无法读取会话列表" errors={[loadError]} retry={onRetryLoad} busy={disabled || busy} />}
+        {warnings.length > 0 && <ReadDiagnostics title="部分会话无法读取" errors={warnings} retry={onRetryLoad} busy={disabled || busy} />}
         <div className="session-list-options">
           <div className="session-list-filters">
             <CheckboxField label="显示空会话" checked={filter.includeEmpty} disabled={disabled}
               onChange={includeEmpty => onFilterChange({ ...filter, includeEmpty })} />
-            {agent?.supportsArchive && (
+            {agent?.supportsArchivedSessions && (
               <CheckboxField label="显示已归档" checked={filter.includeArchived} disabled={disabled}
                 onChange={includeArchived => onFilterChange({ ...filter, includeArchived })} />
             )}
           </div>
           {agent && agent.deletePolicy !== "readOnly" && (
-            <button onClick={onToggleBatch} disabled={disabled || busy || searchPending || (!batchMode && sessions.length === 0)}>
+            <button type="button" onClick={onToggleBatch} disabled={disabled || busy || searchPending || (!batchMode && sessions.length === 0)}>
               {batchMode ? "完成" : "批量管理"}
             </button>
           )}
@@ -163,10 +150,10 @@ export default function SessionList({
             {progress ? `正在删除会话（${progress.completed} / ${progress.total}）` : `已选中 ${selectedCount} 个会话`}
           </div>
           <div className="batch-actions">
-            <button onClick={onToggleAll} disabled={disabled || busy || searchPending || sessions.length === 0}>
+            <button type="button" onClick={onToggleAll} disabled={disabled || busy || searchPending || sessions.length === 0}>
               {allSelected ? "取消全选" : "全选结果"}
             </button>
-            <button className="danger" onClick={onDeleteSelected} disabled={disabled || busy || searchPending || selectedCount === 0}>
+            <button type="button" className="danger" onClick={onDeleteSelected} disabled={disabled || busy || searchPending || selectedCount === 0}>
               删除所选
             </button>
           </div>
@@ -211,10 +198,10 @@ export default function SessionList({
                   <time dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
                 </span>
                 <span className="session-card-badges">
-                  {s.readError && <span className="badge read-error-badge" title="打开会话以重试或查看诊断">正文读取失败</span>}
-                  {isEmpty && <span className="badge empty-badge">空会话</span>}
+                  {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
+                  {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
                   <ModelLabel model={s.model} badge />
-                  {showPaths && !hidePath && displayPath && <span className="badge dim session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
+                  {showPaths && !hidePath && displayPath && <span className="status-tag session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
                 </span>
                 {s.archived && <span className="archived-ribbon"><span>已归档</span></span>}
               </>

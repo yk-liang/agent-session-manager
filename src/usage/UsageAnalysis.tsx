@@ -1,9 +1,10 @@
+import Segmented from "../components/Segmented";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { AgentInfo } from "../types";
 import type { UsageSummary, UsageSummaryRow } from "./types";
-import { display, formatTokens, formatCount, formatPercent, formatUsd, type Display } from "./format";
-import { cacheRateDisplay, costDisplay, dimensionTotals, distributionSlices, groupUsageBy, groupUsageCells, OTHERS_KEY, requestDisplay, successRateDisplay, sumModelUsage, tokenDisplay, uncachedInputOf, type AnalysisDimension, type GroupedUsage, type ModelUsage, type TrendMetric } from "./metrics";
+import { display, formatTokens, formatCount, formatPercent, type Display } from "./format";
+import { cacheCoverageNote, cacheRateDisplay, costDisplay, costGapNotes, dimensionTotals, distributionSlices, groupUsageBy, groupUsageCells, OTHERS_KEY, requestDisplay, successRateDisplay, sumModelUsage, tokenDisplay, uncachedInputOf, type AnalysisDimension, type GroupedUsage, type ModelUsage, type TrendMetric } from "./metrics";
 import { buildTrendSeries, entityColors, OTHER_COLOR, TREND_METRIC_NAMES, usageSeries, type TrendGroup } from "./trend";
 import { type UsagePeriod } from "./range";
 import { projectName, shortPath } from "../utils";
@@ -33,24 +34,6 @@ const SHARE_METRIC_OPTIONS = TREND_METRIC_OPTIONS.map(([id, name]): [TrendMetric
 const DIMENSIONS: Record<AnalysisDimension, string> = { models: "模型", agents: "Agent", projects: "项目", providers: "提供商" };
 const TABLE_ROWS = 8;
 
-
-function Segmented<T extends string>({ label, options, value, onChange }: {
-  label: string;
-  options: [T, string][];
-  value: T;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div className="usage-segmented" role="group" aria-label={label}>
-      {options.map(([id, text]) => (
-        <button key={id} type="button" aria-pressed={value === id} onClick={() => onChange(id)}>
-          {text}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function highestCost(rows: GroupedUsage[]): GroupedUsage | null {
   return rows.reduce<GroupedUsage | null>((leader, row) =>
     row.key && row.costUsd != null && (leader?.costUsd == null || row.costUsd > leader.costUsd)
@@ -64,7 +47,7 @@ function CostLeader({ leader, label }: { leader: GroupedUsage | null; label?: (k
   return (
     <>
       <span className="usage-stat-value-detail" title={leader.key}>{label ? label(leader.key) : leader.key}</span>
-      <span>{formatUsd(leader.costUsd)}</span>
+      <UsageNumber value={costDisplay(leader)} />
     </>
   );
 }
@@ -194,7 +177,7 @@ export default function UsageAnalysis({
   const cacheRate = cacheRateDisplay(totals);
   const cacheNotes = [
     cacheRate.missing && totals.inputTokens > 0 && "缓存读取数据不完整，无法计算命中率。",
-    !cacheRate.missing && totals.cacheReadIncomplete && "部分请求未记录缓存读取",
+    cacheCoverageNote(totals),
   ];
   const cost = costDisplay(totals);
   const clean = (notes: (string | false | undefined)[]) => (hasRows ? notes.filter((n): n is string => !!n) : []);
@@ -207,7 +190,7 @@ export default function UsageAnalysis({
   const topProject = hasRows ? highestCost(projects) : null;
 
   return (
-    <div className="usage-analysis">
+    <>
       <section className="usage-cards" aria-label="用量概览">
         <StatCard
           metric="requests"
@@ -257,6 +240,7 @@ export default function UsageAnalysis({
             ["模型第一", <CostLeader leader={topModel} />],
             ["项目第一", <CostLeader leader={topProject} label={projectName} />],
           ]}
+          notes={costGapNotes(totals)}
         />
       </section>
 
@@ -266,8 +250,8 @@ export default function UsageAnalysis({
             <h2>{period === "today" ? "每小时趋势" : "每日趋势"}</h2>
           </div>
           <div className="usage-controls">
-            <Segmented label="趋势指标" options={TREND_METRIC_OPTIONS} value={trendMetric} onChange={setTrendMetric} />
-            <Segmented<TrendGroup>
+            <Segmented compact label="趋势指标" options={TREND_METRIC_OPTIONS} value={trendMetric} onChange={setTrendMetric} />
+            <Segmented<TrendGroup> compact
               label="趋势分组"
               options={agent === "all" ? [["category", "按类别"], ["models", "按模型"], ["agents", "按 Agent"]] : [["category", "按类别"], ["models", "按模型"]]}
               value={group}
@@ -288,7 +272,7 @@ export default function UsageAnalysis({
             <h2>按{DIMENSIONS[groupBy]}</h2>
           </div>
           <div className="usage-controls">
-            <Segmented
+            <Segmented compact
               label="分组维度"
               options={(Object.entries(DIMENSIONS) as [AnalysisDimension, string][])
                 .filter(([id]) => agent === "all" || id !== "agents")
@@ -296,7 +280,7 @@ export default function UsageAnalysis({
               value={groupBy}
               onChange={id => { setDimension(id); setExpanded(false); }}
             />
-            <Segmented
+            <Segmented compact
               label="占比指标"
               options={SHARE_METRIC_OPTIONS}
               value={shareMetric}
@@ -321,7 +305,7 @@ export default function UsageAnalysis({
                         { key: "share", label: "占比", value: formatPercent(slice.share), color },
                         { key: "tokens", label: "Token", value: formatTokens(slice.totalTokens) },
                         { key: "requests", label: "请求", value: requestDisplay(slice).text },
-                        { key: "cost", label: "费用", value: slice.costUsd == null ? "—" : formatUsd(slice.costUsd) },
+                        { key: "cost", label: "费用", value: costDisplay(slice).text },
                       ],
                       note: slice.othersCount ? `合并了占比较小的 ${slice.othersCount} 项` : undefined,
                     }, anchorOf(event.currentTarget))}
@@ -374,7 +358,7 @@ export default function UsageAnalysis({
               </table>
             </div>
             {groupedRows.length > TABLE_ROWS && (
-              <button type="button" className="usage-more" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+              <button type="button" className="usage-more btn-ghost btn-accent" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
                 {expanded ? "收起" : `显示全部 ${formatCount(groupedRows.length)} 项`}
                 <UiIcon icon={expanded ? ChevronUp : ChevronDown} />
               </button>
@@ -384,6 +368,6 @@ export default function UsageAnalysis({
           <div className="usage-empty">{canShowUsage ? "所选范围暂无记录" : emptyText}</div>
         )}
       </section>
-    </div>
+    </>
   );
 }

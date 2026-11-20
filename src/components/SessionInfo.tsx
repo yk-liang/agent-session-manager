@@ -1,41 +1,29 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import UiIcon from "./UiIcon";
 import type { SessionMeta } from "../types";
 import ModelLabel from "./ModelLabel";
+import useDismiss from "./useDismiss";
+import { clientLabel } from "../utils";
 
-export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; models?: string[] }) {
-  const otherModels = models.filter((model) => model !== meta.model);
+export default function SessionInfo({ meta, agentName, models = [] }: {
+  meta: SessionMeta;
+  agentName: string;
+  models?: string[];
+}) {
+  const currentModel = meta.model || models[0];
+  const otherModels = models.filter((model) => model !== currentModel);
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const id = useId();
-  const hasInfo = !!(meta.model || meta.cwd || meta.version || meta.gitBranch);
 
-  useEffect(() => {
-    if (!open || !hasInfo) return;
-    const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-      }
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape, true);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape, true);
-    };
-  }, [open, hasInfo]);
+  useDismiss(open, [root], () => setOpen(false));
 
-  if (!hasInfo) return null;
   return (
     <div className="session-info" ref={root}>
       <button
-        className="session-info-toggle"
+        type="button"
+        className="session-info-toggle btn-sm btn-ghost"
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
@@ -51,11 +39,11 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
           aria-label="会话信息"
         >
           <dl>
-            {meta.model && (
+            {currentModel && (
               <div>
                 <dt>{otherModels.length ? "最近使用的模型" : "模型"}</dt>
                 <dd>
-                  <ModelLabel model={meta.model} />
+                  <ModelLabel model={currentModel} />
                 </dd>
               </div>
             )}
@@ -69,12 +57,10 @@ export default function SessionInfo({ meta, models = [] }: { meta: SessionMeta; 
                 <dd>{meta.cwd}</dd>
               </div>
             )}
-            {meta.version && (
-              <div>
-                <dt>客户端版本</dt>
-                <dd>{meta.version}</dd>
-              </div>
-            )}
+            <div>
+              <dt>客户端</dt>
+              <dd>{clientLabel(agentName, meta.client, meta.version)}</dd>
+            </div>
             {meta.gitBranch && (
               <div>
                 <dt>Git 分支</dt>

@@ -7,13 +7,13 @@
 | Agent | 默认会话位置 |
 | --- | --- |
 | Qoder | `~/.qoder/projects/` |
-| Claude Code | `~/.claude/projects/` |
+| Claude Code | `~/.claude/projects/`、`~/.config/claude/projects/` |
 | Codex | `~/.codex/sessions/`、`~/.codex/archived_sessions/` |
 | OpenCode | `~/.local/share/opencode/` |
 | Pi | `~/.pi/agent/sessions/` |
 | Antigravity | `~/.gemini/antigravity*/conversations/`、`~/.config/antigravity/conversations/` |
 
-`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `PI_CODING_AGENT_DIR` 可分别指定 Codex、Claude Code 和 Pi 的数据目录。OpenCode 优先读取 `OPENCODE_DATA_DIR`，其次使用 `XDG_DATA_HOME/opencode/`。Claude Code 的用量采集默认也会读取 `~/.config/claude/projects/`。`ANTIGRAVITY_DATA_DIR` 接受数据目录或会话目录，多个路径用逗号分隔。
+`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `PI_CODING_AGENT_DIR` 可分别指定 Codex、Claude Code 和 Pi 的数据目录。`CLAUDE_CONFIG_DIR` 支持逗号分隔的配置目录。会话和用量会扫描其中已有的 `projects/`，配置页使用第一个目录。OpenCode 优先读取 `OPENCODE_DATA_DIR`，其次使用 `XDG_DATA_HOME/opencode/`。`ANTIGRAVITY_DATA_DIR` 接受数据目录或会话目录，多个路径用逗号分隔。
 
 配置方案和备份存放在 `~/.agent-session-manager/`。用量账本和缓存见[用量模块说明](../src-tauri/src/usage/README.md#存储)。
 
@@ -109,13 +109,13 @@ npm run test:manual -- codex-history    # 本机真实 Codex 分页历史，只�
 
 `agent-context` 使用 Rust 适配器生成的合成数据，验证上下文展示、消息计数和搜索定位。`agent-context-runtime` 用本地模型服务运行 Claude Code 和 Pi，再验证真实日志的只读解析。可通过 `CLAUDE_BIN` 和 `PI_BIN` 指定程序。Qoder 使用合成数据覆盖。
 
-OpenCode 适配同时支持 v1（`session/message/part`）和 v2（`session_v2/session_message`），源库以只读模式打开。`opencode-runtime` 用实际 CLI 验证续聊、分叉、用量去重和界面展示，可通过 `OPENCODE_BIN` 指定程序。[OpenCode v2.0.15 数据库结构](https://github.com/anomalyco/opencode/blob/v2.0.15/packages/core/src/session/sql.ts)
+OpenCode 适配同时支持 v1（`session/message/part`）和 v2（`session_v2/session_message`），源库以只读模式打开。列表可按 `time_archived` 显示已归档会话。`opencode-runtime` 用实际 CLI 验证续聊、分叉、用量去重和界面展示，可通过 `OPENCODE_BIN` 指定程序。[OpenCode v2.0.15 数据库结构](https://github.com/anomalyco/opencode/blob/v2.0.15/packages/core/src/session/sql.ts)
 
 ### 用量与后台采集
 
-在 `src-tauri/` 中运行 `cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`，测量首次同步、重启后的增量同步和请求查询。该命令以只读方式访问日志，在指定目录下使用 `cache.sqlite3` 和 `ledger.sqlite3`。加 `--cold` 时需提供空目录。
+在 `src-tauri/` 中运行 `cargo run --release --offline --locked --example usage_perf -- --storage <私有临时目录>`，测量首次同步、重启后的增量同步和请求查询。该命令以只读方式访问日志，在指定目录下使用 `cache.sqlite3` 和 `ledger.sqlite3`。`--cold` 需要空目录，`--report-only` 汇总已有副本且跳过采集。示例输出各来源的请求数、Token 和计价缺口。用真实 SQLite 源复测时，先在私有目录复制数据库和 WAL（或用 SQLite backup API），再设置 `OPENCODE_DATA_DIR` 与 `ANTIGRAVITY_DATA_DIR` 指向副本。
 
-存储版本对照使用 `scripts/usage-storage-fixture.py` 和显式忽略的 `usage::storage_bench::storage_comparison`。先在仓库根目录生成固定合成日志，再到 `src-tauri/` 编译、运行 release 测试；以下目录必须与实际应用数据隔离：
+固定样本的存储复测使用 `scripts/usage-storage-fixture.py` 和显式忽略的 `usage::storage_bench::storage_comparison`。先在仓库根目录生成固定合成日志，再到 `src-tauri/` 编译、运行 release 测试；以下目录必须与实际应用数据隔离：
 
 ```bash
 python3 scripts/usage-storage-fixture.py "$PWD/test-results/storage-comparison/logs"
@@ -128,7 +128,7 @@ cargo test --release --offline --locked --lib usage::storage_bench::storage_comp
 
 样本包含 63,500 个合成请求，覆盖 Codex、Claude Code、Qoder 和 Pi。报告记录库文件大小、首次同步耗时，以及 9 次热同步和查询的中位数，同时比较原始计量、请求事件和身份关系的 SHA-256。保留真实账本报告时请使用私有目录。
 
-对照版本时，在独立检出中编译旧版本。两个版本使用同一路径下的合成日志，各自使用独立账本。验证升级时从已关闭的旧库复制副本，验证首次导入时使用空目录。先比较 SHA-256、统计和请求数，再比较空间和耗时。增量测试只运行一次 `python3 scripts/usage-storage-fixture.py <原固定日志目录> --append`，两个版本同步后的请求数应为 63,510。
+对照首次导入和热同步时共用同一份固定日志，各自使用独立账本。验证账本升级时用已关闭的结构 4 或 5 副本，比较请求身份及 Token 计量。增量测试只运行一次 `python3 scripts/usage-storage-fixture.py <原固定日志目录> --append`，再用同一库复测，请求数应为 63,510。
 
 `cargo test --offline --locked cold_start_tests -- --test-threads=1 --nocapture` 使用全新临时目录，导入 256 份约 270 MiB 的日志、32,768 个请求，并在写入期间并发查询；检查完整快照、取消、重启后的零重复读取。日志输出同步和查询耗时，不包含会话正文。常规 Rust 回归会包含这些检查。
 

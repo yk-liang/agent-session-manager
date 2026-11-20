@@ -43,7 +43,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
   const visibility = useMemo(() => showTools && showThinking && !showContext ? DEFAULT_VISIBILITY
     : { tool: showTools, thinking: showThinking, context: showContext }, [showTools, showThinking, showContext]);
 
-  const models = useMemo(() => agent.id === "opencode" ? historicalModels(detail.events) : [], [agent.id, detail.events]);
+  const models = useMemo(() => historicalModels(detail.events), [detail.events]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const hitIndex = useMemo(() => {
@@ -106,8 +106,8 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
       <div className="detail-header">
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
-          {meta.archived && <span className="status-tag muted">已归档</span>}
-          <CopyButton key={`copy:${key}`} className="session-id" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
+          {meta.archived && <span className="status-tag">已归档</span>}
+          <CopyButton key={`copy:${key}`} className="session-id btn-ghost btn-sm" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
@@ -116,7 +116,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           </time>}
           <div className="detail-meta-actions">
             {outline.trigger}
-            <SessionInfo key={`info:${key}`} meta={meta} models={models} />
+            <SessionInfo key={`info:${key}`} meta={meta} agentName={agent.displayName} models={models} />
           </div>
         </div>
         <div className="detail-toolbar">
@@ -142,7 +142,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
               {virtual.getVirtualItems().map((row) => {
                 const i = visible[row.index];
                 const previous = rows[visible[row.index - 1]];
-                return <div data-index={row.index} tabIndex={-1} title={agent.id === "opencode" ? eventModelTitle(detail.events[i]) : undefined} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
+                return <div data-index={row.index} tabIndex={-1} title={eventModelTitle(detail.events[i])} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
                   data-follows-activity={previous && !rowEndsWithMessage(previous, visibility) || undefined}
                   className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
                   <RowKey.Provider value={String(i)}><EventView
@@ -164,7 +164,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
             )}
           </div>
           {visible.length > 0 && !position.atBottom && (
-            <button type="button" className="detail-jump-bottom" title="回到底部" aria-label="回到底部" onClick={jumpToBottom}>
+            <button type="button" className="detail-jump-bottom btn-icon" title="回到底部" aria-label="回到底部" onClick={jumpToBottom}>
               <UiIcon icon={ArrowDown} size={16} />
             </button>
           )}

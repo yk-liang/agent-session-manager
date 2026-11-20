@@ -43,7 +43,7 @@ export default function SessionActions({ agent, session, onRequestDelete, onTogg
   };
 
   const button = (label: string, icon: LucideIcon, onClick: () => void, danger = false) => (
-    <button type="button" className={danger ? "danger" : undefined} disabled={disabled}
+    <button type="button" className={compact ? (danger ? "btn-icon btn-ghost danger" : "btn-icon btn-ghost") : danger ? "danger" : undefined} disabled={disabled}
       aria-label={compact ? `${label}（${session.title || session.sessionId}）` : undefined} onClick={onClick}>
       {compact ? <>
         <UiIcon icon={icon} />

@@ -1,6 +1,5 @@
 //! 从同一账本快照查询筛选项、时间分布和请求分页。
 use super::{
-    codex::LEGACY_ESTIMATE,
     request_parse::{RequestMeta, RequestOutcome},
     types::*,
 };
@@ -75,7 +74,6 @@ const CACHE_WRITES: &str =
     "CASE WHEN json_valid(data) THEN json_extract(data,'$.cacheWriteTokens') > 0 END";
 const SERVICE_TIER: &str =
     "CASE WHEN json_valid(data) THEN trim(json_extract(data,'$.request.tier')) <> '' END";
-// 旧账本的 unknown 与 success 同属未检测到失败的记录。
 pub(super) const IS_FAILED: &str = "status='failed'";
 
 pub(super) const DISTINCT_REQUESTS: &str = "NOT (
@@ -83,8 +81,8 @@ pub(super) const DISTINCT_REQUESTS: &str = "NOT (
     AND EXISTS (
         SELECT 1 FROM usage_request_events AS native
         WHERE native.agent='claude'
-          AND native.time>=usage_request_events.time/86400000*86400000
-          AND native.time<usage_request_events.time/86400000*86400000+86400000
+          AND native.time BETWEEN usage_request_events.time - 86400000
+                              AND usage_request_events.time + 86400000
           AND json_extract(native.data,'$.session')=json_extract(usage_request_events.data,'$.request.nativeSession')
           AND json_extract(native.data,'$.request.kind') IS NOT 'sidechain'
           AND json_type(native.data,'$.inputTokens') IS NOT NULL
@@ -142,13 +140,14 @@ fn filter_counts(
     Ok(filters)
 }
 
-/// 筛选结果按本地时间对齐的等长时段计数（最多 TIMELINE_BUCKETS 段），只用索引列聚合，
+/// 筛选结果按本地时间对齐的时段计数，只用索引列聚合，
 /// 不读取请求 JSON。缺少发生时间的记录单列在 untimed，按时间倒序排在最后。
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
-    pub start: i64,
-    pub step: i64,
+    pub bounds: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_per_bucket: Option<i64>,
     pub success: Vec<u64>,
     pub failed: Vec<u64>,
     pub untimed: StatusCounts,
@@ -174,14 +173,37 @@ fn timeline_step(span: i64) -> i64 {
     .unwrap_or_else(|| ((span - 1) / (TIMELINE_BUCKETS * DAY) + 1) * DAY)
 }
 
-fn local_midnight(ms: i64) -> i64 {
+fn local_day_start(date: chrono::NaiveDate) -> Option<i64> {
     use chrono::{Local, TimeZone};
-    Local
-        .timestamp_millis_opt(ms)
-        .single()
-        .and_then(|t| t.date_naive().and_hms_opt(0, 0, 0))
-        .and_then(|t| Local.from_local_datetime(&t).earliest())
-        .map_or(ms - ms.rem_euclid(DAY), |t| t.timestamp_millis())
+    (0..1440).find_map(|minute| {
+        let time = date.and_hms_opt(minute / 60, minute % 60, 0)?;
+        Local.from_local_datetime(&time).earliest().map(|time| time.timestamp_millis())
+    })
+}
+
+fn timeline_bounds(from: i64, end: i64) -> (Vec<i64>, Option<i64>) {
+    use chrono::{Days, Local, TimeZone};
+    let date = Local.timestamp_millis_opt(from).single().map(|time| time.date_naive());
+    let midnight = date.and_then(local_day_start).unwrap_or(from - from.rem_euclid(DAY));
+    let step = timeline_step((end - from).max(1));
+    if let Some(mut day) = date.filter(|_| step >= DAY) {
+        let days = step / DAY;
+        let mut bounds = vec![midnight];
+        while bounds.len() == 1 || *bounds.last().unwrap() < end {
+            let Some(next) = day.checked_add_days(Days::new(days as u64)) else {
+                bounds.push(end.max(bounds.last().unwrap().saturating_add(1)));
+                break;
+            };
+            day = next;
+            if let Some(time) = local_day_start(day) {
+                bounds.push(time);
+            }
+        }
+        return (bounds, Some(days));
+    }
+    let start = midnight + (from - midnight) / step * step;
+    let n = ((end - start).saturating_sub(1) / step + 1).max(1);
+    ((0..=n).map(|i| start.saturating_add(i.saturating_mul(step))).collect(), None)
 }
 
 fn timeline(
@@ -191,6 +213,7 @@ fn timeline(
     from: Option<i64>,
     to: Option<i64>,
     now: i64,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<Timeline, String> {
     let error = |_| "无法统计请求时间分布".to_owned();
     let (oldest, newest): (Option<i64>, Option<i64>) = tx
@@ -202,43 +225,42 @@ fn timeline(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(error)?;
-    let end = to.unwrap_or_else(|| now.max(newest.unwrap_or(now))).max(1);
+    let end = to
+        .unwrap_or_else(|| newest.map_or(now, |time| now.max(time.saturating_add(1))))
+        .max(1);
     let from = from.or(oldest).unwrap_or(end).clamp(1, end);
-    let step = timeline_step((end - from).max(1));
-    let mut start = local_midnight(from);
-    if step < DAY {
-        start += (from - start) / step * step;
-    }
-    let n = (end.saturating_sub(start).saturating_sub(1) / step + 1).max(1);
+    let (bounds, days_per_bucket) = timeline_bounds(from, end);
+    let n = bounds.len() - 1;
     let mut result = Timeline {
-        start,
-        step,
-        success: vec![0; n as usize],
-        failed: vec![0; n as usize],
+        bounds,
+        days_per_bucket,
+        success: vec![0; n],
+        failed: vec![0; n],
         untimed: StatusCounts::default(),
     };
-    // 超出范围的时间钳入首尾时段，使“某时段之后的记录数”与按时间倒序的分页偏移完全一致。
     let mut stmt = tx
         .prepare(&format!(
-            "SELECT CASE WHEN time>0 THEN min(max((time-?)/?,0),?) END AS bucket,{IS_FAILED} AS failed,count(*)
-             FROM usage_request_events WHERE {filter} GROUP BY bucket,failed"
+            "SELECT time,{IS_FAILED} FROM usage_request_events WHERE {filter}"
         ))
         .map_err(error)?;
-    // 参数顺序：先 SELECT 中的三个占位符，再 WHERE。
-    let mut ordered: Vec<rusqlite::types::Value> = vec![start.into(), step.into(), (n - 1).into()];
-    ordered.extend(values.iter().cloned());
-    let mut rows = stmt.query(params_from_iter(ordered)).map_err(error)?;
+    let mut rows = stmt.query(params_from_iter(values)).map_err(error)?;
     while let Some(row) = rows.next().map_err(error)? {
-        let bucket: Option<i64> = row.get(0).map_err(error)?;
+        if cancel() {
+            return Err("请求记录读取已取消".into());
+        }
+        let time: i64 = row.get(0).map_err(error)?;
         let failed: bool = row.get(1).map_err(error)?;
-        let count = u64::try_from(row.get::<_, i64>(2).map_err(error)?).unwrap_or(0);
-        let count_for_outcome = match (bucket, failed) {
-            (Some(i), true) => &mut result.failed[i as usize],
-            (Some(i), false) => &mut result.success[i as usize],
+        // 分页倒序偏移需要包含落在首尾边界之外的已选记录。
+        let bucket = (time > 0).then(|| {
+            result.bounds.partition_point(|bound| *bound <= time).saturating_sub(1).min(n - 1)
+        });
+        let count = match (bucket, failed) {
+            (Some(i), true) => &mut result.failed[i],
+            (Some(i), false) => &mut result.success[i],
             (None, true) => &mut result.untimed.failed,
             (None, false) => &mut result.untimed.success,
         };
-        *count_for_outcome += count;
+        *count += 1;
     }
     Ok(result)
 }
@@ -352,6 +374,7 @@ pub(super) fn page_with_pricer(
         query.from,
         query.to,
         chrono::Utc::now().timestamp_millis(),
+        cancel,
     )?;
     let total = timeline.len();
     let (has_cache_writes, has_service_tiers) = tx
@@ -410,17 +433,6 @@ pub(super) fn page_with_pricer(
                 serde_json::from_str(&row.map_err(|_| "无法读取请求记录")?)
                     .map_err(|_| "请求索引损坏，请重试同步")?;
             event.request.expand_project_path();
-            if event.agent == "codex" {
-                event.request.normalize_codex_kind();
-                if event.request.timing.as_deref() == Some(LEGACY_ESTIMATE) {
-                    event.request.clear_legacy_codex_timing();
-                    event.output_tps = None;
-                }
-            }
-            if event.request.scope.as_deref() == Some("usage_delta") {
-                event.request.clear_timing();
-                event.output_tps = None;
-            }
             match pricing_snapshot.price_event(&event) {
                 Ok(cost) => event.cost = Some(cost),
                 Err(issue) => event.pricing_issue = Some(issue),

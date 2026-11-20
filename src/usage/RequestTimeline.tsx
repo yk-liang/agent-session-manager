@@ -4,7 +4,6 @@ import { formatCount, formatHourMinute, formatMonthDay, formatSpan } from "./for
 import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
 import { anchorOf, useTooltip } from "./UsageTooltip";
 
-const DAY = 86_400_000;
 const TICK_MINUTES = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080, 20160, 43200, 131040, 525600];
 
 /** 至多六个落在整点或零点的刻度；零点显示日期。 */
@@ -53,14 +52,23 @@ export default function RequestTimeline({ timeline, pageTimes, pageSize, page, n
   const timed = bucketCount ? newerRecordCounts[0] + counts[0] : 0;
   const untimed = timeline.untimed.success + timeline.untimed.failed;
   const max = Math.max(1, ...counts);
-  const end = timeline.start + bucketCount * timeline.step;
+  const { bounds, daysPerBucket } = timeline;
+  const start = bounds[0];
+  const end = bounds[bucketCount];
   const pageOf = (offset: number) => Math.floor(offset / pageSize) + 1;
-  const bucketOf = (time: number) => Math.min(bucketCount - 1, Math.max(0, Math.floor((time - timeline.start) / timeline.step)));
+  const bucketOf = (time: number) => {
+    const next = bounds.findIndex(bound => bound > time);
+    return next < 0 ? bucketCount - 1 : Math.max(0, next - 1);
+  };
   const current = pageTimes.length ? [bucketOf(Math.min(...pageTimes)), bucketOf(Math.max(...pageTimes))] : null;
-  const x = (ms: number) => ((ms - timeline.start) / (end - timeline.start)) * 100;
-  const openEnd = now < end && now >= timeline.start;
+  const x = (ms: number) => {
+    const i = bucketOf(ms);
+    const fraction = (ms - bounds[i]) / (bounds[i + 1] - bounds[i]);
+    return ((i + fraction) / bucketCount) * 100;
+  };
+  const openEnd = now < end && now >= start;
 
-  const label = (i: number) => formatSpan(timeline.start + i * timeline.step, timeline.start + (i + 1) * timeline.step);
+  const label = (i: number) => formatSpan(bounds[i], bounds[i + 1]);
   const describe = (i: number) =>
     counts[i] ? `${label(i)}，${formatCount(counts[i])} 条，失败 ${formatCount(timeline.failed[i])} 条，位于第 ${formatCount(pageOf(newerRecordCounts[i]))} 页` : `${label(i)}，没有记录`;
 
@@ -148,19 +156,19 @@ export default function RequestTimeline({ timeline, pageTimes, pageSize, page, n
       </div>
       {tip.tooltip}
       <div className="request-timeline-axis" aria-hidden="true">
-        {axisTicks(timeline.start, end)
+        {axisTicks(start, end)
           .filter(({ time }) => x(time) > 3 && x(time) < (openEnd ? 88 : 97))
           .map(({ time, label: text }) => <span key={time} style={{ left: `${x(time)}%` }}>{text}</span>)}
         {openEnd && <span style={{ left: `clamp(1em, ${x(now)}%, calc(100% - 1em))` }}>现在</span>}
       </div>
-      {(untimed > 0 || timeline.step >= DAY) && <div className="request-timeline-meta">
+      {(untimed > 0 || daysPerBucket != null) && <div className="request-timeline-meta">
         {untimed > 0 && (
-          <button type="button" className="request-timeline-untimed" onClick={() => onJump(pageOf(timed))}
+          <button type="button" className="request-timeline-untimed btn-sm" onClick={() => onJump(pageOf(timed))}
             title="跳到缺少时间的记录">
             {formatCount(untimed)} 条缺少时间
           </button>
         )}
-        {timeline.step >= DAY && <span className="request-timeline-step">每段 {formatCount(timeline.step / DAY)} 天</span>}
+        {daysPerBucket != null && <span className="request-timeline-step">每段 {formatCount(daysPerBucket)} 天</span>}
       </div>}
     </div>
   );

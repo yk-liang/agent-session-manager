@@ -1150,7 +1150,7 @@ mod tests {
             f.interrupt(Event::BeforeCommit);
             let victim = f.tmp.path().join("victim");
             fs::write(&victim, b"untouched").unwrap();
-            let mut json: Value =
+            let mut json: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(f.journal()).unwrap()).unwrap();
             match attack {
                 0 => json["slots"][0]["target"] = serde_json::json!(victim),

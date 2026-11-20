@@ -15,7 +15,7 @@ pub mod qoder;
 pub mod safety;
 pub mod scanning;
 pub mod search;
-mod workspace_groups;
+pub(crate) mod workspace_groups;
 
 pub use ids::escape_path_id;
 pub use safety::{present, verify_within_root, TargetKind};
@@ -42,28 +42,12 @@ pub fn ms_to_iso(ms: i64) -> Option<String> {
     if ms <= 0 {
         return None;
     }
-    let secs = ms / 1000;
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // Howard Hinnant 的 civil-from-days 算法
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 {
-        yoe + era * 400 + 1
-    } else {
-        yoe + era * 400
-    };
-    Some(format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, mo, d, h, m, s
-    ))
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|ts| ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+pub(super) fn timestamp(value: Option<&str>) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value?).ok()
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -76,6 +60,8 @@ pub struct SessionMeta {
     /// 会话记录中的模型标识；Qoder 取最后一次运行配置，不以全局默认模型覆盖。
     pub model: Option<String>,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
     pub first_ts: Option<String>,
@@ -168,19 +154,18 @@ pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
                 last_activity: None,
             });
         project.session_count += 1;
-        if meta.last_ts > project.last_activity {
+        if timestamp(meta.last_ts.as_deref()) > timestamp(project.last_activity.as_deref()) {
             project.last_activity = meta.last_ts.clone();
         }
         sessions.push(meta);
     }
     let mut projects: Vec<_> = groups.into_values().collect();
-    projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    sessions.sort_by(|a, b| {
-        b.last_ts
-            .cmp(&a.last_ts)
-            .then_with(|| a.project_dir.cmp(&b.project_dir))
-            .then_with(|| a.session_id.cmp(&b.session_id))
-    });
+    projects.sort_by_cached_key(|project| std::cmp::Reverse(timestamp(project.last_activity.as_deref())));
+    sessions.sort_by_cached_key(|session| (
+        std::cmp::Reverse(timestamp(session.last_ts.as_deref())),
+        session.project_dir.clone(),
+        session.session_id.clone(),
+    ));
     let mut catalog = Catalog {
         projects,
         sessions,
@@ -208,6 +193,7 @@ pub struct AgentInfo {
     pub installed: bool,
     pub supports_fork: bool,
     pub supports_archive: bool,
+    pub supports_archived_sessions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_entrypoint: Option<&'static str>,
     /// 该 Agent 的数据目录（用于「打开数据目录」）
@@ -266,6 +252,9 @@ pub trait AgentSource: Send + Sync {
     fn supports_archive(&self) -> bool {
         false
     }
+    fn supports_archived_sessions(&self) -> bool {
+        self.supports_archive()
+    }
     fn resume_entrypoint(&self) -> Option<&'static str> {
         None
     }
@@ -275,8 +264,8 @@ pub trait AgentSource: Send + Sync {
     }
     /// 数据目录（会话存储的根）
     fn data_dir(&self) -> Option<PathBuf>;
-    fn watch_roots(&self) -> Vec<PathBuf> {
-        self.data_dir().into_iter().collect()
+    fn watch_locations(&self) -> Vec<(PathBuf, AgentWatchPaths)> {
+        self.data_dir().into_iter().map(|root| (root, self.watch_paths())).collect()
     }
     /// 返回会话列表需要监听的路径。
     fn watch_paths(&self) -> AgentWatchPaths {
@@ -403,6 +392,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
             installed: s.is_installed(),
             supports_fork: s.supports_fork(),
             supports_archive: s.supports_archive(),
+            supports_archived_sessions: s.supports_archived_sessions(),
             resume_entrypoint: s.resume_entrypoint(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
             delete_policy: s.delete_policy(),
@@ -456,13 +446,16 @@ fn is_executable(path: &Path) -> bool {
 /// 在新终端窗口中执行命令（仅 macOS，通过 osascript 驱动 Terminal）
 #[cfg(target_os = "macos")]
 pub fn run_in_terminal(cmd: &str) -> Result<(), String> {
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-        cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    let script = concat!(
+        "on run argv\n",
+        "tell application \"Terminal\"\n",
+        "activate\n",
+        "do script (item 1 of argv)\n",
+        "end tell\n",
+        "end run"
     );
     let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
+        .args(["-e", script, "--", cmd])
         .output()
         .map_err(|e| format!("调用 osascript 失败：{e}"))?;
     if !output.status.success() {

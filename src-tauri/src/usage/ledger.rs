@@ -1,5 +1,5 @@
 //! 累计用量的持久化原始计量账本。源日志消失只影响读取缓存，不删除已采集计量。
-use super::{cache::FileCache, normalize, types::Sample};
+use super::{cache::{FileCache, Stamp}, normalize, storage, types::Sample};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
@@ -76,7 +76,7 @@ impl Drop for SyncLock {
     }
 }
 
-/// 查询连接不持有采集器的 Mutex，不迁移/刷新索引，也不创建磁盘上的空账本。
+/// 当前版本的查询使用只读连接。已发布的旧库在首次访问时升级；缺失账本仍在内存中初始化。
 pub(super) fn reader(path: &Path) -> Result<Connection, String> {
     let db = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ledger::open(None)?.db),
@@ -104,13 +104,22 @@ pub(super) fn reader(path: &Path) -> Result<Connection, String> {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
-    if version > super::storage::VERSION {
-        return Err("用量账本来自较新版本，请先升级应用".into());
-    }
-    if version < 4 {
-        return Ok(Ledger::open(None)?.db);
+    if version != storage::VERSION {
+        drop(db);
+        drop(Ledger::open(Some(path))?);
+        return reader(path);
     }
     Ok(db)
+}
+
+fn check_version(db: &Connection, version: i64) -> Result<(), String> {
+    match version {
+        4 | 5 | storage::VERSION => Ok(()),
+        0 if db.query_row("SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table')", [], |r| r.get(0))
+            .map_err(|e| format!("无法读取用量账本结构：{e}"))? => Ok(()),
+        version if version > storage::VERSION => Err("用量账本来自较新版本，请先升级应用".into()),
+        _ => Err(format!("不支持的用量账本结构版本 {version}，已保留原数据")),
+    }
 }
 
 pub(super) struct Ledger {
@@ -156,62 +165,25 @@ impl Ledger {
         .map_err(|e| format!("无法打开用量账本：{e}"))?;
         db.busy_timeout(std::time::Duration::from_millis(1500))
             .map_err(|e| format!("无法设置用量账本超时：{e}"))?;
-        let version: i64 = db
-            .pragma_query_value(None, "user_version", |row| row.get(0))
+        let version = db.pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
-        if version > super::storage::VERSION {
-            return Err("用量账本来自较新版本，请先升级应用".into());
-        }
-        // 账本是不可重建的用户数据，提交必须落盘；不能沿用可重建缓存的 MEMORY/OFF。
-        // WAL 允许大批导入期间查询上一份完整快照；同步仍为 FULL，旁文件继承 0600。
+        check_version(&db, version)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            PRAGMA journal_size_limit=16777216;
-            CREATE TABLE IF NOT EXISTS usage_ledger_sources(agent TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(agent,path));
-            CREATE TABLE IF NOT EXISTS usage_ledger_updates(agent TEXT PRIMARY KEY,updated INTEGER NOT NULL);")
+            PRAGMA journal_size_limit=16777216;")
             .map_err(|e| format!("无法初始化用量账本：{e}"))?;
-        let tx = db
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| format!("无法启动用量账本迁移：{e}"))?;
-        let version: i64 = tx
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
-        if version > super::storage::VERSION {
-            return Err("用量账本来自较新版本，请先升级应用".into());
+        if version != storage::VERSION {
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| format!("无法启动用量账本迁移：{e}"))?;
+            let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(|e| format!("无法读取用量账本版本：{e}"))?;
+            check_version(&tx, version)?;
+            if version != storage::VERSION {
+                storage::initialize(&tx, version)?;
+            }
+            tx.commit().map_err(|e| format!("无法提交用量账本迁移：{e}"))?;
         }
-        super::events::schema(&tx)?;
-        if version < 4 {
-            tx.execute_batch(
-                "ALTER TABLE usage_ledger_sources ADD COLUMN dirty INTEGER NOT NULL DEFAULT 1;
-                ALTER TABLE usage_request_events ADD COLUMN source TEXT NOT NULL DEFAULT '';
-                DROP TABLE IF EXISTS usage_request_health;",
-            )
-            .map_err(|e| format!("无法迁移请求记录：{e}"))?;
-            tx.execute("UPDATE usage_request_index SET indexed=0", [])
-                .map_err(|e| format!("无法迁移请求索引：{e}"))?;
-        }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS usage_sync_state(agent TEXT PRIMARY KEY,completed_at INTEGER NOT NULL);")
-            .map_err(|e| format!("无法初始化用量同步状态：{e}"))?;
-        if version < 5 {
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS usage_source_keys(
-            agent TEXT NOT NULL,path TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(agent,path,key));
-            CREATE INDEX IF NOT EXISTS usage_source_key_lookup ON usage_source_keys(agent,key,path);
-            CREATE INDEX IF NOT EXISTS usage_source_dirty ON usage_ledger_sources(agent,dirty,path);
-            CREATE INDEX IF NOT EXISTS usage_request_source ON usage_request_events(agent,source);",
-            )
-            .map_err(|e| format!("无法初始化用量来源索引：{e}"))?;
-            super::storage::migrate(&tx)?;
-        } else if version == 5 {
-            tx.execute_batch("ALTER TABLE usage_ledger_sources DROP COLUMN health;")
-                .map_err(|e| format!("无法迁移用量来源：{e}"))?;
-        }
-        if version < super::storage::VERSION {
-            tx.pragma_update(None, "user_version", super::storage::VERSION)
-                .map_err(|e| format!("无法更新用量账本版本：{e}"))?;
-        }
-        tx.commit()
-            .map_err(|e| format!("无法提交用量账本迁移：{e}"))?;
-        super::storage::compact_migrated(&db);
+        storage::compact_migrated(&db);
         Ok(Self { db })
     }
 
@@ -242,6 +214,7 @@ impl Ledger {
         super::cache::db_revision(&self.db).map_err(|_| "无法读取用量账本版本".into())
     }
 
+    #[cfg(test)]
     pub fn updated(&self, agent: &str) -> Option<i64> {
         self.db
             .query_row(
@@ -250,6 +223,13 @@ impl Ledger {
                 |r| r.get(0),
             )
             .ok()
+    }
+
+    pub fn unchanged(&self, agent: &str, path: &Path, stamps: &[Stamp], version: u8) -> Result<bool, String> {
+        let stamps = serde_json::to_string(stamps).map_err(|_| "无法编码用量来源状态")?;
+        self.db.prepare_cached("SELECT 1 FROM usage_ledger_stamps WHERE agent=?1 AND path=?2 AND version=?3 AND stamps=?4")
+            .and_then(|mut stmt| stmt.exists(params![agent, path.to_string_lossy(), version, stamps]))
+            .map_err(|e| format!("无法读取用量来源状态：{e}"))
     }
 
     pub fn commit(
@@ -290,6 +270,13 @@ impl Ledger {
                 params![agent, path.to_string_lossy(), data],
             )
             .map_err(|_| "无法保存累计用量，本次操作尚未删除会话")?;
+            if let Some(origin) = &incoming.origin_path {
+                let stamps = serde_json::to_string(&incoming.stamps).map_err(|_| "无法编码用量来源状态")?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO usage_ledger_stamps VALUES (?1,?2,?3,?4)",
+                    params![agent, origin.to_string_lossy(), incoming.parser_version, stamps],
+                ).map_err(|_| "无法保存用量来源状态")?;
+            }
             source_keys(&tx, agent, path, &combined)?;
             if agent == "codex" && path.extension().is_some_and(|ext| ext == "zst") {
                 replace_covered_archives(&tx, path, incoming)?;

@@ -75,10 +75,7 @@ export interface ModelUsage extends UsageTokens, UsageRequestMetrics {
   unpricedCount: number;
   costUsageIncompleteCount: number;
   costSpecialCount: number;
-  latencySumMs: number;
-  latencyCount: number;
-  tpsSum: number;
-  tpsCount: number;
+
 }
 
 export type ModelUsageRow = UsageTokens &
@@ -102,11 +99,10 @@ export const emptyModelUsage = (): ModelUsage => ({
   costSpecialCount: 0,
   costIncomplete: false,
   cacheReadIncomplete: false,
-  cacheRateUnavailable: false,
-  latencySumMs: 0,
-  latencyCount: 0,
-  tpsSum: 0,
-  tpsCount: 0,
+  cacheInputTokens: null,
+  cacheInputReadTokens: 0,
+  cacheInputWriteTokens: 0,
+  cacheExcludedCount: 0,
 });
 
 const SUMMED = [
@@ -117,12 +113,11 @@ const SUMMED = [
   "unpricedCount",
   "costUsageIncompleteCount",
   "costSpecialCount",
-  "latencySumMs",
-  "latencyCount",
-  "tpsSum",
-  "tpsCount",
+  "cacheInputReadTokens",
+  "cacheInputWriteTokens",
+  "cacheExcludedCount",
 ] as const;
-const NULLABLE = ["costUsd", "customCostUsd", "referenceCostUsd"] as const;
+const NULLABLE = ["costUsd", "customCostUsd", "referenceCostUsd", "cacheInputTokens"] as const;
 
 export function addModelUsage(target: ModelUsage, row: ModelUsageRow): ModelUsage {
   addTokens(target, row);
@@ -137,7 +132,6 @@ export function addModelUsage(target: ModelUsage, row: ModelUsageRow): ModelUsag
   target.requestCountIncomplete ||= row.requestCountIncomplete ?? true;
   target.costIncomplete ||= row.costIncomplete ?? true;
   target.cacheReadIncomplete ||= row.cacheReadIncomplete ?? true;
-  target.cacheRateUnavailable ||= row.cacheRateUnavailable ?? true;
   return target;
 }
 
@@ -203,24 +197,30 @@ export function distributionSlices(rows: GroupedUsage[], metric: TrendMetric, ma
 }
 
 export function cacheRateOf(row: ModelUsage): number | null {
-  return !row.cacheRateUnavailable &&
-    row.inputRecorded &&
-    row.cacheReadRecorded &&
-    !row.inputIncomplete &&
-    row.inputTokens > 0 &&
-    row.cacheReadTokens <= row.inputTokens
-    ? (row.cacheReadTokens / row.inputTokens) * 100
+  return row.cacheInputTokens != null && row.cacheInputTokens > 0
+    ? (row.cacheInputReadTokens / row.cacheInputTokens) * 100
     : null;
 }
 
-/** 输入已包含缓存；只有缓存读写都在输入之内时才能得出未缓存输入。 */
-type TokenFields = Omit<UsageTokens, "totalTokens">;
+export function cacheCoverageNote(row: ModelUsage): string | undefined {
+  return row.cacheExcludedCount > 0
+    ? `${formatCount(row.cacheExcludedCount)} 条用量记录未计入缓存命中率和未缓存输入`
+    : undefined;
+}
 
-export function uncachedInputOf(row: TokenFields & { cacheRateUnavailable?: boolean }): number | null {
+/** 输入已包含缓存，分项只使用可完整拆分的计量。 */
+type TokenFields = Omit<UsageTokens, "totalTokens">;
+type CacheInput = Pick<UsageRequestMetrics, "cacheInputTokens" | "cacheInputReadTokens" | "cacheInputWriteTokens">;
+
+export function uncachedInputOf(row: TokenFields | CacheInput): number | null {
+  if ("cacheInputTokens" in row) {
+    return row.cacheInputTokens == null
+      ? null
+      : row.cacheInputTokens - row.cacheInputReadTokens - row.cacheInputWriteTokens;
+  }
   return row.inputRecorded &&
     !row.inputIncomplete &&
     row.cacheReadRecorded &&
-    !row.cacheRateUnavailable &&
     row.cacheReadTokens + row.cacheWriteTokens <= row.inputTokens
     ? row.inputTokens - row.cacheReadTokens - row.cacheWriteTokens
     : null;
@@ -308,7 +308,7 @@ export function cacheRateDisplay(row: ModelUsage): Display {
   const rate = cacheRateOf(row);
   return rate == null
     ? display(null, { missingTitle: "输入或缓存读取数据不完整，无法计算命中率" })
-    : { text: formatPercent(rate), prefix: "", missing: false, title: "缓存读取 Token ÷ 输入 Token" };
+    : { text: formatPercent(rate), prefix: "", missing: false, title: ["缓存读取 Token ÷ 输入 Token", cacheCoverageNote(row)].filter(Boolean).join("；") };
 }
 
 export function groupUsageCells(row: ModelUsage): Display[] {
@@ -340,6 +340,7 @@ export function eventCostDisplay(event: RequestEvent): Display & { note: string 
     return { ...display(null, { missingTitle: issue?.detail ?? "费用未知" }), note: issue?.label ?? "未知" };
   }
   const shown = display(cost.totalUsd, { kind: "usd" });
+  if (cost.source === "no_usage") return { ...shown, title: "失败请求未记录 Token 用量", note: "无 Token 用量" };
   if (cost.source === "builtin") return { ...shown, title: "免费模型（内置价格）", note: sourceName(cost.source) };
   const notes = costNotes(cost);
   return {
@@ -366,7 +367,7 @@ function costNotes(cost: EventCost): string[] {
 /** 单次请求费用的分项：[名称, Token 数, 单价/百万, 金额]。 */
 export function costBreakdown(event: RequestEvent): [string, number, number | null | undefined, number | null | undefined][] {
   const cost = event.cost;
-  if (!cost || cost.source === "builtin") return [];
+  if (!cost || cost.source === "builtin" || cost.source === "no_usage") return [];
   const write1h = Math.min(event.cacheWrite1hTokens ?? 0, event.cacheWriteTokens);
   const rows: [string, number, number | null | undefined, number | null | undefined][] = [
     ["未缓存输入", Math.max(0, event.inputTokens - event.cacheReadTokens - event.cacheWriteTokens), cost.inputRate, cost.inputUsd],

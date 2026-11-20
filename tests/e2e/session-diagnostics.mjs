@@ -44,8 +44,9 @@ try {
     void state.collector.check();
   });
   const card = id => page.locator('.session-card').filter({ hasText: `Cached ${id}` });
-  const errorPanel = page.locator('.session-read-error');
-  const failedCards = page.locator('.session-card .read-error-badge');
+  const errorPanel = page.getByRole('alert', { name: /无法(?:解析|读取)会话正文/ });
+  const catalogWarnings = page.getByRole('alert', { name: '部分会话无法读取', exact: true });
+  const failedCards = page.locator('.session-card .status-tag[data-tone="error"]');
   const copied = () => page.evaluate(() => window.__DIAGNOSTICS__.copied);
   const recovered = id => page.locator('.detail-body').getByText(`Recovered ${id}`, { exact: true });
 
@@ -59,9 +60,9 @@ try {
   await page.waitForFunction(() => window.__DIAGNOSTICS__.copied.includes('operation: session_detail'));
   assert.equal(await copied(), await page.evaluate(() => window.__DIAGNOSTICS__.failure('session_detail')));
   await card('bbbb').click();
-  await page.waitForFunction(() => document.querySelectorAll('.read-error-badge').length === 2);
-  await page.locator('.catalog-warnings').getByText('部分会话无法读取', { exact: true }).waitFor();
-  assert.match(await page.locator('.catalog-warnings').textContent(), /部分会话无法读取/);
+  await page.waitForFunction(() => document.querySelectorAll('.status-tag[data-tone="error"]').length === 2);
+  await catalogWarnings.getByText('部分会话无法读取', { exact: true }).waitFor();
+  assert.match(await catalogWarnings.textContent(), /部分会话无法读取/);
   for (const width of [960, 1280]) {
     await page.setViewportSize({ width, height: 800 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
@@ -73,8 +74,8 @@ try {
   assert.equal(await failedCards.count(), 0);
   await chooseAgent(page, 'qoder');
   assert.equal(await failedCards.count(), 2);
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).click();
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).waitFor();
+  await catalogWarnings.getByRole('button', { name: '重试', exact: true }).click();
+  await catalogWarnings.getByRole('button', { name: '重试', exact: true }).waitFor();
   assert.equal(await failedCards.count(), 2, 'successful cached catalog refresh must not erase body failures');
   await card('aaaa').click();
   await errorPanel.waitFor();
@@ -125,7 +126,7 @@ try {
 
   // Replay the reported cold-start shape: every file fails open and no summary is available.
   await page.goto(`${baseURL}?catalog=failed`);
-  await page.locator('.catalog-warnings').getByText('诊断详情（283 条）', { exact: true }).waitFor();
+  await catalogWarnings.getByText('诊断详情（283 条）', { exact: true }).waitFor();
   assert.doesNotMatch(await page.locator('.sidebar').textContent(), /0 个会话|暂无会话/, 'failed reads must not imply an empty history');
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /会话数量暂不可确认/);
   assert.match(await page.locator('.session-cards').textContent(), /暂无可显示的会话/);
@@ -134,16 +135,16 @@ try {
   await page.screenshot({ path: path.join(artifactDir, 'catalog-all-unreadable.png') });
 
   await page.evaluate(() => { window.__DIAGNOSTICS__.catalogMode = 'recovered'; });
-  await page.locator('.catalog-warnings').getByRole('button', { name: '重试', exact: true }).click();
+  await catalogWarnings.getByRole('button', { name: '重试', exact: true }).click();
   await card('aaaa').waitFor();
-  assert.equal(await page.locator('.catalog-warnings').count(), 0);
+  assert.equal(await catalogWarnings.count(), 0);
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /2 个会话/);
   assert.doesNotMatch(await page.locator('.sidebar').textContent(), /暂不可确认|读取不完整/);
 
   await page.goto(`${baseURL}?catalog=empty`);
   await page.locator('.sidebar').getByText('暂无会话', { exact: true }).waitFor();
   assert.match(await page.locator('.sidebar-projects-header').textContent(), /0 个会话/);
-  assert.equal(await page.locator('.catalog-warnings').count(), 0);
+  assert.equal(await catalogWarnings.count(), 0);
   assert.deepEqual(pageErrors, []);
   console.log(`PASS: denied cold-start reads remain distinct from empty history and recover after retry (${engine})`);
 } finally { await browser.close(); }

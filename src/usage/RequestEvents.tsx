@@ -9,6 +9,7 @@ import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
 import { shortPath } from "../utils";
 import UiIcon from "../components/UiIcon";
 import { ModelIcon } from "../components/BrandIcon";
+import Notice from "../components/Notice";
 import Dropdown from "../components/Dropdown";
 import { useRequestPage } from "./useRequestPage";
 import RequestTable from "./RequestTable";
@@ -68,7 +69,7 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
     status: status ?? undefined,
     from, to, limit: pageSize,
   };
-  const { filters, page, pageCount, pageInput, pageInputRef, setPageInput, table,
+  const { filters, page, pageCount, pageInput, pageInputRef, setPageInput, table, onTableScroll,
     loading, navigating, error, retryLoad, goToPage, expandedRequestId, setExpandedRequestId } = useRequestPage(query, revision);
   const showLoading = useDelayedBusy(navigating);
   const events = page?.events ?? [];
@@ -96,16 +97,16 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
           searchLabel={projectOptions.length > SEARCH_THRESHOLD ? "搜索项目" : undefined} onChange={project => onSelectionChange({ ...selection, project: filterValue(project) })} />
         <Dropdown label="请求结果" value={filterKey(status)} options={resultOptions} countUnit="条请求记录"
           onChange={status => onSelectionChange({ ...selection, status: filterValue(status) as RequestSelection["status"] })} />
-        {filtered && <button className="request-clear" onClick={() => onSelectionChange(defaultRequestSelection)}>清除筛选</button>}
+        {filtered && <button type="button" className="btn-ghost btn-accent" onClick={() => onSelectionChange(defaultRequestSelection)}>清除筛选</button>}
       </div>
     </div>
-    <div className="request-table-wrap" ref={table} tabIndex={0} role="region" aria-label="请求记录表" aria-busy={loading}>
+    <div className="request-table-wrap" ref={table} onScroll={onTableScroll} tabIndex={0} role="region" aria-label="请求记录表" aria-busy={loading}>
       {page && events.length > 0 && <RequestTable page={page} agents={agents} expandedRequestId={expandedRequestId}
         onExpand={setExpandedRequestId} copyFeedback={copyFeedback} />}
       {!events.length && !error && <div className="request-empty">{loading ? "正在读取请求记录…" : syncing ? "正在同步历史用量…" : filtered ? "未找到匹配的请求" : "所选范围暂无请求记录"}</div>}
     </div>
-    {error && <div className="request-error" role="alert">无法读取请求记录：{error}<button disabled={navigating} onClick={retryLoad}>重试</button></div>}
-    {copyError && <div className="request-notice" role="status">{copyError}</div>}
+    {error && <Notice tone="error" action={{ label: "重试", onClick: retryLoad, disabled: navigating }}>无法读取请求记录：{error}</Notice>}
+    {copyError && <Notice tone="error">{copyError}</Notice>}
     <div className="request-footer">
       {page?.timeline && page.total > 0 && <RequestTimeline
         timeline={page.timeline}
@@ -122,18 +123,18 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
           {syncing && page && page.total > 0 && <small className="request-syncing">历史用量同步中</small>}
         </span>
         {page && <nav className="request-pagination" aria-label="请求记录分页">
-          <Dropdown label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
+          <Dropdown compact label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
             disabled={navigating} onChange={id => setPageSize(Number(id))} />
           <div className="request-page-controls">
-            <button aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => changePage(1)}><UiIcon icon={ChevronFirst} /></button>
-            <button aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => changePage(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>
+            <button type="button" className="btn-icon btn-sm" aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => changePage(1)}><UiIcon icon={ChevronFirst} /></button>
+            <button type="button" className="btn-icon btn-sm" aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => changePage(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>
             <span className="request-page-number">第 {formatCount(page.page)} / {formatCount(pageCount)} 页</span>
-            <button aria-label="下一页" title="下一页" disabled={navigating || page.page >= pageCount} onClick={() => changePage(page.page + 1)}><UiIcon icon={ChevronRight} /></button>
-            <button aria-label="末页" title="末页" disabled={navigating || page.page >= pageCount} onClick={() => changePage(pageCount)}><UiIcon icon={ChevronLast} /></button>
+            <button type="button" className="btn-icon btn-sm" aria-label="下一页" title="下一页" disabled={navigating || page.page >= pageCount} onClick={() => changePage(page.page + 1)}><UiIcon icon={ChevronRight} /></button>
+            <button type="button" className="btn-icon btn-sm" aria-label="末页" title="末页" disabled={navigating || page.page >= pageCount} onClick={() => changePage(pageCount)}><UiIcon icon={ChevronLast} /></button>
           </div>
           <form className="request-jump" noValidate onSubmit={e => { e.preventDefault(); changePage(pageInput.trim() ? Number(pageInput) : page.page); }}>
-            <label>前往<input ref={pageInputRef} className="control-input" aria-label="请求页码" type="number" inputMode="numeric" min={1} max={pageCount} value={pageInput} disabled={navigating} onChange={e => setPageInput(e.target.value)} /></label>
-            <button type="submit" disabled={navigating}>跳转</button>
+            <label>前往<input ref={pageInputRef} className="control-input input-sm" aria-label="请求页码" type="number" inputMode="numeric" min={1} max={pageCount} value={pageInput} disabled={navigating} onChange={e => setPageInput(e.target.value)} /></label>
+            <button type="submit" className="btn-sm" disabled={navigating}>跳转</button>
           </form>
         </nav>}
       </div>

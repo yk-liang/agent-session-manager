@@ -13,8 +13,12 @@ struct OutputStatus<'a> {
 }
 
 fn text_failed(text: &str) -> bool {
-    if !text.trim_start().starts_with('{') {
-        return false;
+    let text = text.trim_start();
+    if !text.starts_with('{') {
+        return text.lines().take_while(|line| !line.is_empty() && !line.starts_with("Output:"))
+            .find_map(|line| line.strip_prefix("Process exited with code ")
+                .and_then(|code| code.trim().parse::<i64>().ok()))
+            .is_some_and(|code| code != 0);
     }
     let Ok(status) = serde_json::from_str::<OutputStatus>(text) else {
         return false;

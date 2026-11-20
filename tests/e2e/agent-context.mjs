@@ -47,12 +47,15 @@ try {
     assert.ok(!(await page.locator('.detail-body').textContent()).includes(fixture.hidden));
     if (name === 'claude.json' || name === 'qoder.json') {
       assert.ok((await page.locator('.detail-body').textContent()).includes('literal instructions'));
-      assert.ok((await page.locator('.system-line').textContent()).includes('operational error'));
+      await page.locator('.system-line').filter({ hasText: /^Keep this operational error visible$/ }).waitFor();
+      await page.locator('.system-line').filter({ hasText: /^API error line$/ }).waitFor();
     }
     await toggle.check();
     const context = page.locator('.collapsible.context').first();
     await context.waitFor();
     assert.equal(await context.getByRole('button').getAttribute('aria-expanded'), 'false');
+    await context.locator('.collapsible-type > span').waitFor();
+    await context.locator('.collapsible-preview').waitFor();
     await context.getByRole('button').click();
     await context.locator('.code').waitFor();
     assert.ok((await context.locator('.code').textContent()).length > 0);

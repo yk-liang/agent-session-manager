@@ -154,14 +154,14 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
             'finish',json_extract(data,'$.finish'),
             'variant',json_extract(data,'$.variant'),'serviceTier',coalesce(json_extract(data,'$.serviceTier'),json_extract(data,'$.service_tier'),json_extract(data,'$.tier')),
             'httpStatus',json_extract(data,'$.httpStatus'),
-            'error',{MESSAGE_ERROR_SQL},
+            'error',{MESSAGE_ERROR_SQL},'outcome',json_extract(data,'$.outcome'),
             '_asm_failed',json_type(data,'$.error') IS NOT NULL AND json_type(data,'$.error') != 'null',
             '_asm_native_session',CASE WHEN json_extract(data,'$.model.providerID')='claude-agent'
               THEN (SELECT json_extract(value,'$.native.sessionID') FROM json_each(data,'$.content')
                     WHERE CASE WHEN type='object' THEN length(trim(json_extract(value,'$.native.sessionID')))>0 END LIMIT 1) END,
             'agent',json_extract(data,'$.agent'),'mode',json_extract(data,'$.mode'),'path',json_extract(data,'$.path'))
         ELSE '{{' END AS data
-        FROM temp._asm_v2_messages WHERE type IN ('user','assistant','compaction','synthetic','system')");
+        FROM temp._asm_v2_messages WHERE type IN ('user','assistant','compaction','synthetic','system','skill','shell','idle')");
     let legacy_messages = exists(conn, "message")?;
     if legacy_messages {
         conn.execute_batch(&format!(
@@ -203,7 +203,21 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
         UNION ALL
         SELECT id || ':v2:context',id,time_created,
             json_object('type','context','contextKind',type,'record',json(data))
-        FROM temp._asm_v2_messages WHERE type IN ('compaction','synthetic','system') AND json_valid(data)
+        FROM temp._asm_v2_messages WHERE type IN ('compaction','synthetic','system','skill') AND json_valid(data)
+        UNION ALL
+        SELECT id || ':v2:shell',id,time_created,
+            json_object('type','tool','tool','shell','callID',json_extract(data,'$.shellID'),
+                'state',json_object(
+                    'input',json_object('command',json_extract(data,'$.command')),
+                    'status',CASE json_extract(data,'$.status')
+                        WHEN 'running' THEN 'running'
+                        WHEN 'exited' THEN CASE WHEN coalesce(json_extract(data,'$.exit'),0)=0 THEN 'completed' ELSE 'error' END
+                        WHEN 'timeout' THEN 'error' WHEN 'killed' THEN 'error' END,
+                    'error',CASE WHEN json_extract(data,'$.status')='timeout' THEN '终端命令超时'
+                        WHEN json_extract(data,'$.status')='killed' THEN '终端命令已取消'
+                        WHEN json_extract(data,'$.exit')!=0 THEN '退出码：' || json_extract(data,'$.exit') END,
+                    'content', json_extract(data,'$.output.output')))
+        FROM temp._asm_v2_messages WHERE type='shell' AND json_valid(data)
         UNION ALL
         SELECT id || ':v2:invalid',id,time_created,'{{'
         FROM temp._asm_v2_messages WHERE type='assistant' AND json_valid(data)

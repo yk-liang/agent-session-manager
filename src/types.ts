@@ -4,6 +4,7 @@ export interface AgentInfo {
   installed: boolean;
   supportsFork: boolean;
   supportsArchive: boolean;
+  supportsArchivedSessions: boolean;
   resumeEntrypoint?: string;
   dataDir: string | null;
   deletePolicy: "trash" | "permanent" | "readOnly";
@@ -16,6 +17,7 @@ export interface SessionMeta {
   title: string | null;
   model: string | null;
   version: string | null;
+  client?: string | null;
   gitBranch: string | null;
   entrypoint: string | null;
   firstTs: string | null;

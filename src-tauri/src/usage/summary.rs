@@ -1,5 +1,5 @@
 //! 按时间范围、Agent 和模型等维度汇总已入账请求。
-use super::{codex::LEGACY_ESTIMATE, events, types::*, Store};
+use super::{events, types::*, Store};
 use chrono::{Local, TimeZone};
 use rusqlite::{params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
@@ -47,12 +47,11 @@ pub struct RequestMetrics {
     pub cost_special_count: u64,
     pub cost_incomplete: bool,
     pub cache_read_incomplete: bool,
-    /// 缺少输入/缓存字段或包含关系不明确时，不推算缓存率。
-    pub cache_rate_unavailable: bool,
-    pub latency_sum_ms: i64,
-    pub latency_count: u64,
-    pub tps_sum: f64,
-    pub tps_count: u64,
+    /// 可拆分输入的计量子集。
+    pub cache_input_tokens: Option<u64>,
+    pub cache_input_read_tokens: u64,
+    pub cache_input_write_tokens: u64,
+    pub cache_excluded_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -136,12 +135,7 @@ pub(super) fn read_at_with_pricer(
     let tx = db
         .transaction()
         .map_err(|error| format!("无法读取用量快照：{error}"))?;
-    // 旧账本仍可只读打开，首次成功同步会补建此表；不能据已有事件推断覆盖完整。
-    let has_sync_state: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_sync_state')",
-        [], |r| r.get(0),
-    ).map_err(|_| "无法读取用量同步状态")?;
-    let synced_agents = if has_sync_state {
+    let synced_agents = {
         let mut stmt = tx
             .prepare("SELECT agent FROM usage_sync_state ORDER BY agent")
             .map_err(|_| "无法读取用量同步状态")?;
@@ -150,8 +144,6 @@ pub(super) fn read_at_with_pricer(
             .map_err(|_| "无法读取用量同步状态")?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| "无法读取用量同步状态")?
-    } else {
-        Vec::new()
     };
     let revision = {
         let mut stmt = tx
@@ -196,8 +188,6 @@ pub(super) fn read_at_with_pricer(
         partial: bool,
         #[serde(default)]
         request: MeasurementRequest,
-        #[serde(default)]
-        output_tps: Option<f64>,
     }
     #[derive(Default, Deserialize)]
     #[serde(default, rename_all = "camelCase")]
@@ -205,8 +195,6 @@ pub(super) fn read_at_with_pricer(
         provider: Option<String>,
         project: Option<String>,
         tier: Option<String>,
-        latency_ms: Option<i64>,
-        timing: Option<String>,
         scope: Option<String>,
     }
     #[derive(Default)]
@@ -223,16 +211,25 @@ pub(super) fn read_at_with_pricer(
             m: &Measurement,
             failed: bool,
             measured: bool,
-            cache_rate_unavailable: bool,
+            cache_input_available: bool,
             evaluated: Result<&super::pricing::EventCost, super::pricing::PricingIssue>,
         ) {
             self.record_count += 1;
-            // 无 Token 计量的失败仍计入请求次数和缺失费用数。
+            // 无 Token 计量的失败仍计入请求次数。
             if measured {
                 self.tokens.add(&m.tokens);
                 self.details.merge(&m.details);
                 self.metrics.cache_read_incomplete |= !m.details.cache_read_recorded;
-                self.metrics.cache_rate_unavailable |= cache_rate_unavailable;
+            }
+            if cache_input_available {
+                let input = self.metrics.cache_input_tokens.get_or_insert(0);
+                *input = input.saturating_add(m.tokens.input_tokens);
+                self.metrics.cache_input_read_tokens = self.metrics.cache_input_read_tokens
+                    .saturating_add(m.tokens.cache_read_tokens);
+                self.metrics.cache_input_write_tokens = self.metrics.cache_input_write_tokens
+                    .saturating_add(m.tokens.cache_write_tokens);
+            } else if measured || !failed {
+                self.metrics.cache_excluded_count += 1;
             }
             self.partial |= m.partial;
             if matches!(m.request.scope.as_deref(), Some("request" | "error")) {
@@ -245,23 +242,10 @@ pub(super) fn read_at_with_pricer(
             } else {
                 self.metrics.request_count_incomplete = true;
             }
-            if m.request.scope.as_deref() == Some("request")
-                && !failed
-                && m.request.timing.as_deref() != Some(LEGACY_ESTIMATE)
-            {
-                if let Some(ms) = m.request.latency_ms.filter(|ms| *ms > 0) {
-                    self.metrics.latency_sum_ms = self.metrics.latency_sum_ms.saturating_add(ms);
-                    self.metrics.latency_count += 1;
-                }
-                if let Some(tps) = m.output_tps.filter(|v| v.is_finite() && *v > 0.0) {
-                    self.metrics.tps_sum += tps;
-                    self.metrics.tps_count += 1;
-                }
-            }
             if let Ok(cost) = evaluated {
                 *self.metrics.cost_usd.get_or_insert(0.0) += cost.total_usd;
                 match cost.source.as_str() {
-                    super::pricing::BUILTIN_SOURCE => {}
+                    super::pricing::BUILTIN_SOURCE | super::pricing::NO_USAGE_SOURCE => {}
                     "custom" => {
                         *self.metrics.custom_cost_usd.get_or_insert(0.0) += cost.total_usd;
                     }
@@ -315,11 +299,12 @@ pub(super) fn read_at_with_pricer(
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_default()
         };
-        let cache_rate_unavailable = agent == "qoder"
-            || !m.details.input_recorded
-            || m.details.input_incomplete
-            || !m.details.cache_read_recorded
-            || m.tokens.cache_read_tokens > m.tokens.input_tokens;
+        let cache_input_available = agent != "qoder"
+            && m.details.input_recorded
+            && !m.details.input_incomplete
+            && m.details.cache_read_recorded
+            && m.tokens.cache_read_tokens.checked_add(m.tokens.cache_write_tokens)
+                .is_some_and(|cached| cached <= m.tokens.input_tokens);
 
         let billable = super::pricing::BillableEvent {
             agent: &agent,
@@ -329,6 +314,7 @@ pub(super) fn read_at_with_pricer(
             details: &m.details,
             provider: m.request.provider.as_deref(),
             tier: m.request.tier.as_deref(),
+            failed,
         };
         let evaluated = pricing_snapshot.price(billable);
         let project_key = m.request.project.clone().unwrap_or_default();
@@ -345,7 +331,7 @@ pub(super) fn read_at_with_pricer(
                 &m,
                 failed,
                 measured,
-                cache_rate_unavailable,
+                cache_input_available,
                 evaluated.as_ref().map_err(|e| *e),
             );
         }
@@ -356,7 +342,7 @@ pub(super) fn read_at_with_pricer(
                 &m,
                 failed,
                 measured,
-                cache_rate_unavailable,
+                cache_input_available,
                 evaluated.as_ref().map_err(|e| *e),
             );
     }

@@ -121,21 +121,7 @@ pub fn roots(agent: &str) -> Result<Vec<PathBuf>, String> {
         .data_dir()
         .ok_or("缺少数据目录")?;
     Ok(match agent {
-        "claude" => {
-            let overrides = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_default();
-            let configured: Vec<_> = overrides
-                .split(',')
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .map(|path| crate::agents::expand_tilde(path).join("projects"))
-                .collect();
-            if configured.is_empty() {
-                let home = dirs::home_dir().unwrap_or_default();
-                vec![home.join(".claude/projects"), home.join(".config/claude/projects")]
-            } else {
-                configured
-            }
-        }
+        "claude" => crate::agents::claude::project_roots(),
         "qoder" => vec![root.join("projects")],
         "codex" => vec![root.join("sessions"), root.join("archived_sessions")],
         "pi" => vec![root.join("sessions")],
@@ -143,24 +129,9 @@ pub fn roots(agent: &str) -> Result<Vec<PathBuf>, String> {
     })
 }
 fn scope(agent: &str, roots: &[PathBuf]) -> String {
-    // 解析语义升级时变更版本；环境变量切换数据根后不复用另一份数据的索引。
     format!(
         "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                2,
-                if agent == "claude" {
-                    3
-                } else if agent == "codex" {
-                    4
-                } else {
-                    1
-                },
-                agent,
-                roots
-            ))
-            .unwrap_or_default()
-        )
+        Sha256::digest(serde_json::to_vec(&(agent, roots)).unwrap_or_default())
     )
 }
 fn store(agent: &str) -> &'static Mutex<Store> {
@@ -296,10 +267,7 @@ pub(crate) fn read_at(
             }
         }
     }
-    let updated = store
-        .ledger()?
-        .updated(agent)
-        .or_else(|| store.updated(&key));
+    let updated = store.ledger()?.updated(agent);
     if !refresh && updated.is_none() {
         return Ok(None);
     }
@@ -310,8 +278,6 @@ pub(crate) fn read_at(
     let mut files = store.load(&key);
     let mut history = store.ledger()?.load(agent)?;
     let mut recorded = BTreeSet::new();
-    // 在清理缺失源之前迁移 0.1.23 缓存，升级时已经删掉的日志仍能保住已读计量。
-    ledger::absorb(agent, &mut history, &files, &mut recorded);
     let mut bytes = 0;
     let mut changed = BTreeSet::new();
     let mut obsolete = Vec::new();
@@ -351,7 +317,8 @@ pub(crate) fn read_at(
         return Err("统计已取消".into());
     }
     readable &= files.values().all(|file| file.parser_version >= input.parser_version());
-    ledger::absorb(agent, &mut history, &files, &mut recorded);
+    let incoming = changed.iter().map(|path| (path.clone(), files[path].clone())).collect();
+    ledger::absorb(agent, &mut history, &incoming, &mut recorded);
     let records = normalize::records(agent, &history);
     let measured = history.values().filter(|f| !f.samples.is_empty()).count();
     let mut partial = !readable || history.values().any(|file| file.pending);

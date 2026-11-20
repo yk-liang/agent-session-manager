@@ -39,7 +39,7 @@ Apple has not notarized the release. If macOS blocks the first launch, verify th
 
 ## Using the app
 
-- Select an agent to browse its local sessions. For archived Codex sessions, turn on **显示已归档 (Show Archived)**. Resuming in Terminal requires the agent’s command-line tool.
+- Select an agent to browse its local sessions. Turn on **显示已归档 (Show Archived)** to see archived Codex and OpenCode sessions. The app can archive and unarchive Codex sessions. Resuming in Terminal requires the agent’s command-line tool.
 - Deleting a Codex or OpenCode session is permanent. Other deletable sessions go to the Trash. Antigravity sessions are read-only.
 - The app syncs usage while it is open. The first sync may take a few minutes. Synced usage remains available after a session is deleted.
 

@@ -19,7 +19,7 @@ fn literal_context_markup_is_never_removed_from_ordinary_prose() {
 
 #[test]
 fn context_visibility_claude_and_qoder() {
-    for (name, title_events) in [("claude", false), ("qoder", true)] {
+    for (name, use_runtime_model) in [("claude", false), ("qoder", true)] {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir(&project).unwrap();
@@ -40,6 +40,10 @@ fn context_visibility_claude_and_qoder() {
                 {"type":"server_tool_use","id":"server","name":"web_search","input":{"query":"example"}},
                 {"type":"web_search_tool_result","tool_use_id":"server","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}
             ]}}),
+            json!({"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"human"},"commandMode":"prompt",
+                "prompt":[{"type":"text","text":"queued question"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}),
+            json!({"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"peer"},"commandMode":"prompt","prompt":"context-secret peer"}}),
+            json!({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API error line"}]}}),
         ];
         let records: Vec<_> = records
             .into_iter()
@@ -60,13 +64,12 @@ fn context_visibility_claude_and_qoder() {
         fs::write(project.join("bbbb.jsonl"), format!("{}\n", records[2])).unwrap();
         let before = fs::read(&file).unwrap();
         let opts = FamilyOptions {
-            title_events,
+            use_runtime_model,
             filter_non_cli_entrypoint: false,
-            filter_qoderwork_cwd: false,
         };
         let catalog = catalog(dir.path(), opts, false, &|| false).unwrap();
         assert_eq!(catalog.sessions.len(), 1);
-        assert_eq!(catalog.sessions[0].real_user_count, 3);
+        assert_eq!(catalog.sessions[0].real_user_count, 4);
         assert_eq!(catalog.sessions[0].assistant_text_count, 2);
         assert_eq!(
             catalog.sessions[0].title.as_deref(),
@@ -79,7 +82,7 @@ fn context_visibility_claude_and_qoder() {
                 .iter()
                 .filter(|e| e["type"] == "context")
                 .count(),
-            8
+            9
         );
         assert!(detail
             .events
@@ -96,6 +99,10 @@ fn context_visibility_claude_and_qoder() {
         assert_eq!(server["message"]["content"][0]["type"], "tool_use");
         assert_eq!(server["message"]["content"][1]["type"], "tool_result");
         assert_eq!(server["message"]["content"][1]["is_error"], true);
+        let queued = &detail.events.iter().find(|e| e["uuid"] == "event-13").unwrap();
+        assert_eq!(queued["type"], "user");
+        assert_eq!(queued["message"]["content"][1]["type"], "image");
+        assert!(detail.events.iter().any(|e| e["type"] == "system" && e["content"] == "API error line"));
         assert_eq!(fs::read(&file).unwrap(), before);
         super::super::context_test_support::check_and_export(
             name,
@@ -114,9 +121,8 @@ fn context_visibility_actual_family_log_if_requested() {
     let path = Path::new(&file);
     let project = path.parent().unwrap();
     let opts = FamilyOptions {
-        title_events: false,
+        use_runtime_model: false,
         filter_non_cli_entrypoint: false,
-        filter_qoderwork_cwd: false,
     };
     let before = fs::read(path).unwrap();
     let detail = read_session(

@@ -1,6 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import UiIcon from "./UiIcon";
+import useDismiss from "./useDismiss";
 
 interface Props {
   label: string;
@@ -45,29 +46,10 @@ export default function HelpTip({
     };
   }, [above, open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = () => {
-      pinned.current = false;
-      setOpen(false);
-    };
-    const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) dismiss();
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        dismiss();
-      }
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape, true);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape, true);
-    };
-  }, [open]);
+  useDismiss(open, [root], () => {
+    pinned.current = false;
+    setOpen(false);
+  });
 
   return (
     <span
@@ -80,7 +62,7 @@ export default function HelpTip({
     >
       <button
         type="button"
-        className="help-button"
+        className="help-button btn-icon btn-ghost"
         aria-label={`${label}说明`}
         aria-expanded={open}
         aria-describedby={open ? id : undefined}
@@ -95,7 +77,7 @@ export default function HelpTip({
           setOpen(pinned.current);
         }}
       >
-        <UiIcon icon={CircleHelp} className="help-symbol" />
+        <UiIcon icon={CircleHelp} />
       </button>
       {open && (
         <span

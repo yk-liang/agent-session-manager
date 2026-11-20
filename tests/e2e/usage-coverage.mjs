@@ -19,7 +19,8 @@ try {
       reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true,
       cacheReadRecorded: true, cacheWriteRecorded: false, reasoningRecorded: false,
       requestCount: 1, requestCountIncomplete: false, costUsd: null, costIncomplete: false,
-      cacheReadIncomplete: false, cacheRateUnavailable: false, partial: false,
+      cacheReadIncomplete: false, partial: false,
+      cacheInputTokens: input, cacheInputReadTokens: 0, cacheInputWriteTokens: 0, cacheExcludedCount: 0,
     });
     state.collector = createCollector(['qoder', 'claude', 'opencode', 'pi', 'codex'], async agent => {
       if (state.holdAgent === agent) await new Promise(resolve => state.release = resolve);

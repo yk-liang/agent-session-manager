@@ -2,9 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { installParagraphSelection } from "./paragraphSelection";
-import "./styles.css";
-import "./usage.css";
-import "./sessionOutline.css";
+import "./styles/tokens.css";
+import "./styles/base.css";
+import "./styles/shell.css";
+import "./styles/catalog.css";
+import "./styles/conversation.css";
+import "./styles/config.css";
+import "./styles/usage.css";
 
 installParagraphSelection();
 

@@ -3,7 +3,6 @@
 //! 事务失败时通过重命名恢复。
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -77,84 +76,11 @@ fn summarize(p: &Profile, spec: &[ConfigFile]) -> ProfileSummary {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct ProfileStore {
     profiles: Vec<Profile>,
 }
 
-/// 反序列化中转：兼容旧格式（Qoder 专属的 settings/mcp/modelsDefault 字段）
-#[derive(Deserialize, Default)]
-struct RawStore {
-    #[serde(default)]
-    profiles: Vec<RawProfile>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawProfile {
-    name: String,
-    #[serde(default)]
-    agent: Option<String>,
-    created_at: u64,
-    #[serde(default)]
-    files: Option<Vec<ConfigSnapshot>>,
-    #[serde(default)]
-    captured_keys: Option<Vec<String>>,
-    // 旧格式字段（解析后的 JSON），仅在缺少 files 时用于一次性迁移
-    #[serde(default)]
-    settings: Option<Value>,
-    #[serde(default)]
-    mcp: Option<Value>,
-    #[serde(default)]
-    models_default: Option<Value>,
-}
-
-impl RawProfile {
-    /// 归一到新格式：已是 files 直接用；旧格式迁移为 agent=qoder + 原始文本 files
-    fn into_profile(self) -> Profile {
-        let agent = self.agent.unwrap_or_else(|| "qoder".to_string());
-        if let Some(files) = self.files {
-            return Profile {
-                name: self.name,
-                agent,
-                created_at: self.created_at,
-                files,
-                captured_keys: self.captured_keys,
-            };
-        }
-        let mut files = Vec::new();
-        for (key, v) in [
-            ("settings.json", self.settings),
-            ("mcp.json", self.mcp),
-            (".models/default", self.models_default),
-        ] {
-            if let Some(v) = v {
-                let content = serde_json::to_string_pretty(&v).unwrap_or_default();
-                files.push(ConfigSnapshot {
-                    key: key.to_string(),
-                    content,
-                });
-            }
-        }
-        // 只有旧 Qoder 格式能证明哪些文件应由方案管理。
-        let captured_keys = (agent == "qoder").then(|| {
-            vec![
-                "settings.json".to_string(),
-                "mcp.json".to_string(),
-                ".models/default".to_string(),
-            ]
-        });
-        Profile {
-            name: self.name,
-            agent,
-            created_at: self.created_at,
-            files,
-            captured_keys,
-        }
-    }
-}
-
-/// 当前受管理文件；排除独立凭证文件，但正文仍可能内嵌密钥，不应写入日志。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentFile {
@@ -174,17 +100,7 @@ pub struct CurrentConfig {
 
 fn store_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
-    let profile_dir = home.join(".agent-session-manager");
-    let legacy_dir = home.join(".qoder-session-manager");
-    // 旧目录访问或迁移失败时中止，避免用空配置库掩盖历史方案。
-    if !super::present(&profile_dir)? && super::present(&legacy_dir)? {
-        fs::rename(&legacy_dir, &profile_dir).map_err(|e| {
-            format!(
-                "无法迁移配置目录 {legacy_dir:?} 到 {profile_dir:?}：{e}。历史配置仍在旧目录中。"
-            )
-        })?;
-    }
-    Ok(profile_dir)
+    Ok(home.join(".agent-session-manager"))
 }
 
 /// 配置库可能含凭据：目录强制 0700。
@@ -383,19 +299,8 @@ fn load_store() -> Result<ProfileStore, String> {
         // 文件不存在 = 还没有任何配置，属正常情况
         return Ok(ProfileStore::default());
     };
-    let raw: RawStore = serde_json::from_str(&raw).map_err(|e| {
-        format!(
-            "配置库 {:?} 已损坏（{e}），请先人工处理，避免覆盖现有数据",
-            path
-        )
-    })?;
-    // 旧格式 profile 在此归一化迁移，历史 Qoder 快照不丢失
-    Ok(ProfileStore {
-        profiles: raw
-            .profiles
-            .into_iter()
-            .map(RawProfile::into_profile)
-            .collect(),
+    serde_json::from_str(&raw).map_err(|e| {
+        format!("配置库 {path:?} 已损坏（{e}），请先人工处理，避免覆盖现有数据")
     })
 }
 
@@ -1275,28 +1180,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pi_empty_or_missing_files_does_not_gain_qoder_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = vec![ConfigFile {
-            key: "settings.json".into(),
-            label: "settings.json".into(),
-            path: dir.path().join("settings.json"),
-        }];
-        for raw in [
-            r#"{"name":"legacy","agent":"pi","createdAt":1,"files":[]}"#,
-            r#"{"name":"legacy","agent":"pi","createdAt":1}"#,
-        ] {
-            let profile = serde_json::from_str::<RawProfile>(raw)
-                .unwrap()
-                .into_profile();
-            assert!(
-                profile_slots(&profile, &spec).is_err(),
-                "未采集过 Pi settings 的快照不得获得删除权限：{raw}"
-            );
-        }
-    }
-
-    #[test]
     fn captured_scope_distinguishes_known_absent_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -1397,49 +1280,4 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 
-    #[test]
-    fn legacy_profile_migrates_to_qoder_files() {
-        // 旧格式（settings/mcp/modelsDefault 字段、无 files/agent）→ agent=qoder + files
-        let raw = r#"{"profiles":[{"name":"old","createdAt":1,"settings":{"a":1},"mcp":{"servers":{}}}]}"#;
-        let store: RawStore = serde_json::from_str(raw).unwrap();
-        let profiles: Vec<Profile> = store
-            .profiles
-            .into_iter()
-            .map(RawProfile::into_profile)
-            .collect();
-        assert_eq!(profiles.len(), 1);
-        let p = &profiles[0];
-        assert_eq!(p.agent, "qoder", "旧格式应迁移为 qoder");
-        assert!(p.files.iter().any(|f| f.key == "settings.json"));
-        assert!(p.files.iter().any(|f| f.key == "mcp.json"));
-        assert!(
-            !p.files.iter().any(|f| f.key == ".models/default"),
-            "未提供的旧字段不应凭空生成 file"
-        );
-        let captured: Vec<&str> = p
-            .captured_keys
-            .as_deref()
-            .unwrap()
-            .iter()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            captured,
-            vec!["settings.json", "mcp.json", ".models/default"],
-            "旧 Qoder 字段格式的完整采集范围是已知的"
-        );
-    }
-
-    #[test]
-    fn new_format_profile_kept_as_is() {
-        // 新格式（已含 files）：不走迁移，原样保留
-        let raw = r#"{"profiles":[{"name":"n","agent":"codex","createdAt":2,"files":[{"key":"config.toml","content":"x=1\n"}],"capturedKeys":["config.toml"]}]}"#;
-        let store: RawStore = serde_json::from_str(raw).unwrap();
-        let p = store.profiles.into_iter().next().unwrap().into_profile();
-        assert_eq!(p.agent, "codex");
-        assert_eq!(p.files.len(), 1);
-        assert_eq!(p.files[0].key, "config.toml");
-        assert_eq!(p.files[0].content, "x=1\n");
-        assert_eq!(p.captured_keys, Some(vec!["config.toml".to_string()]));
-    }
 }

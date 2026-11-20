@@ -1,6 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import UiIcon from "./UiIcon";
+import SearchField from "./SearchField";
+import useDismiss from "./useDismiss";
 
 interface Option {
   id: string;
@@ -22,6 +24,7 @@ interface Props {
   /** 由容器决定宽度并截断当前值；默认按最长选项定宽，切换时不跳动。 */
   fill?: boolean;
   className?: string;
+  compact?: boolean;
 }
 
 function positionMenu(button: HTMLButtonElement, menu: HTMLDivElement) {
@@ -41,7 +44,7 @@ function positionMenu(button: HTMLButtonElement, menu: HTMLDivElement) {
 }
 
 export default function Dropdown({ label, options, value, onChange, onOpen, countUnit, disabled = false,
-  placeholder, searchLabel, fill = false, className }: Props) {
+  placeholder, searchLabel, fill = false, className, compact = false }: Props) {
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
@@ -62,22 +65,10 @@ export default function Dropdown({ label, options, value, onChange, onOpen, coun
   const activeDescendant = open && active ? optionId(active.id) : undefined;
 
   useEffect(() => { setOpen(false); }, [value, unavailable]);
-  useEffect(() => {
-    if (!open) return;
-    const close = () => setOpen(false);
-    const outside = (event: Event) => {
-      if (!root.current?.contains(event.target as Node)) close();
-    };
-    // WebKit 点击按钮时可能先失焦；同一触发按钮的点击交给 onClick 切换。
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("focusin", outside);
-    window.addEventListener("blur", close);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("focusin", outside);
-      window.removeEventListener("blur", close);
-    };
-  }, [open]);
+  useDismiss(open, [root], reason => {
+    if (reason === "escape") trigger.current?.focus({ preventScroll: true });
+    setOpen(false);
+  }, { focusOutside: true, windowBlur: true });
   useLayoutEffect(() => {
     const button = trigger.current, popup = menu.current;
     if (!button || !popup) return;
@@ -139,11 +130,8 @@ export default function Dropdown({ label, options, value, onChange, onOpen, coun
     if (unavailable || event.nativeEvent.isComposing || event.metaKey || event.ctrlKey) return;
     const key = event.key;
     const typing = event.currentTarget === search.current;
-    if (key === "Escape" || key === "Tab") {
-      if (open) {
-        close();
-        if (key === "Escape") { event.preventDefault(); event.stopPropagation(); }
-      }
+    if (key === "Tab") {
+      if (open) close();
       return;
     }
     if (key === "Enter" || (key === " " && !typing)) {
@@ -179,7 +167,7 @@ export default function Dropdown({ label, options, value, onChange, onOpen, coun
   };
 
   return <div className={className ? `dropdown ${className}` : "dropdown"} ref={root}>
-    <button ref={trigger} type="button" className="dropdown-trigger" role="combobox" aria-label={label}
+    <button ref={trigger} type="button" className={compact ? "dropdown-trigger btn-sm" : "dropdown-trigger"} role="combobox" aria-label={label}
       value={value ?? ""} disabled={unavailable} aria-haspopup="listbox" aria-expanded={open}
       aria-controls={open ? listId : undefined} aria-activedescendant={searchLabel ? undefined : activeDescendant}
       onKeyDown={onKeyDown} onMouseDown={event => { if (open) event.preventDefault(); }}
@@ -192,10 +180,10 @@ export default function Dropdown({ label, options, value, onChange, onOpen, coun
       <UiIcon icon={ChevronDown} className="dropdown-chevron" />
     </button>
     {open && <div ref={menu} className="dropdown-menu">
-      {searchLabel && <input ref={search} className="control-input dropdown-search" type="search" role="combobox" tabIndex={-1}
+      {searchLabel && <SearchField ref={search} className="dropdown-search" role="combobox" tabIndex={-1}
         aria-label={searchLabel} placeholder={searchLabel} autoComplete="off" value={query}
         aria-autocomplete="list" aria-expanded="true" aria-controls={listId} aria-activedescendant={activeDescendant}
-        onKeyDown={onKeyDown} onChange={event => { setQuery(event.target.value); setActiveId(null); }} />}
+        onKeyDown={onKeyDown} onChange={value => { setQuery(value); setActiveId(null); }} />}
       <div ref={list} id={listId} className="dropdown-options" role="listbox" aria-label={label}>
         {visible.map(option => <button key={option.id} type="button" role="option" id={optionId(option.id)} value={option.id}
           className="dropdown-option" tabIndex={-1} aria-selected={option.id === value} data-active={option.id === active?.id}

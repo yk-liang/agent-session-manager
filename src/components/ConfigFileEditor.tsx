@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import Notice from "./Notice";
 import UiIcon from "./UiIcon";
 import type { ConfigValidation, WorkspaceFile } from "../types";
 import * as api from "../api";
@@ -121,6 +122,7 @@ export default function ConfigFileEditor({
     >
       <div className="config-file-head">
         <button
+          type="button"
           className="config-file-toggle"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
@@ -129,15 +131,15 @@ export default function ConfigFileEditor({
           <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
           <strong>{file.label}</strong>
           {!file.present && !editing && (
-            <span className="status-tag muted">尚未创建</span>
+            <span className="status-tag">尚未创建</span>
           )}
-          {dirty && <span className="status-tag amber">未保存</span>}
+          {dirty && <span className="status-tag" data-tone="warning">未保存</span>}
           {(file.present || editing) && (
             <span className="config-line-count">{lineCount} 行</span>
           )}
         </button>
         {!editing && (
-          <button className="config-file-action" onClick={startEdit} disabled={disabled}>
+          <button type="button" className="config-file-action btn-sm" onClick={startEdit} disabled={disabled}>
             {file.present ? "编辑" : "创建"}
           </button>
         )}
@@ -223,10 +225,11 @@ export default function ConfigFileEditor({
               </span>
               {editing && (
                 <div className="config-edit-buttons">
-                  <button onClick={cancelEdit} disabled={saving}>
+                  <button type="button" onClick={cancelEdit} disabled={saving}>
                     取消编辑
                   </button>
                   <button
+                    type="button"
                     className="primary"
                     onClick={saveEdit}
                     disabled={
@@ -246,14 +249,10 @@ export default function ConfigFileEditor({
         </div>
       )}
       {error && (
-        <div className="config-notice error" role="alert">
-          {error}
-        </div>
+        <Notice tone="error">{error}</Notice>
       )}
       {!open && !file.validation.valid && (
-        <div className="config-notice error" role="alert">
-          {file.validation.error}
-        </div>
+        <Notice tone="error">{file.validation.error}</Notice>
       )}
     </article>
   );

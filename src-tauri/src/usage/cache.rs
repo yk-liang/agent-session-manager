@@ -11,7 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// 压缩计量载荷的预算（字节）；未确认入账的旧缓存不参与淘汰，小型文件索引另计。
+/// 压缩解析缓存的预算（字节）。
+const VERSION: i64 = 2;
 const MAX_CACHED_USAGE_BYTES: i64 = 64 * 1024 * 1024;
 
 pub(super) fn path() -> Option<PathBuf> {
@@ -66,10 +67,10 @@ pub(super) fn covers_observations(current: &FileCache, old: &FileCache) -> bool 
 
 pub(super) fn jsonl_parser_version(agent: &str) -> u8 {
     match agent {
-        "codex" => 10,
-        "claude" => 9,
-        "pi" => 6,
-        "qoder" => 6,
+        "codex" => 11,
+        "claude" => 10,
+        "pi" => 7,
+        "qoder" => 7,
         _ => 3,
     }
 }
@@ -165,19 +166,7 @@ impl Store {
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).ok()?;
             let db = Connection::open(path).ok()?;
-            if db
-                .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
-                .ok()?
-                > 1
-            {
-                return None;
-            }
-            if Self::prepare(&db).is_err() {
-                // 升级失败仍读旧表，不能用空内存缓存遮住尚未入账、源已删除的历史。
-                eprintln!(
-                    "Usage cache upgrade deferred; existing records remain available for import"
-                );
-            }
+            Self::prepare(&db).ok()?;
             Some(db)
         });
         let db = disk.unwrap_or_else(|| {
@@ -229,58 +218,27 @@ impl Store {
     fn prepare(db: &Connection) -> rusqlite::Result<()> {
         db.busy_timeout(std::time::Duration::from_millis(200))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 1 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        // 旧缓存可能是尚未导入账本的唯一历史副本；升级时使用可恢复的磁盘事务。
-        if version == 0 {
-            db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;
-            CREATE TABLE IF NOT EXISTS usage_files(scope TEXT,path TEXT,data TEXT NOT NULL,PRIMARY KEY(scope,path));
-            CREATE TABLE IF NOT EXISTS usage_file_stamps(scope TEXT,path TEXT,version INTEGER,stamps TEXT,PRIMARY KEY(scope,path));
-            CREATE TABLE IF NOT EXISTS usage_scans(scope TEXT PRIMARY KEY,updated INTEGER NOT NULL);")?;
+        if version != VERSION {
+            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
             let tx =
                 rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-            let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if current == 0 {
-                tx.execute_batch(
-                    "ALTER TABLE usage_files ADD COLUMN touched INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE usage_files ADD COLUMN durable INTEGER NOT NULL DEFAULT 0;",
-                )?;
-                {
-                    let mut stmt = tx.prepare("SELECT rowid,data FROM usage_files")?;
-                    let mut rows = stmt.query([])?;
-                    while let Some(row) = rows.next()? {
-                        // 已损坏的旧缓存原样保留；不能因此丢掉其他仍可迁移的旧记录。
-                        if let Ok(data) = super::storage::compress_legacy(row.get_ref(1)?) {
-                            tx.execute(
-                                "UPDATE usage_files SET data=?2 WHERE rowid=?1",
-                                params![row.get::<_, i64>(0)?, data],
-                            )?;
-                        }
-                    }
-                }
-                tx.pragma_update(None, "user_version", 1)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? != VERSION {
+                tx.execute_batch("DROP TABLE IF EXISTS usage_files;
+                    DROP TABLE IF EXISTS usage_file_stamps;
+                    DROP TABLE IF EXISTS usage_scans;
+                    CREATE TABLE usage_files(scope TEXT,path TEXT,data BLOB NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(scope,path));
+                    CREATE TABLE usage_scans(scope TEXT PRIMARY KEY,updated INTEGER NOT NULL);")?;
+                tx.pragma_update(None, "user_version", VERSION)?;
             }
             tx.commit()?;
+            db.execute_batch("VACUUM;")?;
+        } else if db.pragma_query_value::<i64, _>(None, "auto_vacuum", |r| r.get(0))? != 2 {
+            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
         }
-        if version == 0 || db.pragma_query_value::<i64, _>(None, "auto_vacuum", |r| r.get(0))? != 2
-        {
-            // 失败时下次打开仍会尝试启用增量回收；不删除或替换活跃文件。
-            let _ = db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;");
-        }
-        let uncommitted: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM usage_files WHERE durable=0)",
-            [],
-            |r| r.get(0),
-        )?;
-        // 旧缓存可能仍是其他 Agent 的唯一历史副本。它们全部确认入账前，
-        // 后续普通缓存写入也保留磁盘回滚日志；下次打开确认安全后才使用轻量写入。
-        db.execute_batch(if uncommitted {
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"
-        } else {
-            "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;"
-        })
+        db.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;")
     }
+
+    #[cfg(test)]
     pub(super) fn load(&self, scope: &str) -> BTreeMap<PathBuf, FileCache> {
         let Ok(mut stmt) = self
             .db
@@ -311,30 +269,6 @@ impl Store {
             )
             .ok()
     }
-    /// 未变化来源只读这个小索引，不反序列化该文件的全部历史计量。
-    pub(super) fn unchanged(
-        &self,
-        scope: &str,
-        path: &Path,
-        stamps: &[Stamp],
-        version: u8,
-    ) -> bool {
-        let Ok(stamps) = serde_json::to_string(stamps) else {
-            return false;
-        };
-        self.db.query_row("SELECT 1 FROM usage_file_stamps WHERE scope=?1 AND path=?2 AND version=?3 AND stamps=?4",
-            params![scope,path.to_string_lossy(),version,stamps], |_| Ok(true)).unwrap_or(false)
-    }
-    #[cfg(test)]
-    pub fn updated(&self, scope: &str) -> Option<i64> {
-        self.db
-            .query_row(
-                "SELECT updated FROM usage_scans WHERE scope=?1",
-                [scope],
-                |r| r.get(0),
-            )
-            .ok()
-    }
     pub(super) fn commit(
         &mut self,
         scope: &str,
@@ -349,10 +283,6 @@ impl Store {
         let save = || -> rusqlite::Result<()> {
             for path in deleted {
                 tx.execute(
-                    "DELETE FROM usage_file_stamps WHERE scope=?1 AND path=?2",
-                    params![scope, path.to_string_lossy()],
-                )?;
-                tx.execute(
                     "DELETE FROM usage_files WHERE scope=?1 AND path=?2",
                     params![scope, path.to_string_lossy()],
                 )?;
@@ -364,25 +294,15 @@ impl Store {
                     };
                     if data.len() as i64 <= MAX_CACHED_USAGE_BYTES {
                         tx.execute(
-                            "INSERT OR REPLACE INTO usage_files VALUES (?1,?2,?3,?4,1)",
+                            "INSERT OR REPLACE INTO usage_files VALUES (?1,?2,?3,?4)",
                             params![scope, path.to_string_lossy(), data, at],
                         )?;
                     } else {
-                        // 单份超预算来源只留读取版本，避免挤掉所有其他活跃来源的缓存。
                         tx.execute(
-                            "DELETE FROM usage_files WHERE scope=?1 AND path=?2 AND durable=1",
+                            "DELETE FROM usage_files WHERE scope=?1 AND path=?2",
                             params![scope, path.to_string_lossy()],
                         )?;
                     }
-                    tx.execute(
-                        "INSERT OR REPLACE INTO usage_file_stamps VALUES (?1,?2,?3,?4)",
-                        params![
-                            scope,
-                            path.to_string_lossy(),
-                            file.parser_version,
-                            serde_json::to_string(&file.stamps).unwrap_or_default()
-                        ],
-                    )?;
                 }
             }
             tx.execute(
@@ -390,9 +310,7 @@ impl Store {
                 params![scope, at],
             )?;
             Self::trim(&tx, MAX_CACHED_USAGE_BYTES)?;
-            // 旧数据根的读取位置无需长期保留；未入账的旧计量仍单独保留。
-            tx.execute("DELETE FROM usage_file_stamps WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
-            tx.execute("DELETE FROM usage_files WHERE durable=1 AND scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
+            tx.execute("DELETE FROM usage_files WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
             tx.execute("DELETE FROM usage_scans WHERE scope IN (SELECT scope FROM usage_scans ORDER BY rowid DESC LIMIT -1 OFFSET 10)", [])?;
             Ok(())
         };
@@ -415,7 +333,7 @@ impl Store {
             return Ok(());
         }
         let mut stmt = db.prepare(
-            "SELECT rowid,length(data) FROM usage_files WHERE durable=1 ORDER BY touched,rowid",
+            "SELECT rowid,length(data) FROM usage_files ORDER BY touched,rowid",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
@@ -426,27 +344,7 @@ impl Store {
             db.execute("DELETE FROM usage_files WHERE rowid=?1", [id])?;
             bytes -= len;
         }
-        // 保留小型 stamps：被淘汰但未变化的日志仍无需重读；再次变化时才重新解析。
         Ok(())
-    }
-
-    pub(super) fn mark_durable(&mut self, scope: &str, files: &BTreeMap<PathBuf, FileCache>) {
-        let Ok(tx) = self.db.transaction() else {
-            return;
-        };
-        // 只标记确实解码并入账的来源；同一 scope 内不可读的旧记录仍不能淘汰。
-        for path in files.keys() {
-            if tx
-                .execute(
-                    "UPDATE usage_files SET durable=1 WHERE scope=?1 AND path=?2",
-                    params![scope, path.to_string_lossy()],
-                )
-                .is_err()
-            {
-                return;
-            }
-        }
-        let _ = tx.commit();
     }
 
     fn reclaim(&self) {
@@ -470,26 +368,14 @@ impl Store {
             return;
         };
         let prune = || -> rusqlite::Result<()> {
-            let count: i64 = tx.query_row(
-                "SELECT count(*) FROM usage_file_stamps WHERE scope=?1",
-                [scope],
-                |r| r.get(0),
-            )?;
-            if count <= paths.len() as i64 {
-                return Ok(());
-            }
-            let mut stmt = tx.prepare("SELECT path FROM usage_file_stamps WHERE scope=?1")?;
+            let mut stmt = tx.prepare("SELECT path FROM usage_files WHERE scope=?1")?;
             let obsolete = stmt
                 .query_map([scope], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             for path in obsolete {
                 if !paths.contains(Path::new(&path)) {
                     tx.execute(
-                        "DELETE FROM usage_files WHERE scope=?1 AND path=?2 AND durable=1",
-                        params![scope, path],
-                    )?;
-                    tx.execute(
-                        "DELETE FROM usage_file_stamps WHERE scope=?1 AND path=?2",
+                        "DELETE FROM usage_files WHERE scope=?1 AND path=?2",
                         params![scope, path],
                     )?;
                 }
@@ -610,6 +496,7 @@ pub(super) fn read_file(
                 b"\"task_complete\"",
                 b"\"thread_settings_applied\"",
                 b"\"item_completed\"",
+                b"_call_output\"",
                 b"\"user_message\"",
                 b"\"error\"",
             ]

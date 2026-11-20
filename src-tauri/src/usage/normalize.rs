@@ -32,7 +32,6 @@ pub(super) fn prefer(next: &Sample, old: &Sample) -> bool {
 pub(super) fn unique(agent: &str, samples: impl IntoIterator<Item = Sample>) -> Vec<Sample> {
     let mut by_key = HashMap::<String, Sample>::new();
     for mut s in samples {
-        s.migrate_availability();
         if let Some(old) = by_key.get_mut(&s.key) {
             if agent == "claude" && old.claude_fallback != s.claude_fallback {
                 if s.claude_fallback {
@@ -78,8 +77,8 @@ pub(super) fn unique(agent: &str, samples: impl IntoIterator<Item = Sample>) -> 
             if preferred {
                 std::mem::swap(old, &mut s);
             }
-            if agent == "claude" && s.model == old.model {
-                old.tokens.refine_claude_prompt(&s.tokens);
+            if matches!(agent, "claude" | "qoder") && s.model == old.model {
+                old.tokens.refine_prompt(&s.tokens, agent == "claude");
             }
             old.copy_fingerprint = copy_fingerprint;
             old.details = details;

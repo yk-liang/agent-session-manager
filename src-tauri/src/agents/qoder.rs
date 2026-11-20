@@ -10,9 +10,8 @@ mod desktop;
 mod grouping;
 
 const OPTS: FamilyOptions = FamilyOptions {
-    title_events: true,
+    use_runtime_model: true,
     filter_non_cli_entrypoint: true,
-    filter_qoderwork_cwd: true,
 };
 
 pub fn qoder_dir() -> PathBuf {
@@ -80,6 +79,18 @@ impl AgentSource for QoderSource {
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
         super::AgentWatchPaths::transcripts("projects", Some(2))
+    }
+    fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
+        let mut locations = vec![(qoder_dir(), self.watch_paths())];
+        if let Some(path) = desktop::database_path() {
+            if let Some(parent) = path.parent() {
+                locations.push((parent.to_path_buf(), super::AgentWatchPaths {
+                    root_files: vec!["main.sqlite", "main.sqlite-wal"],
+                    ..Default::default()
+                }));
+            }
+        }
+        locations
     }
     fn supports_fork(&self) -> bool {
         true

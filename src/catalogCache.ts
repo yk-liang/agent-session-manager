@@ -1,10 +1,10 @@
 import type { Catalog, CatalogFilter, Project, SessionMeta } from "./types";
-import { sessionKey } from "./utils.ts";
+import { compareTimestamps, sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
 export const DEFAULT_CATALOG_FILTER: CatalogFilter = { includeEmpty: false, includeArchived: false };
-export function catalogFilterFor({ includeEmpty, includeArchived }: CatalogFilter, supportsArchive = false): CatalogFilter {
-  return { includeEmpty, includeArchived: includeArchived && supportsArchive };
+export function catalogFilterFor({ includeEmpty, includeArchived }: CatalogFilter, supportsArchivedSessions = false): CatalogFilter {
+  return { includeEmpty, includeArchived: includeArchived && supportsArchivedSessions };
 }
 
 type CatalogLoader = (agent: string, filter: CatalogFilter, generation: number, revision?: number) => Promise<Catalog | null>;
@@ -23,7 +23,7 @@ function withSessions(catalog: Catalog, sessions: SessionMeta[], previous?: Cata
     const group = groups.get(session.projectDir);
     if (group) {
       group.sessionCount++;
-      if (session.lastTs && (!group.lastActivity || session.lastTs > group.lastActivity)) group.lastActivity = session.lastTs;
+      if (compareTimestamps(session.lastTs, group.lastActivity) > 0) group.lastActivity = session.lastTs;
     } else {
       groups.set(session.projectDir, {
         dirName: session.projectDir,
@@ -34,7 +34,7 @@ function withSessions(catalog: Catalog, sessions: SessionMeta[], previous?: Cata
     }
   }
   const projects = [...groups.values()].sort((a, b) =>
-    (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "") || a.dirName.localeCompare(b.dirName));
+    compareTimestamps(b.lastActivity, a.lastActivity) || a.dirName.localeCompare(b.dirName));
   return { ...catalog, projects, sessions };
 }
 
@@ -251,7 +251,7 @@ export class AgentCatalogCache {
         return { ...catalog, sessions };
       }
       const sessions = [...catalog.sessions, updated].sort((a, b) =>
-        (b.lastTs ?? "").localeCompare(a.lastTs ?? "") || a.projectDir.localeCompare(b.projectDir)
+        compareTimestamps(b.lastTs, a.lastTs) || a.projectDir.localeCompare(b.projectDir)
         || a.sessionId.localeCompare(b.sessionId));
       return withSessions(catalog, sessions);
     });

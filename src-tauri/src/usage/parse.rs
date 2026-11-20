@@ -86,7 +86,6 @@ pub(super) fn recorded_fields(usage: &Value, agent: &str) -> RecordedFields {
         output_recorded,
         input_incomplete: !input_recorded,
         output_incomplete: !output_recorded,
-        availability_known: true,
         cache_read_recorded: read,
         cache_write_recorded: write,
         reasoning_recorded: reason,
@@ -122,9 +121,16 @@ pub(super) fn normalize(usage: &Value, agent: &str) -> Option<(Tokens, bool)> {
     let mut write_1h = 0;
     if matches!(agent, "claude" | "qoder") {
         // TTL 是缓存创建总量的分项，旧版本可能只把完整值保存在这里，不能与聚合值叠加。
-        let ttl = &usage["cache_creation"];
-        write_1h = number(ttl, "ephemeral_1h_input_tokens");
-        write = write.max(number(ttl, "ephemeral_5m_input_tokens").saturating_add(write_1h));
+        let (short, long) = if agent == "claude" {
+            super::claude::message_cache_creation(usage)
+        } else {
+            None
+        }.unwrap_or_else(|| {
+            let ttl = &usage["cache_creation"];
+            (number(ttl, "ephemeral_5m_input_tokens"), number(ttl, "ephemeral_1h_input_tokens"))
+        });
+        write_1h = long;
+        write = write.max(short.saturating_add(long));
     }
     if agent == "pi" {
         write_1h = number(usage, "cacheWrite1h");
@@ -151,7 +157,9 @@ pub(super) fn normalize(usage: &Value, agent: &str) -> Option<(Tokens, bool)> {
             .saturating_add(read)
             .saturating_add(write);
     }
-    if agent == "opencode" {
+    if agent == "opencode" || agent == "pi" && usage["totalTokens"].as_u64()
+        .is_some_and(|total| tokens.total().checked_add(reasoning) == Some(total))
+    {
         tokens.output_tokens = tokens.output_tokens.saturating_add(reasoning);
     }
     let total_key = match agent {

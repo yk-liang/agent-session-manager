@@ -26,13 +26,13 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
             "m3",
             "ses_history",
             3000,
-            json!({"role":"assistant","providerID":"provider-b","modelID":"new-model"}),
+            json!({"role":"assistant","providerID":"provider-b","modelID":"new-model","mode":"plan"}),
         ),
         (
             "m4",
             "ses_history",
             3000,
-            json!({"role":"assistant","providerID":"provider-c","modelID":"new-model"}),
+            json!({"role":"assistant","providerID":"provider-c","modelID":"new-model","agent":"build"}),
         ),
         (
             "m5",
@@ -76,6 +76,7 @@ fn history_model_comes_from_assistant_messages_not_current_selection() {
         .find(|m| m.session_id == "ses_history")
         .unwrap();
     assert_eq!(meta.model.as_deref(), Some("provider-c/new-model"));
+    assert_eq!(meta.client.as_deref(), Some("build"));
     assert!(cat
         .sessions
         .iter()
@@ -85,6 +86,7 @@ fn history_model_comes_from_assistant_messages_not_current_selection() {
         .is_none());
     let detail = read_session_at(&path, "ses_history").unwrap();
     assert_eq!(detail.meta.model, meta.model);
+    assert_eq!(detail.meta.client, meta.client);
     let actual: Vec<_> = detail
         .events
         .iter()

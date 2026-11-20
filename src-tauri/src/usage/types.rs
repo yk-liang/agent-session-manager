@@ -19,7 +19,7 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 impl Tokens {
-    pub(super) fn refine_claude_prompt(&mut self, other: &Self) {
+    pub(super) fn refine_prompt(&mut self, other: &Self, cache_in_input: bool) {
         let uncached = |tokens: &Self| {
             tokens
                 .input_tokens
@@ -30,9 +30,11 @@ impl Tokens {
         self.cache_read_tokens = self.cache_read_tokens.max(other.cache_read_tokens);
         self.cache_write_tokens = self.cache_write_tokens.max(other.cache_write_tokens);
         self.cache_write_1h_tokens = self.cache_write_1h_tokens.max(other.cache_write_1h_tokens);
-        self.input_tokens = input
-            .saturating_add(self.cache_read_tokens)
-            .saturating_add(self.cache_write_tokens);
+        self.input_tokens = if cache_in_input {
+            input.saturating_add(self.cache_read_tokens).saturating_add(self.cache_write_tokens)
+        } else {
+            self.input_tokens.max(other.input_tokens)
+        };
     }
 
     pub fn total(&self) -> u64 {
@@ -71,9 +73,6 @@ pub struct RecordedFields {
     pub input_incomplete: bool,
     #[serde(default)]
     pub output_incomplete: bool,
-    /// 旧账本没有分项可用性，读取时只能保守迁移，不能把未知的零认作实测。
-    #[serde(default)]
-    pub availability_known: bool,
     pub cache_read_recorded: bool,
     pub cache_write_recorded: bool,
     pub reasoning_recorded: bool,
@@ -84,7 +83,6 @@ impl RecordedFields {
         self.output_recorded |= other.output_recorded;
         self.input_incomplete |= other.input_incomplete;
         self.output_incomplete |= other.output_incomplete;
-        self.availability_known |= other.availability_known;
         self.cache_read_recorded |= other.cache_read_recorded;
         self.cache_write_recorded |= other.cache_write_recorded;
         self.reasoning_recorded |= other.reasoning_recorded;
@@ -166,10 +164,7 @@ impl Sample {
             timestamp,
             offset,
             tokens: Tokens::default(),
-            details: RecordedFields {
-                availability_known: true,
-                ..Default::default()
-            },
+            details: RecordedFields::default(),
             request: Default::default(),
             partial: true,
             ordinal: None,
@@ -185,15 +180,7 @@ impl Sample {
         }
     }
 
-    pub fn migrate_availability(&mut self) {
-        if !self.details.availability_known {
-            self.details.input_recorded = self.tokens.input_tokens > 0 || !self.partial;
-            self.details.output_recorded = self.tokens.output_tokens > 0 || !self.partial;
-            self.details.input_incomplete = self.partial;
-            self.details.output_incomplete = self.partial;
-            self.details.availability_known = true;
-        }
-    }
+
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

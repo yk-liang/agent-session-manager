@@ -187,98 +187,6 @@ fn summary_coverage_is_not_marked_when_indexing_fails() {
 }
 
 #[test]
-fn summary_reads_legacy_coverage_without_writing_or_guessing_completeness() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ledger.sqlite");
-    let logs = dir.path().join("logs");
-    write(
-        &logs.join("a.jsonl"),
-        &[record("a", 1_790_000_000_000, 100, 10)],
-    );
-    let mut store = Store::open_with_ledger(None, Some(&path));
-    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
-    store
-        .ledger()
-        .unwrap()
-        .db
-        .execute_batch("DROP TABLE usage_sync_state")
-        .unwrap();
-    drop(store);
-    let mut db = ledger::reader(&path).unwrap();
-    let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
-    assert_eq!(sum(&result), 110);
-    assert!(result.synced_agents.is_empty());
-    assert_eq!(db.total_changes(), 0);
-    drop(db);
-    let mut upgraded = Store::open_with_ledger(None, Some(&path));
-    assert!(read(&mut upgraded, vec![]).synced_agents.is_empty());
-    ingest::sync_at("claude", &[logs], &mut upgraded, &|| false).unwrap();
-    assert_eq!(read(&mut upgraded, vec![]).synced_agents, ["claude"]);
-}
-
-#[test]
-fn summary_upgrades_previous_ledgers_without_deleted_sources_or_losing_events() {
-    for version in [2, 5] {
-        let dir = tempfile::tempdir().unwrap();
-        let logs = dir.path().join("logs");
-        let source = logs.join("a.jsonl");
-        let path = dir.path().join("ledger.sqlite");
-        write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
-        let mut store = Store::open_with_ledger(None, Some(&path));
-        ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
-        let db = &store.ledger().unwrap().db;
-        if version == 2 {
-            db.execute_batch(
-                "DROP INDEX usage_source_dirty; DROP INDEX usage_request_source;
-                 DROP TABLE usage_source_keys;
-                 ALTER TABLE usage_ledger_sources DROP COLUMN dirty;
-                 ALTER TABLE usage_request_events DROP COLUMN source;
-                 PRAGMA user_version=2;",
-            )
-            .unwrap();
-        } else {
-            db.execute_batch(
-                "ALTER TABLE usage_ledger_sources ADD COLUMN health TEXT;
-                 UPDATE usage_ledger_sources SET health='obsolete';
-                 PRAGMA user_version=5;",
-            )
-            .unwrap();
-        }
-        drop(store);
-        fs::remove_file(source).unwrap();
-        let mut upgraded = Store::open_with_ledger(None, Some(&path));
-        ingest::sync_at("claude", &[dir.path().join("logs")], &mut upgraded, &|| {
-            false
-        })
-        .unwrap();
-        let result = read(&mut upgraded, vec![]);
-        assert_eq!(sum(&result), 110);
-        assert_eq!(
-            upgraded
-                .ledger()
-                .unwrap()
-                .db
-                .query_row(
-                    "SELECT count(*) FROM pragma_table_info('usage_ledger_sources') WHERE name='health'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            upgraded
-                .ledger()
-                .unwrap()
-                .db
-                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                .unwrap(),
-            storage::VERSION
-        );
-    }
-}
-
-#[test]
 fn summary_uses_request_time_not_scan_time_and_matches_event_table() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.jsonl");
@@ -497,7 +405,8 @@ fn model_metrics_count_deduped_requests_and_keep_costs_after_deletion() {
     assert_eq!(row.usage.tokens.input_tokens, 1000);
     assert_eq!(row.usage.tokens.cache_read_tokens, 690);
     assert!(!row.metrics.cache_read_incomplete);
-    assert!(!row.metrics.cache_rate_unavailable);
+    assert_eq!(row.metrics.cache_input_tokens, Some(1000));
+    assert_eq!(row.metrics.cache_excluded_count, 0);
     fs::remove_file(source).unwrap();
     let all = read(&mut store, vec![t, t + 10800000]);
     assert_eq!(all.rows[0].metrics.request_count, 3);
@@ -529,8 +438,10 @@ fn model_metrics_keep_missing_cache_distinct_from_zero_and_count_failed_requests
     assert_eq!(row.metrics.request_count, 3);
     assert!(row.usage.details.cache_read_recorded);
     assert!(row.metrics.cache_read_incomplete);
-    assert!(row.metrics.cache_rate_unavailable);
-    assert_eq!(row.metrics.cost_usd, None);
+    assert_eq!(row.metrics.cache_input_tokens, Some(100));
+    assert_eq!(row.metrics.cache_excluded_count, 1);
+    assert_eq!(row.metrics.cost_usd, Some(0.0));
+    assert_eq!(row.metrics.cost_unknown_count, 2);
     assert_eq!(sum(&result), 220);
     assert!(
         !row.usage.details.input_incomplete,
