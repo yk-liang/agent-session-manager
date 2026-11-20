@@ -2,6 +2,7 @@ import { addUsageInitScript } from '../helpers/usage-collector.mjs';
 import { chooseOption, openDropdown } from '../helpers/dropdown.mjs';
 import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { assertTooltipValues } from '../helpers/tooltip.mjs';
+import { assertTripleClickSelects } from '../helpers/selection.mjs';
 import { engine, baseURL, artifactDir } from '../helpers/browser.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -129,6 +130,8 @@ try {
   await sessionId.dblclick();
   assert.ok(await page.evaluate(() => getSelection().toString()), 'session ID text can be selected');
   await page.evaluate(() => getSelection().removeAllRanges());
+  await assertTripleClickSelects(codex.locator('.request-project > small'), '/fixture/codex');
+  await assertTripleClickSelects(sessionId);
   assert.ok((await codex.textContent()).includes('≈ 50.0 t/s'));
   assert.equal(await codex.locator('.request-timing small').textContent(), '400ms · ≈ 2.00s');
   const timing = event => table.locator(`tr[data-event-id=${JSON.stringify(event.id)}] .request-timing small`);
@@ -174,6 +177,7 @@ try {
   assert.equal(await detailValue('客户端').textContent(), '2.1.309');
   assert.equal(await detailValue('父会话').locator('code').textContent(), 'session-one');
   assert.equal(await detailValue('项目').locator('code').textContent(), longProject);
+  await assertTripleClickSelects(detailValue('项目').locator('code'), longProject);
   for (const [label, value] of [['父会话 ID', 'session-one'], ['项目路径', longProject]]) {
     await detail.getByRole('button', { name: `复制${label}` }).click();
     await page.waitForFunction(value => window.__EVENTS__.calls.some(call => call.cmd.includes('clipboard') && call.args.text === value), value);
@@ -288,6 +292,7 @@ try {
   const failureDetail = table.getByRole('region', { name: '错误信息' });
   assert.equal(await detail.locator('dt').first().textContent(), '错误信息');
   assert.equal(await failureDetail.locator('pre').textContent(), failureText);
+  await assertTripleClickSelects(failureDetail.locator('pre'), 'The provider is temporarily unavailable.');
   await failureDetail.getByRole('button', { name: '复制错误信息' }).click();
   await failureDetail.locator('[data-copied="true"]').waitFor();
   assert.ok(await page.evaluate(value => window.__EVENTS__.calls.some(c => c.cmd.includes('clipboard') && c.args.text === value), failureText));

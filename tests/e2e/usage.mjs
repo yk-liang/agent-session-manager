@@ -2,6 +2,7 @@ import { addUsageInitScript } from '../helpers/usage-collector.mjs';
 import { chooseOption } from '../helpers/dropdown.mjs';
 import { chooseAgent } from '../helpers/agent-switcher.mjs';
 import { assertTooltipValues } from '../helpers/tooltip.mjs';
+import { assertTripleClickSelects } from '../helpers/selection.mjs';
 import { engine, baseURL, artifactDir } from "../helpers/browser.mjs";
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
@@ -398,6 +399,10 @@ try {
  }
  await page.setViewportSize({ width: 1280, height: 900 });
  await page.locator('.usage-models').screenshot({ path: path.join(artifactDir, 'usage-models-large.png') });
+ const dimensions = page.getByRole('group', { name: '分组维度' });
+ await dimensions.getByRole('button', { name: '按项目', exact: true }).click();
+ await assertTripleClickSelects(page.locator('.usage-dim-project').filter({ hasText: 'another-project' }).locator('small'));
+ await dimensions.getByRole('button', { name: '按模型', exact: true }).click();
  await page.evaluate(() => {
   const summary = window.__USAGE__.fixture.summaries.today;
   const inputTokens = 141_906_000, outputTokens = 734_000, cacheReadTokens = 138_850_000;
