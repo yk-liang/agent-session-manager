@@ -32,14 +32,13 @@ fn sum(result: &Summary) -> u64 {
 }
 
 #[test]
-fn sync_lock_and_database_open_preserve_failure_details_without_replacing_data() {
+fn sync_lock_and_database_open_reject_invalid_files_without_replacing_them() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ledger.sqlite");
     let lock = path.with_extension("sync.lock");
     std::os::unix::fs::symlink(&lock, &lock).unwrap();
     let error = ledger::SyncLock::acquire(&path, &|| false).err().unwrap();
-    assert!(error.contains("stage: open_sync_lock"));
-    assert!(error.contains(&format!("os_code: {}", libc::ELOOP)));
+    assert!(error.starts_with("无法打开用量同步锁"));
     assert!(fs::symlink_metadata(&lock)
         .unwrap()
         .file_type()
@@ -48,47 +47,43 @@ fn sync_lock_and_database_open_preserve_failure_details_without_replacing_data()
     fs::write(&path, bytes).unwrap();
     for error in [
         ledger::Ledger::open(Some(&path)).err().unwrap(),
-        ledger::reader(&path).err().unwrap(),
+        ledger::reader(&path, &|| false).err().unwrap(),
     ] {
-        assert!(error.contains("stage: ledger_read_version"));
-        assert!(error.contains("error_kind: SQLiteNotADatabase"));
-        assert!(error.contains("sqlite_code: 26"));
-        assert!(error.contains("os_code: none"));
+        assert!(error.starts_with("无法读取用量账本版本"));
         assert!(!error.contains("PRIVATE_DATA"));
     }
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
-fn source_access_failure_keeps_errno_and_saved_usage_then_retries_without_duplicates() {
+fn source_access_failure_keeps_saved_usage_and_retries_without_duplicates() {
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");
     let source = logs.join("aaaa.jsonl");
     let saved = dir.path().join("original.jsonl");
     write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
     let mut store = Store::open(None);
-    summary::sync_at("qoder", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("qoder", &[logs.clone()], &mut store, &|| false).unwrap();
     let before = read(&mut store, vec![]);
     assert_eq!(sum(&before), 110);
     // 文件循环链接能稳定制造真实 I/O 错误，不依赖测试用户是否有特权。
     fs::rename(&source, &saved).unwrap();
     std::os::unix::fs::symlink("aaaa.jsonl", &source).unwrap();
-    let error = summary::sync_at("qoder", &[logs.clone()], &mut store, &|| false)
+    let error = ingest::sync_at("qoder", &[logs.clone()], &mut store, &|| false)
         .err()
         .unwrap();
-    assert!(error.contains("operation: usage_sync"));
-    assert!(error.contains("stage: path_metadata"));
-    assert!(error.contains(&format!("os_code: {}", libc::ELOOP)));
-    assert!(error.contains(&format!(
-        "cause: {}",
-        std::io::Error::from_raw_os_error(libc::ELOOP)
-    )));
-    assert!(error.contains(&format!("pid: {}", std::process::id())));
-    assert!(!error.contains("PRIVATE_BODY"));
+    assert_eq!(
+        error,
+        format!(
+            "无法读取用量来源 {}：{}",
+            source.display(),
+            std::io::Error::from_raw_os_error(libc::ELOOP)
+        )
+    );
     assert_eq!(sum(&read(&mut store, vec![])), 110);
     fs::remove_file(&source).unwrap();
     fs::rename(&saved, &source).unwrap();
-    summary::sync_at("qoder", &[logs], &mut store, &|| false).unwrap();
+    ingest::sync_at("qoder", &[logs], &mut store, &|| false).unwrap();
     let after = read(&mut store, vec![]);
     assert_eq!(sum(&after), sum(&before));
     assert_eq!(
@@ -111,7 +106,7 @@ fn summary_coverage_requires_full_success_and_survives_restart() {
     write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
     let mut store = Store::open_with_ledger(None, Some(&path));
     // 指定文件同步可入账，但不能证明该 Agent 的其余目录已扫描。
-    summary::sync_paths(
+    ingest::sync_paths(
         "claude",
         &[logs.clone()],
         &mut store,
@@ -123,11 +118,11 @@ fn summary_coverage_requires_full_success_and_survives_restart() {
     assert_eq!(sum(&partial), 110);
     assert!(partial.synced_agents.is_empty());
 
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     // 没有日志的来源仍然需要保存完成状态，才能区分「确认 0」和「尚未读到」。
-    summary::sync_at("codex", &[dir.path().join("empty")], &mut store, &|| false).unwrap();
+    ingest::sync_at("codex", &[dir.path().join("empty")], &mut store, &|| false).unwrap();
     drop(store);
-    let mut db = ledger::reader(&path).unwrap();
+    let mut db = ledger::reader(&path, &|| false).unwrap();
     let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
     assert_eq!(result.synced_agents, ["claude", "codex"]);
     assert_eq!(sum(&result), 110);
@@ -150,7 +145,7 @@ fn summary_coverage_requires_full_success_and_survives_restart() {
     );
 
     let mut restarted = Store::open_with_ledger(None, Some(&path));
-    assert!(summary::sync_at("claude", &[logs], &mut restarted, &|| true).is_err());
+    assert!(ingest::sync_at("claude", &[logs], &mut restarted, &|| true).is_err());
     assert_eq!(
         read(&mut restarted, vec![]).synced_agents,
         ["claude", "codex"],
@@ -175,7 +170,7 @@ fn summary_coverage_is_not_marked_when_indexing_fails() {
          BEGIN SELECT RAISE(ABORT,'index write failed'); END;",
         )
         .unwrap();
-    assert!(summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).is_err());
+    assert!(ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).is_err());
     assert!(
         store.ledger().unwrap().updated("claude").is_some(),
         "file ingestion may already be committed"
@@ -187,78 +182,8 @@ fn summary_coverage_is_not_marked_when_indexing_fails() {
         .db
         .execute_batch("DROP TRIGGER fail_index")
         .unwrap();
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     assert_eq!(read(&mut store, vec![]).synced_agents, ["claude"]);
-}
-
-#[test]
-fn summary_reads_legacy_coverage_without_writing_or_guessing_completeness() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ledger.sqlite");
-    let logs = dir.path().join("logs");
-    write(
-        &logs.join("a.jsonl"),
-        &[record("a", 1_790_000_000_000, 100, 10)],
-    );
-    let mut store = Store::open_with_ledger(None, Some(&path));
-    summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
-    store
-        .ledger()
-        .unwrap()
-        .db
-        .execute_batch("DROP TABLE usage_sync_state")
-        .unwrap();
-    drop(store);
-    let mut db = ledger::reader(&path).unwrap();
-    let result = summary::read_at(&mut db, Default::default(), &|| false).unwrap();
-    assert_eq!(sum(&result), 110);
-    assert!(result.synced_agents.is_empty());
-    assert_eq!(db.total_changes(), 0);
-    drop(db);
-    let mut upgraded = Store::open_with_ledger(None, Some(&path));
-    assert!(read(&mut upgraded, vec![]).synced_agents.is_empty());
-    summary::sync_at("claude", &[logs], &mut upgraded, &|| false).unwrap();
-    assert_eq!(read(&mut upgraded, vec![]).synced_agents, ["claude"]);
-}
-
-#[test]
-fn summary_upgrades_v2_without_deleted_sources_or_losing_events() {
-    let dir = tempfile::tempdir().unwrap();
-    let logs = dir.path().join("logs");
-    let source = logs.join("a.jsonl");
-    let path = dir.path().join("ledger.sqlite");
-    write(&source, &[record("a", 1_790_000_000_000, 100, 10)]);
-    let mut store = Store::open_with_ledger(None, Some(&path));
-    summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
-    let db = &store.ledger().unwrap().db;
-    db.execute_batch(
-        "DROP INDEX usage_source_dirty; DROP INDEX usage_request_source;
-        DROP TABLE usage_source_keys;
-        ALTER TABLE usage_ledger_sources DROP COLUMN dirty;
-        ALTER TABLE usage_ledger_sources DROP COLUMN health;
-        ALTER TABLE usage_request_events DROP COLUMN source;
-        PRAGMA user_version=2;",
-    )
-    .unwrap();
-    drop(store);
-    fs::remove_file(source).unwrap();
-    let mut upgraded = Store::open_with_ledger(None, Some(&path));
-    summary::sync_at("claude", &[dir.path().join("logs")], &mut upgraded, &|| {
-        false
-    })
-    .unwrap();
-    let result = read(&mut upgraded, vec![]);
-    assert_eq!(sum(&result), 110);
-    assert!(!result.health["claude"].partial);
-    assert_eq!(
-        upgraded
-            .ledger()
-            .unwrap()
-            .db
-            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-            .unwrap(),
-        storage::VERSION
-    );
 }
 
 #[test]
@@ -280,7 +205,7 @@ fn summary_uses_request_time_not_scan_time_and_matches_event_table() {
         ],
     );
     let mut store = Store::open(None);
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     let result = read(&mut store, vec![t, t + 3600000, t + 7200000]);
     assert_eq!(
         sum(&result),
@@ -324,7 +249,7 @@ fn summary_query_reads_persisted_events_without_reprocessing_source_observations
     let t = 1_790_000_000_000i64;
     write(&p, &[record("a", t, 100, 10)]);
     let mut store = Store::open(None);
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     store
         .ledger()
         .unwrap()
@@ -350,11 +275,11 @@ fn summary_sync_skips_unchanged_history_including_after_restart() {
             .collect::<Vec<_>>(),
     );
     let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-    let first = summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    let first = ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     assert!(first.bytes_read > 0);
     drop(store);
     let mut store = Store::open_with_ledger(Some(&cache), Some(&ledger));
-    let warm = summary::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
+    let warm = ingest::sync_at("claude", &[logs.clone()], &mut store, &|| false).unwrap();
     assert_eq!(
         (warm.checked_files, warm.changed_files, warm.bytes_read),
         (1, 0, 0)
@@ -367,7 +292,7 @@ fn summary_sync_skips_unchanged_history_including_after_restart() {
         .unwrap()
         .write_all(line.as_bytes())
         .unwrap();
-    let added = summary::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
+    let added = ingest::sync_at("claude", &[logs], &mut store, &|| false).unwrap();
     assert_eq!(added.bytes_read, line.len() as u64);
     assert_eq!(sum(&read(&mut store, vec![])), 11220);
 }
@@ -379,7 +304,7 @@ fn summary_deletion_flushes_new_events_without_forcing_full_history_read() {
     let t = 1_790_000_000_000;
     write(&p, &[record("a", t, 100, 10)]);
     let mut store = Store::open(None);
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     writeln!(
         fs::OpenOptions::new().append(true).open(&p).unwrap(),
         "{}",
@@ -408,12 +333,14 @@ fn summary_missing_timestamp_stays_in_all_and_invalid_boundaries_fail() {
     let t = 1_790_000_000_000i64;
     write(&p, &[record("a", 0, 100, 10)]);
     let mut store = Store::open(None);
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     let all = read(&mut store, vec![]);
     assert_eq!(sum(&all), 110);
-    assert!(all.health["claude"].partial);
+    assert_eq!(all.untimed["claude"], 1);
     assert_eq!(all.rows[0].usage.date, "");
-    assert_eq!(sum(&read(&mut store, vec![t, t + 3600000])), 0);
+    let bounded = read(&mut store, vec![t, t + 3600000]);
+    assert_eq!(sum(&bounded), 0);
+    assert_eq!(bounded.untimed["claude"], 1);
     for bounds in [vec![t, t], vec![t + 1, t], vec![t, t + 100, t + 50]] {
         assert!(summary::read_at(
             &mut store.ledger().unwrap().db,
@@ -441,7 +368,7 @@ fn summary_hour_buckets_follow_supplied_dst_and_quarter_hour_timezone_boundaries
                 .collect::<Vec<_>>(),
         );
         let mut store = Store::open(None);
-        summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+        ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
         let bounds = (0..=count).map(|i| t + i * 3600000).collect();
         let result = read(&mut store, bounds);
         assert_eq!(result.rows.len(), count as usize);
@@ -454,36 +381,37 @@ fn model_metrics_count_deduped_requests_and_keep_costs_after_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("a.jsonl");
     let t = 1_790_000_000_000i64;
-    let message = |id, time, input, cached, cost: Option<f64>| json!({"type":"message","id":id,"timestamp":time,"message":{"role":"assistant","provider":"p","model":"m","usage":{"input":input,"output":10,"cacheRead":cached,"cacheWrite":0,"cost":{"total":cost}}}});
-    let first = message("a", t, 10, 90, Some(0.25));
+    let message = |id, time, input, cached| json!({"type":"message","id":id,"timestamp":time,"message":{"role":"assistant","provider":"p","model":"m-free","usage":{"input":input,"output":10,"cacheRead":cached,"cacheWrite":0}}});
+    let first = message("a", t, 10, 90);
     write(
         &source,
         &[
             json!({"type":"session","id":"session"}),
             first.clone(),
             first,
-            message("b", t + 3600000, 300, 600, Some(0.0)),
-            message("c", t + 7200000, 10, 0, None),
+            message("b", t + 3600000, 300, 600),
+            message("c", t + 7200000, 10, 0),
         ],
     );
     let mut store = Store::open(None);
-    summary::sync_at("pi", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("pi", &[dir.path().into()], &mut store, &|| false).unwrap();
     let result = read(&mut store, vec![t, t + 7200000]);
     assert_eq!(result.rows.len(), 1);
     let row = &result.rows[0];
     assert_eq!(row.metrics.request_count, 2);
     assert!(!row.metrics.request_count_incomplete);
-    assert_eq!(row.metrics.cost_usd, Some(0.25));
+    assert_eq!(row.metrics.cost_usd, Some(0.0));
     assert!(!row.metrics.cost_incomplete);
     assert_eq!(row.usage.tokens.input_tokens, 1000);
     assert_eq!(row.usage.tokens.cache_read_tokens, 690);
     assert!(!row.metrics.cache_read_incomplete);
-    assert!(!row.metrics.cache_rate_unavailable);
+    assert_eq!(row.metrics.cache_input_tokens, Some(1000));
+    assert_eq!(row.metrics.cache_excluded_count, 0);
     fs::remove_file(source).unwrap();
     let all = read(&mut store, vec![t, t + 10800000]);
     assert_eq!(all.rows[0].metrics.request_count, 3);
-    assert_eq!(all.rows[0].metrics.cost_usd, Some(0.25));
-    assert!(all.rows[0].metrics.cost_incomplete);
+    assert_eq!(all.rows[0].metrics.cost_usd, Some(0.0));
+    assert!(!all.rows[0].metrics.cost_incomplete);
     assert_eq!(sum(&all), 1040);
 }
 
@@ -503,15 +431,17 @@ fn model_metrics_keep_missing_cache_distinct_from_zero_and_count_failed_requests
     failed["message"]["usage"] = Value::Null;
     write(&dir.path().join("a.jsonl"), &[known, missing, failed]);
     let mut store = Store::open(None);
-    summary::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("claude", &[dir.path().into()], &mut store, &|| false).unwrap();
     let result = read(&mut store, vec![t, t + 100]);
     assert_eq!(result.rows.len(), 1);
     let row = &result.rows[0];
     assert_eq!(row.metrics.request_count, 3);
     assert!(row.usage.details.cache_read_recorded);
     assert!(row.metrics.cache_read_incomplete);
-    assert!(row.metrics.cache_rate_unavailable);
-    assert_eq!(row.metrics.cost_usd, None);
+    assert_eq!(row.metrics.cache_input_tokens, Some(100));
+    assert_eq!(row.metrics.cache_excluded_count, 1);
+    assert_eq!(row.metrics.cost_usd, Some(0.0));
+    assert_eq!(row.metrics.cost_unknown_count, 2);
     assert_eq!(sum(&result), 220);
     assert!(
         !row.usage.details.input_incomplete,
@@ -533,10 +463,11 @@ fn model_metrics_do_not_count_cumulative_deltas_as_single_requests() {
         ],
     );
     let mut store = Store::open(None);
-    summary::sync_at("codex", &[dir.path().into()], &mut store, &|| false).unwrap();
+    ingest::sync_at("codex", &[dir.path().into()], &mut store, &|| false).unwrap();
     let result = read(&mut store, vec![]);
     assert_eq!(sum(&result), 110);
     assert_eq!(result.rows[0].metrics.request_count, 0);
+    assert_eq!(result.rows[0].record_count, 1);
     assert!(result.rows[0].metrics.request_count_incomplete);
 }
 
@@ -577,7 +508,7 @@ fn export_usage_summary_fixture_if_requested() {
     );
     let mut store = Store::open(None);
     for agent in ["claude", "codex"] {
-        summary::sync_at(agent, &[dir.path().join(agent)], &mut store, &|| false).unwrap();
+        ingest::sync_at(agent, &[dir.path().join(agent)], &mut store, &|| false).unwrap();
     }
     let end = midnight(today.succ_opt().unwrap());
     let hour_bounds = (start..end)

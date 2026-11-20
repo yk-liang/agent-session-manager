@@ -26,13 +26,13 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
             "m3",
             "ses_history",
             3000,
-            json!({"role":"assistant","providerID":"provider-b","modelID":"new-model"}),
+            json!({"role":"assistant","providerID":"provider-b","modelID":"new-model","mode":"plan"}),
         ),
         (
             "m4",
             "ses_history",
             3000,
-            json!({"role":"assistant","providerID":"provider-c","modelID":"new-model"}),
+            json!({"role":"assistant","providerID":"provider-c","modelID":"new-model","agent":"build"}),
         ),
         (
             "m5",
@@ -76,7 +76,7 @@ fn history_model_comes_from_assistant_messages_not_current_selection() {
         .find(|m| m.session_id == "ses_history")
         .unwrap();
     assert_eq!(meta.model.as_deref(), Some("provider-c/new-model"));
-    assert_eq!(meta.model_name.as_deref(), Some("new-model"));
+    assert_eq!(meta.client.as_deref(), Some("build"));
     assert!(cat
         .sessions
         .iter()
@@ -86,6 +86,7 @@ fn history_model_comes_from_assistant_messages_not_current_selection() {
         .is_none());
     let detail = read_session_at(&path, "ses_history").unwrap();
     assert_eq!(detail.meta.model, meta.model);
+    assert_eq!(detail.meta.client, meta.client);
     let actual: Vec<_> = detail
         .events
         .iter()
@@ -150,26 +151,6 @@ fn a_new_assistant_model_in_wal_updates_cached_list_and_detail() {
 }
 
 #[test]
-fn readable_names_decorate_the_correct_historical_provider_only() {
-    let (_dir, path) = fixture();
-    let mut detail = read_session_at(&path, "ses_history").unwrap();
-    let names = super::models::Names::from([
-        ("provider-b/new-model".into(), "Provider B label".into()),
-        ("provider-c/new-model".into(), "Provider C label".into()),
-    ]);
-    super::models::decorate_detail(&mut detail, &names);
-    assert_eq!(detail.meta.model_name.as_deref(), Some("Provider C label"));
-    let messages: Vec<_> = detail
-        .events
-        .iter()
-        .filter(|e| e["type"] == "assistant")
-        .collect();
-    assert_eq!(messages[0]["message"]["modelName"], "old-model");
-    assert_eq!(messages[1]["message"]["modelName"], "Provider B label");
-    assert_eq!(messages[2]["message"]["modelName"], "Provider C label");
-}
-
-#[test]
 fn real_session_models_match_saved_assistant_ids_if_present() {
     let path = db_path();
     if !path.is_file() {
@@ -185,7 +166,6 @@ fn real_session_models_match_saved_assistant_ids_if_present() {
         if let Some((provider, model)) = actual {
             let id = provider.map(|p| format!("{p}/{model}")).unwrap_or(model);
             assert_eq!(meta.model.as_deref(), Some(id.as_str()));
-            assert!(meta.model_name.is_some());
             recognized += 1;
         }
     }

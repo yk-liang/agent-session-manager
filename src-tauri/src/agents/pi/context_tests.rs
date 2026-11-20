@@ -24,11 +24,11 @@ fn context_visibility_pi_tree_summaries_and_extensions() {
     )
     .unwrap();
     let before = fs::read(&file).unwrap();
-    let (summary, warnings) = parse_pi_session(&file, false).split();
+    let (summary, warnings) = parse(&file, false).split();
     assert!(warnings.is_empty());
     let summary = summary.unwrap();
-    assert_eq!(summary.real_user_count, 2);
-    assert_eq!(summary.assistant_text_count, 1);
+    assert_eq!(summary.meta.real_user_count, 2);
+    assert_eq!(summary.meta.assistant_text_count, 1);
     let detail = read_session_in(dir.path(), "project", "pi-context").unwrap();
     assert_eq!(
         detail
@@ -62,11 +62,11 @@ fn context_visibility_actual_pi_log_if_requested() {
     };
     let path = Path::new(&file);
     let before = fs::read(path).unwrap();
-    let (parsed, warnings) = parse_pi_session(path, true).split();
+    let (parsed, warnings) = parse(path, true).split();
     assert!(warnings.is_empty());
     let parsed = parsed.unwrap();
-    assert_eq!(parsed.real_user_count, 1);
-    assert_eq!(parsed.assistant_text_count, 1);
+    assert_eq!(parsed.meta.real_user_count, 1);
+    assert_eq!(parsed.meta.assistant_text_count, 1);
     assert!(parsed
         .events
         .iter()
@@ -77,7 +77,7 @@ fn context_visibility_actual_pi_log_if_requested() {
         .any(|e| e["context"]["kind"] == "compaction"));
     assert_eq!(fs::read(path).unwrap(), before);
     let detail = SessionDetail {
-        meta: to_meta(&parsed),
+        meta: parsed.meta,
         events: parsed.events,
         warnings: vec![],
     };

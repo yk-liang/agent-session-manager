@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-fn normalized(path: &Path) -> PathBuf {
+pub(crate) fn normalized(path: &Path) -> PathBuf {
     // macOS 日志可能记录 /private 下的真实路径，也可能记录 /var 或 /tmp 别名。
     if path.starts_with("/private/var") || path.starts_with("/private/tmp") {
         return Path::new("/").join(path.strip_prefix("/private").unwrap());

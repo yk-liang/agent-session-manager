@@ -34,7 +34,7 @@ pub fn verify_within_root(
         .symlink_metadata()
         .map_err(|e| format!("无法读取目标 {:?}: {e}", target))?;
     if meta.file_type().is_symlink() {
-        return Err(format!("拒绝删除符号链接: {:?}", target));
+        return Err(format!("拒绝删除符号链接：{:?}", target));
     }
     let root_c = root
         .canonicalize()
@@ -43,17 +43,17 @@ pub fn verify_within_root(
         .canonicalize()
         .map_err(|e| format!("无法解析目标路径 {:?}: {e}", target))?;
     if !target_c.starts_with(&root_c) {
-        return Err(format!("目标路径越出数据根目录: {:?}", target_c));
+        return Err(format!("目标路径越出数据根目录：{:?}", target_c));
     }
     let m = target_c
         .metadata()
         .map_err(|e| format!("无法读取目标 {:?}: {e}", target_c))?;
     match kind {
         TargetKind::Dir if !m.is_dir() => {
-            return Err(format!("目标应为目录，实际不是: {:?}", target_c));
+            return Err(format!("目标应为目录，实际不是：{:?}", target_c));
         }
         TargetKind::File if !m.is_file() => {
-            return Err(format!("目标应为普通文件，实际不是: {:?}", target_c));
+            return Err(format!("目标应为普通文件，实际不是：{:?}", target_c));
         }
         _ => {}
     }

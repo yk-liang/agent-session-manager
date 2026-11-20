@@ -1,12 +1,12 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import UiIcon from "./UiIcon";
+import useDismiss from "./useDismiss";
 
 interface Props {
   label: string;
   children: React.ReactNode;
   above?: boolean;
-  align?: "start" | "end";
 }
 
 /** 悬浮或聚焦时预览，点击后保留；Escape 和外部点击关闭。 */
@@ -14,36 +14,42 @@ export default function HelpTip({
   label,
   children,
   above = false,
-  align = "start",
 }: Props) {
   const [open, setOpen] = useState(false);
   const pinned = useRef(false);
   const root = useRef<HTMLSpanElement>(null);
+  const popover = useRef<HTMLSpanElement>(null);
   const id = useId();
 
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = () => {
-      pinned.current = false;
-      setOpen(false);
+  useLayoutEffect(() => {
+    const trigger = root.current;
+    const panel = popover.current;
+    if (!open || !trigger || !panel) return;
+    const place = () => {
+      panel.style.removeProperty("--help-offset");
+      panel.classList.toggle("above", above);
+      const anchor = trigger.getBoundingClientRect();
+      const bounds = panel.getBoundingClientRect();
+      const roomAbove = anchor.top - 8;
+      const roomBelow = window.innerHeight - anchor.bottom - 8;
+      const fitsPreferred = bounds.height <= (above ? roomAbove : roomBelow);
+      panel.classList.toggle("above", fitsPreferred ? above : roomAbove > roomBelow);
+      const correction = Math.max(8, Math.min(bounds.left, window.innerWidth - bounds.width - 8)) - bounds.left;
+      panel.style.setProperty("--help-offset", `${correction}px`);
     };
-    const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) dismiss();
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        dismiss();
-      }
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape, true);
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
     return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape, true);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
     };
-  }, [open]);
+  }, [above, open]);
+
+  useDismiss(open, [root], () => {
+    pinned.current = false;
+    setOpen(false);
+  });
 
   return (
     <span
@@ -56,7 +62,7 @@ export default function HelpTip({
     >
       <button
         type="button"
-        className="help-button"
+        className="help-button btn-icon btn-ghost"
         aria-label={`${label}说明`}
         aria-expanded={open}
         aria-describedby={open ? id : undefined}
@@ -71,13 +77,14 @@ export default function HelpTip({
           setOpen(pinned.current);
         }}
       >
-        <UiIcon icon={CircleHelp} className="help-symbol" />
+        <UiIcon icon={CircleHelp} />
       </button>
       {open && (
         <span
+          ref={popover}
           id={id}
           role="tooltip"
-          className={`help-popover${above ? " above" : ""}${align === "end" ? " align-end" : ""}`}
+          className="help-popover"
         >
           {children}
         </span>

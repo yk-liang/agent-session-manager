@@ -3,6 +3,7 @@ mod context;
 pub(crate) mod diagnostics;
 #[cfg(test)]
 mod context_test_support;
+pub(crate) mod antigravity;
 pub mod claude;
 pub mod claude_family;
 pub mod codex;
@@ -14,7 +15,7 @@ pub mod qoder;
 pub mod safety;
 pub mod scanning;
 pub mod search;
-mod workspace_groups;
+pub(crate) mod workspace_groups;
 
 pub use ids::escape_path_id;
 pub use safety::{present, verify_within_root, TargetKind};
@@ -23,7 +24,7 @@ pub use scanning::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 展开路径开头的 ~（用于环境变量覆盖值）
 pub fn expand_tilde(p: &str) -> std::path::PathBuf {
@@ -41,31 +42,15 @@ pub fn ms_to_iso(ms: i64) -> Option<String> {
     if ms <= 0 {
         return None;
     }
-    let secs = ms / 1000;
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // Howard Hinnant 的 civil-from-days 算法
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 {
-        yoe + era * 400 + 1
-    } else {
-        yoe + era * 400
-    };
-    Some(format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, mo, d, h, m, s
-    ))
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|ts| ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+pub(super) fn timestamp(value: Option<&str>) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value?).ok()
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub session_id: String,
@@ -74,10 +59,9 @@ pub struct SessionMeta {
     pub title: Option<String>,
     /// 会话记录中的模型标识；Qoder 取最后一次运行配置，不以全局默认模型覆盖。
     pub model: Option<String>,
-    /// 数据源确认的可读名称；缺失时由界面显示原始标识。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
     pub first_ts: Option<String>,
@@ -88,8 +72,11 @@ pub struct SessionMeta {
     pub real_user_count: u32,
     /// 含正文文本的 assistant 消息数（排除纯工具调用/思考事件）
     pub assistant_text_count: u32,
-    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     pub has_transcript: bool,
+    #[serde(default)]
+    pub archived: bool,
     /// 首屏仅有文件头时尚无精确计数；后台摘要完成后清除。
     #[serde(default)]
     pub stats_pending: bool,
@@ -98,7 +85,7 @@ pub struct SessionMeta {
     pub source_files: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub dir_name: String,
@@ -117,8 +104,8 @@ pub struct SessionDetail {
     pub warnings: Vec<String>,
 }
 
-/// 一次扫描得到的完整目录：项目分组 + 全部会话 + 扫描告警
-#[derive(Serialize, Clone)]
+/// 会话目录快照，包含项目分组、会话摘要和读取告警。
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub projects: Vec<Project>,
@@ -133,7 +120,7 @@ pub struct Catalog {
     pub session_group_hints: Vec<SessionGroupHint>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionGroupHint {
     pub project_dir: String,
@@ -141,44 +128,44 @@ pub struct SessionGroupHint {
     pub root: Option<String>,
 }
 
-/// 会话删除的落地方式，决定 UI 措辞与可恢复性
+/// 会话删除策略，决定可用操作和恢复方式。
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DeletePolicy {
-    /// 移入系统回收站，可还原
+    /// 移入系统废纸篓，可还原
     Trash,
     /// 永久删除（如委托官方 CLI 直接改库），不可还原
     Permanent,
+    ReadOnly,
 }
 
 /// 把 (会话, 项目展示路径) 列表聚合成 Catalog：
 /// 按 project_dir 分组出项目统计，两组结果各按最近活跃时间排序。
 pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
-    let mut groups: std::collections::BTreeMap<String, (String, Vec<SessionMeta>)> =
-        std::collections::BTreeMap::new();
+    let mut groups = std::collections::BTreeMap::<String, Project>::new();
     let mut sessions = Vec::with_capacity(items.len());
-    for (meta, display) in items {
-        groups
+    for (meta, display_path) in items {
+        let project = groups
             .entry(meta.project_dir.clone())
-            .or_insert((display, Vec::new()))
-            .1
-            .push(meta.clone());
+            .or_insert_with(|| Project {
+                dir_name: meta.project_dir.clone(),
+                display_path,
+                session_count: 0,
+                last_activity: None,
+            });
+        project.session_count += 1;
+        if timestamp(meta.last_ts.as_deref()) > timestamp(project.last_activity.as_deref()) {
+            project.last_activity = meta.last_ts.clone();
+        }
         sessions.push(meta);
     }
-    let mut projects: Vec<Project> = groups
-        .into_iter()
-        .map(|(dir_name, (display_path, ms))| {
-            let last_activity = ms.iter().filter_map(|s| s.last_ts.clone()).max();
-            Project {
-                session_count: ms.len(),
-                last_activity,
-                dir_name,
-                display_path,
-            }
-        })
-        .collect();
-    projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    let mut projects: Vec<_> = groups.into_values().collect();
+    projects.sort_by_cached_key(|project| std::cmp::Reverse(timestamp(project.last_activity.as_deref())));
+    sessions.sort_by_cached_key(|session| (
+        std::cmp::Reverse(timestamp(session.last_ts.as_deref())),
+        session.project_dir.clone(),
+        session.session_id.clone(),
+    ));
     let mut catalog = Catalog {
         projects,
         sessions,
@@ -205,12 +192,13 @@ pub struct AgentInfo {
     pub display_name: String,
     pub installed: bool,
     pub supports_fork: bool,
-    /// 此数据源可在列表出现后补全/刷新模型名称。
-    pub supports_model_names: bool,
-    pub supports_fast_catalog: bool,
-    /// 该 agent 的数据目录（用于「打开数据目录」）
+    pub supports_archive: bool,
+    pub supports_archived_sessions: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_entrypoint: Option<&'static str>,
+    /// 该 Agent 的数据目录（用于「打开数据目录」）
     pub data_dir: Option<String>,
-    /// 删除会话的落地方式（回收站 / 永久删除）
+    /// 会话删除策略。
     pub delete_policy: DeletePolicy,
 }
 
@@ -235,52 +223,72 @@ impl AgentWatchPaths {
     }
 }
 
+pub type CatalogRefinement = Box<dyn FnOnce(&dyn Fn() -> bool) -> Result<Catalog, String> + Send>;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CatalogFilter {
+    pub include_empty: bool,
+    pub include_archived: bool,
+}
+
+pub fn check_catalog_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    if cancelled() {
+        Err("目录更新已取消".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// 一个 CLI agent 的会话数据源。
 /// 会话列表/详情统一为 agent 无关的模型；恢复命令等差异由各实现提供。
 pub trait AgentSource: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
-    /// 本机是否存在该 agent 的数据目录
+    /// 本机是否存在该 Agent 的数据目录
     fn is_installed(&self) -> bool;
     fn supports_fork(&self) -> bool {
         false
     }
-    fn supports_model_names(&self) -> bool {
+    fn supports_archive(&self) -> bool {
         false
     }
-    /// 删除会话的落地方式；默认移入回收站
+    fn supports_archived_sessions(&self) -> bool {
+        self.supports_archive()
+    }
+    fn resume_entrypoint(&self) -> Option<&'static str> {
+        None
+    }
+    /// 会话删除策略，默认移入废纸篓。
     fn delete_policy(&self) -> DeletePolicy {
         DeletePolicy::Trash
     }
     /// 数据目录（会话存储的根）
     fn data_dir(&self) -> Option<PathBuf>;
-    /// usage 可包含归档、子代理及压缩日志；默认不猜测任何数据目录布局。
-    fn watch_paths(&self, _usage: bool) -> AgentWatchPaths {
+    fn watch_locations(&self) -> Vec<(PathBuf, AgentWatchPaths)> {
+        self.data_dir().into_iter().map(|root| (root, self.watch_paths())).collect()
+    }
+    /// 返回会话列表需要监听的路径。
+    fn watch_paths(&self) -> AgentWatchPaths {
         AgentWatchPaths::default()
     }
-    /// 一次扫描返回项目分组、全部会话与扫描告警（避免重复遍历历史数据）
-    fn catalog(&self, include_empty: bool) -> Result<Catalog, String>;
-    /// 默认数据源保持原行为；大日志数据源可先提供轻量目录。
-    fn quick_catalog(&self, include_empty: bool) -> Result<Catalog, String> {
-        self.catalog(include_empty)
+    #[allow(dead_code)] // Standalone catalog inspection examples.
+    fn catalog(&self, include_empty: bool) -> Result<Catalog, String> {
+        self.scan_catalog(CatalogFilter { include_empty, ..Default::default() }, &|| false)
     }
-    fn supports_fast_catalog(&self) -> bool {
-        false
-    }
-    /// 精确目录更新；支持增量检查的数据源可在读取各文件前响应取消。
-    fn refine_catalog(
+    fn scan_catalog(
         &self,
-        include_empty: bool,
+        filter: CatalogFilter,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<Catalog, String> {
-        if cancelled() {
-            return Err("目录更新已取消".into());
-        }
-        let catalog = self.catalog(include_empty)?;
-        if cancelled() {
-            return Err("目录更新已取消".into());
-        }
-        Ok(catalog)
+    ) -> Result<Catalog, String>;
+    fn prepare_catalog(
+        &self,
+        filter: CatalogFilter,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Catalog, Option<CatalogRefinement>), String> {
+        check_catalog_cancelled(cancelled)?;
+        let catalog = self.scan_catalog(filter, cancelled)?;
+        check_catalog_cancelled(cancelled)?;
+        Ok((catalog, None))
     }
     /// None 表示不识别此令牌；识别后的失效/校验失败必须原样返回，不尝试其他数据源。
     fn read_tool_payload(&self, _token: &str) -> Option<Result<serde_json::Value, String>> {
@@ -293,17 +301,18 @@ pub trait AgentSource: Send + Sync {
     ) -> Result<SessionDetail, String> {
         self.read_session(project_dir, session_id)
     }
-    /// 可选的外部模型名称补全。与目录扫描分开调用，不阻塞会话列表。
-    fn resolve_model_names(&self, _ids: &[String]) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
-    }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String>;
     /// 使用目录扫描时确认的定位信息读取正文，避免逐会话重新遍历全部数据目录。
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<serde_json::Value>, String> {
         self.read_session(&meta.project_dir, &meta.session_id)
             .map(|detail| detail.events)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String>;
+    fn delete_session(&self, _project_dir: &str, _session_id: &str) -> Result<(), String> {
+        Err("该 Agent 的会话为只读".into())
+    }
+    fn set_session_archived(&self, _: &str, _: &str, _: bool) -> Result<(), String> {
+        Err("该 Agent 不支持归档会话".into())
+    }
     /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
     /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
     fn deletion_targets(
@@ -313,9 +322,9 @@ pub trait AgentSource: Send + Sync {
     ) -> Result<Option<Vec<PathBuf>>, String> {
         Ok(None)
     }
-    /// 生成恢复会话的 shell 命令；None 表示该 agent 不支持恢复
+    /// 生成恢复会话的 shell 命令；None 表示该 Agent 不支持恢复
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String>;
-    /// 该 agent 的配置文件集合（用于配置快照）。
+    /// 该 Agent 的配置文件集合（用于配置快照）。
     /// 空 = 不支持配置快照；凭证/密钥文件一律不纳入。
     fn config_spec(&self) -> Vec<ConfigFile> {
         Vec::new()
@@ -329,6 +338,7 @@ pub fn all_sources() -> Vec<Box<dyn AgentSource>> {
         Box::new(codex::CodexSource),
         Box::new(opencode::OpenCodeSource),
         Box::new(pi::PiSource),
+        Box::new(antigravity::AntigravitySource),
     ]
 }
 
@@ -336,7 +346,7 @@ pub fn find_source(id: &str) -> Result<Box<dyn AgentSource>, String> {
     all_sources()
         .into_iter()
         .find(|s| s.id() == id)
-        .ok_or_else(|| format!("未知的 agent: {id}"))
+        .ok_or_else(|| format!("未知 Agent：{id}"))
 }
 
 /// 只接受 Agent 身份，由同一个 Adapter 解析数据根，避免前端传任意打开路径。
@@ -360,7 +370,7 @@ fn existing_directory(path: PathBuf) -> Result<PathBuf, String> {
         .metadata()
         .map_err(|error| format!("无法读取数据目录信息：{error}"))?;
     if !metadata.is_dir() {
-        return Err(format!("数据目录路径不是文件夹：{}", path.display()));
+        return Err(format!("数据目录路径无效（需要文件夹）：{}", path.display()));
     }
     Ok(resolved)
 }
@@ -381,8 +391,9 @@ pub fn list_agents() -> Vec<AgentInfo> {
             display_name: s.display_name().to_string(),
             installed: s.is_installed(),
             supports_fork: s.supports_fork(),
-            supports_model_names: s.supports_model_names(),
-            supports_fast_catalog: s.supports_fast_catalog(),
+            supports_archive: s.supports_archive(),
+            supports_archived_sessions: s.supports_archived_sessions(),
+            resume_entrypoint: s.resume_entrypoint(),
             data_dir: s.data_dir().map(|p| p.to_string_lossy().to_string()),
             delete_policy: s.delete_policy(),
         })
@@ -401,7 +412,6 @@ pub fn shell_quote(s: &str) -> String {
 /// 补充常见安装目录，逐个查实际存在且带执行位的文件，返回首个
 /// 命中；找不到返回 None（调用方须显式报错，绝不静默降级）。
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let mut dirs: Vec<PathBuf> = Vec::new();
     // 1) 继承的 PATH（终端/dev 启动时已足够；空路径段跳过）
     if let Ok(path) = std::env::var("PATH") {
@@ -422,34 +432,35 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
             dirs.push(home.join(sub));
         }
     }
-    for dir in dirs {
-        let candidate = dir.join(name);
-        // metadata 跟随符号链接（Homebrew 的 bin 多为软链接），
-        // 只接受带执行位的普通文件
-        if let Ok(meta) = candidate.metadata() {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    dirs.into_iter()
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// 在新终端窗口中执行命令（仅 macOS，通过 osascript 驱动 Terminal）
 #[cfg(target_os = "macos")]
 pub fn run_in_terminal(cmd: &str) -> Result<(), String> {
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-        cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    let script = concat!(
+        "on run argv\n",
+        "tell application \"Terminal\"\n",
+        "activate\n",
+        "do script (item 1 of argv)\n",
+        "end tell\n",
+        "end run"
     );
     let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
+        .args(["-e", script, "--", cmd])
         .output()
-        .map_err(|e| format!("调用 osascript 失败: {e}"))?;
+        .map_err(|e| format!("调用 osascript 失败：{e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "打开终端失败: {}",
+            "打开终端失败：{}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -499,9 +510,9 @@ mod tests {
         );
         let file = fixture.path().join("config.json");
         std::fs::write(&file, "{}").unwrap();
-        assert!(existing_directory(file.clone()).unwrap_err().contains("不是文件夹"));
+        assert!(existing_directory(file.clone()).unwrap_err().contains("需要文件夹"));
         for value in ["unknown", "/tmp", "../codex", file.to_str().unwrap()] {
-            assert!(data_directory(value).unwrap_err().contains("未知的 agent"));
+            assert!(data_directory(value).unwrap_err().contains("未知 Agent"));
         }
     }
 
@@ -519,7 +530,7 @@ mod tests {
         fn data_dir(&self) -> Option<PathBuf> {
             None
         }
-        fn catalog(&self, _: bool) -> Result<Catalog, String> {
+        fn scan_catalog(&self, _: CatalogFilter, _: &dyn Fn() -> bool) -> Result<Catalog, String> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(assemble_catalog(vec![]))
         }
@@ -535,19 +546,32 @@ mod tests {
     }
 
     #[test]
-    fn refinement_defaults_honor_cancellation_without_agent_specific_dispatch() {
+    fn delete_semantics_per_agent() {
+        for source in all_sources() {
+            let expected = match source.id() {
+                "codex" | "opencode" => DeletePolicy::Permanent,
+                "antigravity" => DeletePolicy::ReadOnly,
+                _ => DeletePolicy::Trash,
+            };
+            assert_eq!(source.delete_policy(), expected, "{}", source.id());
+        }
+    }
+
+    #[test]
+    fn catalog_preparation_honors_cancellation_without_agent_specific_dispatch() {
         use std::sync::atomic::Ordering;
         let source = FixtureSource(Default::default());
-        assert!(source.refine_catalog(false, &|| true).is_err());
+        let filter = CatalogFilter::default();
+        assert!(source.prepare_catalog(filter, &|| true).is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 0);
         assert!(source
-            .refine_catalog(false, &|| source.0.load(Ordering::SeqCst) > 0)
+            .prepare_catalog(filter, &|| source.0.load(Ordering::SeqCst) > 0)
             .is_err());
         assert_eq!(source.0.load(Ordering::SeqCst), 1);
-        assert!(source.refine_catalog(false, &|| false).is_ok());
+        assert!(source.prepare_catalog(filter, &|| false).is_ok());
         assert!(source.read_tool_payload("anything").is_none());
-        assert!(source.watch_paths(false).transcript_dirs.is_empty());
-        assert!(codex::CodexSource.refine_catalog(false, &|| true).is_err());
+        assert!(source.watch_paths().transcript_dirs.is_empty());
+        assert!(codex::CodexSource.prepare_catalog(filter, &|| true).is_err());
     }
 
     #[test]

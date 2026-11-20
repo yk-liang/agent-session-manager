@@ -1,8 +1,10 @@
 //! 同一逻辑会话的分页日志：解析历史引用与有效前缀，统一供列表、详情、搜索使用。
 use super::*;
+use crate::agents::{catalog_cache::FileCache, check_catalog_cancelled};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::OnceLock;
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 pub(super) struct HistoryBase {
@@ -46,14 +48,31 @@ impl EventDedup {
     }
 }
 
-pub(super) fn headers(paths: Vec<PathBuf>, warnings: &mut Vec<String>) -> Vec<Page> {
+pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<String>), String> {
+    static HEADERS: OnceLock<FileCache<(Option<ParsedRollout>, Vec<String>)>> = OnceLock::new();
+    HEADERS.get_or_init(|| FileCache::new(4096)).load(
+        "codex-header",
+        std::slice::from_ref(path),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
+        |(header, warnings)| header.is_some() && warnings.is_empty(),
+    )
+}
+
+pub(super) fn read_headers(
+    paths: &[PathBuf],
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Page>, String> {
     let mut pages = Vec::new();
     for path in paths {
-        let (header, ws) =
-            read_rollout(&path, ReadMode::Header, ReadLimit::default(), None).split();
+        check_catalog_cancelled(cancelled)?;
+        let (header, ws) = read_header(path)?;
         warnings.extend(ws);
         if let Some(header) = header {
-            pages.push(Page { path, header });
+            pages.push(Page {
+                path: path.clone(),
+                header,
+            });
         }
     }
     let by_path: HashMap<_, _> = pages
@@ -74,20 +93,20 @@ pub(super) fn headers(paths: Vec<PathBuf>, warnings: &mut Vec<String>) -> Vec<Pa
             }
         }
     }
-    pages.retain(|page| is_relevant_session(&page.header) && !compressed_copies.contains(&page.path));
+    pages.retain(|page| {
+        is_relevant_session(&page.header) && !compressed_copies.contains(&page.path)
+    });
     pages.sort_by(|a, b| {
-        a.header
-            .created_ts
-            .cmp(&b.header.created_ts)
+        super::super::timestamp(a.header.created_ts.as_deref())
+            .cmp(&super::super::timestamp(b.header.created_ts.as_deref()))
             .then(a.path.cmp(&b.path))
     });
-    pages
+    Ok(pages)
 }
 
-pub(super) fn scan(root: &Path, warnings: &mut Vec<String>) -> BTreeMap<String, Vec<Page>> {
-    let paths = all_rollouts_in(root, warnings);
+pub(super) fn group_pages(pages: Vec<Page>) -> BTreeMap<String, Vec<Page>> {
     let mut groups: BTreeMap<String, Vec<Page>> = BTreeMap::new();
-    for page in headers(paths, warnings) {
+    for page in pages {
         groups
             .entry(page.header.session_id.clone())
             .or_default()
@@ -199,7 +218,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
     let mut meta = to_meta(&latest.header, None);
     meta.first_ts = None;
     meta.last_ts = None;
-    meta.size_bytes = pages.iter().map(|p| p.header.size_bytes).sum();
+    meta.size_bytes = Some(pages.iter().map(|p| p.header.size_bytes).sum());
     meta.source_files = pages.iter().map(|p| p.path.clone()).collect();
     let mut events = Vec::new();
     let mut dedup = EventDedup::default();
@@ -222,21 +241,30 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         )
         .split();
         warnings.extend(ws);
-        let Some(p) = parsed else { continue };
+        let Some(mut p) = parsed else { continue };
         if p.session_id != meta.session_id || !is_relevant_session(&p) {
             return Err("会话来源已变化，请刷新后重试".into());
         }
         dedup.commit_page();
-        if p.first_ts.is_some() && (meta.first_ts.is_none() || p.first_ts < meta.first_ts) {
+        let first = super::super::timestamp(p.first_ts.as_deref());
+        let previous = super::super::timestamp(meta.first_ts.as_deref());
+        if first.is_some() && (previous.is_none() || first < previous) {
             meta.first_ts = p.first_ts;
         }
-        if p.last_ts > meta.last_ts {
+        if super::super::timestamp(p.last_ts.as_deref()) > super::super::timestamp(meta.last_ts.as_deref()) {
             meta.last_ts = p.last_ts;
         }
         if meta.title.is_none() {
             meta.title = p.first_user_text;
         }
         // 只沿有效分页前缀推进模型；新页未重复写模型时继续保留父历史的已知值。
+        if let Some(model) = &meta.model {
+            for event in &mut p.events {
+                if event["type"] == "assistant" && event["message"]["model"].is_null() {
+                    event["message"]["model"] = serde_json::json!(model);
+                }
+            }
+        }
         if p.model.is_some() {
             meta.model = p.model;
         }

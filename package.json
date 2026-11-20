@@ -12,6 +12,7 @@
     "dmg:background": "swift scripts/generate-dmg-background.swift src-tauri/dmg/background.png",
     "package:dmg": "node scripts/package-dmg.mjs",
     "docs:screenshots": "node scripts/readme-screenshots.mjs",
+    "docs:hero": "node scripts/generate-readme-hero.mjs",
     "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
     "test:rust": "cd src-tauri && cargo test --offline --locked -- --test-threads=1",
     "test:e2e": "node tests/run.mjs e2e",
@@ -19,6 +20,7 @@
     "test:manual": "node tests/run.mjs manual"
   },
   "dependencies": {
+    "@lobehub/icons-static-svg": "1.104.0",
     "@tanstack/react-virtual": "^3.14.21",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.3",

@@ -1,6 +1,25 @@
 //! 保留消息、分段顺序；用户多段正文合并为一条指令，助手分段独立供虚拟列表渲染。
 use super::*;
 
+fn error_text(error: &Value) -> Option<&str> {
+    [error, &error["message"], &error["data"]["message"], &error["type"], &error["name"], &error["kind"]]
+        .into_iter().filter_map(Value::as_str).find(|text| !text.trim().is_empty())
+}
+
+fn with_error(error: &str, output: Option<&Value>) -> Value {
+    match output {
+        Some(Value::Array(parts)) => {
+            let mut result = Vec::with_capacity(parts.len() + 1);
+            result.push(json!({"type":"text","text":error}));
+            result.extend(parts.iter().cloned());
+            json!(result)
+        }
+        Some(Value::String(text)) if !text.is_empty() && text != error => json!(format!("{error}\n\n{text}")),
+        Some(value) if !value.is_string() => json!([{"type":"text","text":error}, value]),
+        _ => json!(error),
+    }
+}
+
 pub(super) fn tool_blocks(
     part: &Value,
     identity: &str,
@@ -15,6 +34,13 @@ pub(super) fn tool_blocks(
     };
     let mut call = json!({"type":"tool_use", "id":identity,
         "name":part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?")});
+    if let Some(description) = state
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+    {
+        call["description"] = json!(description);
+    }
     if include_content {
         call["input"] = state
             .get("input")
@@ -27,23 +53,16 @@ pub(super) fn tool_blocks(
     }
     let failed = status == Some("error") || state.get("error").is_some_and(|v| !v.is_null());
     // 有输出不代表已经完成：运行状态单独保留，pending/running 不伪造成功结果。
-    let output = if failed {
-        state
-            .get("error")
-            .or_else(|| state.get("output"))
-            .or_else(|| state.get("content"))
-    } else {
-        state
-            .get("output")
-            .filter(|v| !v.is_null())
-            .or_else(|| state.get("content"))
-    };
-    let result = if matches!(status, Some("completed" | "error"))
-        || output.is_some_and(|v| !v.is_null())
-    {
+    let output = (if failed { ["content", "output"] } else { ["output", "content"] })
+        .into_iter().find_map(|key| state.get(key).filter(|value| !value.is_null()));
+    let result = if matches!(status, Some("completed" | "error")) || output.is_some() || failed {
         let mut result = json!({"type":"tool_result", "tool_use_id":identity, "is_error":failed});
         if include_content {
-            result["content"] = output.cloned().unwrap_or_else(|| json!(""));
+            result["content"] = if let Some(error) = error_text(&state["error"]) {
+                with_error(error, output)
+            } else {
+                output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }))
+            };
         }
         Some(result)
     } else {
@@ -54,6 +73,31 @@ pub(super) fn tool_blocks(
 
 fn event(role: &str, id: &str, timestamp: Option<String>, content: Value) -> Value {
     json!({"type":role,"uuid":id,"timestamp":timestamp,"message":{"role":role,"content":content}})
+}
+
+fn add_user_block(
+    events: &mut Vec<Value>,
+    index: &mut Option<usize>,
+    id: &str,
+    time: Option<String>,
+    block: Value,
+) {
+    if let Some(index) = *index {
+        let content = &mut events[index]["message"]["content"];
+        if let (Some(previous), Some(text)) = (content.as_str(), block.as_str()) {
+            *content = json!(format!("{previous}\n{text}"));
+        } else {
+            if !content.is_array() {
+                *content = json!([{"type":"text","text":content.take()}]);
+            }
+            let block = if block.is_string() { json!({"type":"text","text":block}) } else { block };
+            content.as_array_mut().unwrap().push(block);
+        }
+    } else {
+        *index = Some(events.len());
+        let content = if block.is_string() { block } else { json!([block]) };
+        events.push(event("user", id, time, content));
+    }
 }
 
 pub(super) fn read(
@@ -91,6 +135,7 @@ pub(super) fn read(
     let mut user_time = None;
     let mut bad = 0u32;
     let mut current_model = None;
+    let mut message_error = None;
     for row in rows {
         let (msg_id, msg_data, part_id, part_data, created) = match row {
             Ok(row) => row,
@@ -100,6 +145,7 @@ pub(super) fn read(
             }
         };
         if msg_id != current_msg {
+            events.extend(message_error.take());
             user_index = None;
             current_msg = msg_id;
             let message = serde_json::from_str::<Value>(&msg_data).unwrap_or(Value::Null);
@@ -109,8 +155,19 @@ pub(super) fn read(
                 .unwrap_or_default()
                 .to_string();
             summary = message["summary"] == true;
-            current_model = super::models::from_message(&message);
+            current_model = super::message_meta::from_message(&message);
             user_time = created.and_then(ms_to_iso);
+            let error = error_text(&message["error"]);
+            let notice = if role == "idle" {
+                match message["outcome"].as_str() {
+                    Some("failed") => Some(error.map_or_else(|| "轮次失败".into(), |text| format!("轮次失败：{text}"))),
+                    Some("interrupted") => Some("轮次已中断".into()),
+                    _ => None,
+                }
+            } else {
+                error.map(str::to_owned)
+            };
+            message_error = notice.map(|text| json!({"type":"system", "uuid":format!("{current_msg}:status"), "timestamp":user_time, "content":text}));
             if let Some(system) = message.get("system").filter(|v| !v.is_null() && **v != "") {
                 let source = event(
                     &role,
@@ -127,14 +184,14 @@ pub(super) fn read(
             }
             if !matches!(
                 role.as_str(),
-                "user" | "assistant" | "compaction" | "synthetic" | "system" | "developer"
+                "user" | "assistant" | "compaction" | "synthetic" | "system" | "developer" | "shell" | "skill" | "idle"
             ) {
                 bad += 1;
             }
         }
         if !matches!(
             role.as_str(),
-            "user" | "assistant" | "compaction" | "synthetic" | "system" | "developer"
+            "user" | "assistant" | "compaction" | "synthetic" | "system" | "developer" | "shell" | "skill" | "idle"
         ) {
             continue;
         }
@@ -155,6 +212,8 @@ pub(super) fn read(
             Some(("compaction", "压缩摘要"))
         } else if matches!(role.as_str(), "system" | "developer") {
             Some(("instructions", "系统指令"))
+        } else if role == "skill" {
+            Some(("instructions", "技能上下文"))
         } else if part["ignored"] == true {
             Some(("synthetic", "已忽略上下文"))
         } else if role == "synthetic" || part["synthetic"] == true {
@@ -168,7 +227,7 @@ pub(super) fn read(
                 &source,
                 kind,
                 label,
-                part.get("record").unwrap_or(&part),
+                if role == "skill" { &part["record"]["text"] } else { part.get("record").unwrap_or(&part) },
             ));
             continue;
         }
@@ -180,20 +239,7 @@ pub(super) fn read(
                     .filter(|t| !t.trim().is_empty())
                 {
                     if role == "user" {
-                        if let Some(index) = user_index {
-                            let previous =
-                                events[index]["message"]["content"].as_str().unwrap_or("");
-                            events[index]["message"]["content"] =
-                                json!(format!("{previous}\n{}", text.trim()));
-                        } else {
-                            user_index = Some(events.len());
-                            events.push(event(
-                                "user",
-                                &current_msg,
-                                user_time.clone(),
-                                json!(text.trim()),
-                            ));
-                        }
+                        add_user_block(&mut events, &mut user_index, &current_msg, user_time.clone(), json!(text.trim()));
                     } else {
                         events.push(event("assistant", &id, time, json!(text.trim())));
                     }
@@ -213,7 +259,17 @@ pub(super) fn read(
                     ));
                 }
             }
-            Some("tool") if role == "assistant" => {
+            Some("file") if role == "user" => {
+                let attachment = if let (Some(mime), Some(data)) =
+                    (part["mime"].as_str(), part["data"].as_str())
+                {
+                    json!({"type":"file","filename":part["filename"],"source":{"type":"base64","media_type":mime,"data":data}})
+                } else {
+                    part
+                };
+                add_user_block(&mut events, &mut user_index, &current_msg, user_time.clone(), attachment);
+            }
+            Some("tool") if matches!(role.as_str(), "assistant" | "shell") => {
                 // 作用域包括源 part，避免不同消息复用 callID 时把结果配给另一张卡片。
                 let identity = format!(
                     "{id}:{}",
@@ -252,17 +308,17 @@ pub(super) fn read(
                     ));
                 }
             }
-            _ => {} // step-start/finish、文件附件等不属于正文、思考或工具卡片。
+            _ => {}
         }
         if let Some(model) = &current_model {
             for event in &mut events[before..] {
                 if event["type"] == "assistant" {
-                    event["message"]["model"] = json!(model.id);
-                    event["message"]["modelName"] = json!(model.label);
+                    event["message"]["model"] = json!(model);
                 }
             }
         }
     }
+    events.extend(message_error);
     if bad > 0 {
         warnings.push(format!(
             "OpenCode 会话有 {bad} 处消息或分段无法解析，当前显示可读取内容"

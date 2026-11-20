@@ -1,6 +1,6 @@
 //! 删除前仅保存本次会被移除的日志；不把其他活跃会话的同步放进删除等待链路。
-use super::{cache, Store};
-use crate::agents::{diagnostics, verify_within_root, TargetKind};
+use super::{source, source_error, Store};
+use crate::agents::{verify_within_root, TargetKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -12,29 +12,28 @@ fn snapshot(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
-) -> Result<BTreeMap<PathBuf, cache::Stamp>, String> {
+) -> Result<BTreeMap<PathBuf, source::Stamp>, String> {
     if targets.is_empty() {
         return Err("缺少待删会话文件，已中止删除".into());
     }
-    let canonical_roots: Vec<_> = roots
-        .iter()
-        .map(|root| {
-            root.canonicalize()
-                .map(|canonical| (root, canonical))
-                .map_err(|e| diagnostics::io("usage_sync", "resolve_path", root, &e))
-        })
-        .collect::<Result<_, _>>()?;
+    let mut canonical_roots = Vec::new();
+    for root in roots {
+        match root.canonicalize() {
+            Ok(canonical) => canonical_roots.push((root, canonical)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(source_error(root, error)),
+        }
+    }
     let mut paths = BTreeSet::new();
     for target in targets {
         let canonical = target
             .canonicalize()
-            .map_err(|e| diagnostics::io("usage_sync", "resolve_path", target, &e))?;
+            .map_err(|e| source_error(target, e))?;
         let (root, canonical_root) = canonical_roots
             .iter()
             .find(|(_, root)| canonical.starts_with(root))
             .ok_or("待删会话文件越出数据目录，已中止删除")?;
-        let metadata = fs::symlink_metadata(target)
-            .map_err(|e| diagnostics::io("usage_sync", "path_metadata", target, &e))?;
+        let metadata = fs::symlink_metadata(target).map_err(|e| source_error(target, e))?;
         let is_dir = metadata.is_dir();
         verify_within_root(
             root,
@@ -47,10 +46,7 @@ fn snapshot(
         )?;
         let path = root.join(canonical.strip_prefix(canonical_root).unwrap());
         if is_dir {
-            paths.extend(
-                super::discover(agent, &[path], &mut Vec::new(), &|| false, true)
-                    .map_err(|e| e.to_string())?,
-            );
+            paths.extend(super::discover(agent, &[path], &|| false)?);
         } else {
             paths.insert(path);
         }
@@ -64,8 +60,7 @@ fn snapshot(
                 .ok_or("待删用量文件越出数据目录，已中止删除")?;
             // 状态目录里的日志也逐个验证；不能跟随子目录中的链接读到范围外的用量。
             verify_within_root(root, &path, TargetKind::File)?;
-            let stamp = cache::stamp(&path)
-                .map_err(|e| diagnostics::io("usage_sync", "source_stamps", &path, &e))?;
+            let stamp = source::stamp(&path).map_err(|e| source_error(&path, e))?;
             Ok((path, stamp))
         })
         .collect()
@@ -85,7 +80,7 @@ pub(super) fn preserve_at(
         |paths| {
             // 保留原 roots / scope，仅限制本次读取的路径；不能让局部同步清理其他会话缓存，
             // 也不能把它标记为整个 Agent 已完成首次同步。
-            super::summary::sync_paths(agent, roots, store, Some(paths), &|| false).map(|_| ())
+            super::ingest::sync_paths(agent, roots, store, Some(paths), &|| false).map(|_| ())
         },
         delete,
     )
@@ -143,7 +138,7 @@ mod tests {
             let mut store = Store::open_with_ledger(None, Some(&ledger));
             let targets =
                 crate::agents::claude_family::deletion_targets(&root, "project", "aaaa").unwrap();
-            preserve_at(agent, &[root], &mut store, &targets, || {
+            preserve_at(agent, &[temp.path().join("missing"), root], &mut store, &targets, || {
                 fs::remove_file(&parent).unwrap();
                 fs::remove_dir_all(&children).unwrap();
                 Ok(())
@@ -179,7 +174,7 @@ mod tests {
         record(&parent, "aaaa", "first", 11);
         record(&other, "bbbb", "unrelated-first", 77);
         let mut store = Store::open(None);
-        super::super::summary::sync_at("qoder", &[root.clone()], &mut store, &|| false).unwrap();
+        super::super::ingest::sync_at("qoder", &[root.clone()], &mut store, &|| false).unwrap();
         let extra = temp.path().join("extra.jsonl");
         record(&extra, "aaaa", "last", 22);
         fs::OpenOptions::new()
@@ -209,7 +204,7 @@ mod tests {
             serde_json::to_value(store.load_file(&scope, &other).unwrap()).unwrap(),
             old_other
         );
-        super::super::summary::sync_at("qoder", &[root], &mut store, &|| false).unwrap();
+        super::super::ingest::sync_at("qoder", &[root], &mut store, &|| false).unwrap();
         assert_eq!(
             total(&mut store),
             1100,
@@ -277,7 +272,7 @@ mod tests {
                 &[root.clone()],
                 &[path.clone(), children.clone()],
                 |paths| {
-                    super::super::summary::sync_paths(
+                    super::super::ingest::sync_paths(
                         "qoder",
                         &[root.clone()],
                         &mut store,
@@ -360,7 +355,7 @@ mod tests {
             !selected.is_empty(),
             "Requested session has no usage source files"
         );
-        let full_count = super::super::discover("qoder", &roots, &mut Vec::new(), &|| false, true)
+        let full_count = super::super::discover("qoder", &roots, &|| false)
             .unwrap()
             .len();
         for round in 0..3 {

@@ -1,20 +1,20 @@
-//! 请求表只更新变化来源及共享身份/父历史的会话；翻页和汇总直接查询已存事件。
-//! 旧账本升级才重建一次全部索引，源文件删除不会移除已采集的历史。
-use super::{cache::FileCache, normalize, request_parse::RequestMeta, types::*};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+//! 从同一账本快照查询筛选项、时间分布和请求分页。
+use super::{
+    request_parse::{RequestMeta, RequestOutcome},
+    types::*,
 };
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EventQuery {
     pub agent: Option<String>,
     pub model: Option<String>,
+    pub project: Option<String>,
     pub status: Option<String>,
+    pub include_filters: bool,
     pub from: Option<i64>,
     pub to: Option<i64>,
     /// 从 1 开始的页码；越界时落到最后一页，空结果仍为第 1 页。
@@ -31,8 +31,7 @@ pub struct RequestEvent {
     pub time: i64,
     pub session: String,
     pub model: String,
-    pub model_name: String,
-    pub status: String,
+    pub status: RequestOutcome,
     pub partial: bool,
     #[serde(flatten)]
     pub tokens: Tokens,
@@ -40,293 +39,249 @@ pub struct RequestEvent {
     pub details: RecordedFields,
     pub request: RequestMeta,
     pub output_tps: Option<f64>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<super::pricing::EventCost>,
+    /// 查询时计算，cost 为空时说明原因；不写入账本。
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub pricing_issue: Option<super::pricing::PricingIssue>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventPage {
-    pub models: Vec<String>,
     pub events: Vec<RequestEvent>,
     pub total: u64,
+    pub has_cache_writes: bool,
+    pub has_service_tiers: bool,
     pub page: u64,
     pub page_size: u32,
     pub revision: String,
+    pub pricing_revision: u64,
+    /// 与 total 同一快照、同一筛选条件的时间分布。
+    pub timeline: Timeline,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<RequestFilters>,
 }
 
-pub(super) fn schema(db: &Connection) -> Result<(), String> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS usage_request_index(
-        agent TEXT PRIMARY KEY,revision INTEGER NOT NULL,indexed INTEGER NOT NULL);
-        INSERT OR IGNORE INTO usage_request_index SELECT DISTINCT agent,1,0 FROM usage_ledger_sources;
-        CREATE TABLE IF NOT EXISTS usage_request_events(
-            id TEXT PRIMARY KEY,agent TEXT NOT NULL,time INTEGER NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS usage_requests_time ON usage_request_events(time DESC,id DESC);
-        CREATE INDEX IF NOT EXISTS usage_requests_agent ON usage_request_events(agent,time DESC,id DESC);
-        CREATE INDEX IF NOT EXISTS usage_requests_model ON usage_request_events(model,time DESC,id DESC);
-        CREATE INDEX IF NOT EXISTS usage_requests_status ON usage_request_events(status,time DESC,id DESC);")
-        .map_err(|_| "无法初始化请求事件索引，已保留用量账本".into())
+#[derive(Debug, Default, Serialize)]
+pub struct RequestFilters {
+    pub models: BTreeMap<String, u64>,
+    pub projects: BTreeMap<String, u64>,
+    pub results: BTreeMap<String, u64>,
 }
 
-pub(super) fn from_sample(agent: &str, mut s: Sample) -> RequestEvent {
-    s.migrate_availability();
-    let id = format!("{:x}", Sha256::digest(format!("{agent}:{}", s.key)));
-    let status = s.request.status.clone().unwrap_or_else(|| "unknown".into());
-    if s.request.scope.is_none() {
-        s.request.scope = Some(
-            if agent == "codex" && s.response_id.is_none() {
-                "usage_delta"
-            } else {
-                "request"
-            }
-            .into(),
-        );
-    }
-    let output_tps = s
-        .request
-        .latency_ms
-        .filter(|ms| *ms > 0)
-        .filter(|_| {
-            status != "failed"
-                && s.details.output_recorded
-                && !s.details.output_incomplete
-                && s.request.scope.as_deref() == Some("request")
-                && s.tokens.output_tokens > 0
-        })
-        .map(|ms| s.tokens.output_tokens as f64 * 1000.0 / ms as f64);
-    RequestEvent {
-        id,
-        agent: agent.into(),
-        time: s.request.started_at.unwrap_or(s.timestamp),
-        session: s.session,
-        model_name: s.model.clone(),
-        model: s.model,
-        status,
-        partial: s.partial,
-        tokens: s.tokens,
-        details: s.details,
-        request: s.request,
-        output_tps,
-    }
-}
+const PROJECT: &str = "coalesce(json_extract(data,'$.request.project'),'')";
+const CACHE_WRITES: &str =
+    "CASE WHEN json_valid(data) THEN json_extract(data,'$.cacheWriteTokens') > 0 END";
+const SERVICE_TIER: &str =
+    "CASE WHEN json_valid(data) THEN trim(json_extract(data,'$.request.tier')) <> '' END";
+pub(super) const IS_FAILED: &str = "status='failed'";
 
-pub(super) fn refresh(
-    db: &mut Connection,
-    agent: &str,
+pub(super) const DISTINCT_REQUESTS: &str = "NOT (
+    agent='opencode' AND time>0 AND json_extract(data,'$.request.nativeSession') IS NOT NULL
+    AND EXISTS (
+        SELECT 1 FROM usage_request_events AS native
+        WHERE native.agent='claude'
+          AND native.time BETWEEN usage_request_events.time - 86400000
+                              AND usage_request_events.time + 86400000
+          AND json_extract(native.data,'$.session')=json_extract(usage_request_events.data,'$.request.nativeSession')
+          AND json_extract(native.data,'$.request.kind') IS NOT 'sidechain'
+          AND json_type(native.data,'$.inputTokens') IS NOT NULL
+          AND (json_extract(native.data,'$.inputTokens')>0 OR json_extract(native.data,'$.outputTokens')>0)
+    ))";
+
+mod cleanup;
+mod index;
+
+pub use cleanup::{clear_orphans, CleanupQuery};
+#[cfg(test)]
+pub(super) use cleanup::clear_orphans_at;
+#[cfg(test)]
+pub(super) use index::from_sample;
+pub(super) use index::{refresh, schema};
+
+fn filter_counts(
+    db: &Connection,
+    scope: &str,
+    values: &[rusqlite::types::Value],
+    query: &EventQuery,
     cancel: &dyn Fn() -> bool,
-) -> Result<(), String> {
-    let dirty: bool = db
-        .query_row(
-            "SELECT revision != indexed FROM usage_request_index WHERE agent=?1",
-            [agent],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("无法读取请求事件版本：{error}"))?
-        .unwrap_or(false);
-    if !dirty {
-        return Ok(());
+) -> Result<RequestFilters, String> {
+    let error = |_| "无法读取请求筛选项".to_owned();
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT model,{PROJECT},{IS_FAILED} AS failed,count(*) FROM usage_request_events
+         WHERE {scope} GROUP BY model,{PROJECT},failed"
+        ))
+        .map_err(error)?;
+    let mut rows = stmt.query(params_from_iter(values)).map_err(error)?;
+    let mut filters = RequestFilters::default();
+    while let Some(row) = rows.next().map_err(error)? {
+        if cancel() {
+            return Err("请求记录读取已取消".into());
+        }
+        let model: String = row.get(0).map_err(error)?;
+        let project: String = row.get(1).map_err(error)?;
+        let status = if row.get::<_, bool>(2).map_err(error)? {
+            RequestOutcome::Failed
+        } else {
+            RequestOutcome::Success
+        }
+        .as_str();
+        let count = row.get::<_, i64>(3).map_err(error)? as u64;
+        let is_model = query.model.as_ref().is_none_or(|value| *value == model);
+        let is_project = query.project.as_ref().is_none_or(|value| *value == project);
+        let is_status = query.status.as_deref().is_none_or(|value| value == status);
+        if is_project && is_status {
+            *filters.models.entry(model).or_default() += count;
+        }
+        if is_model && is_status {
+            *filters.projects.entry(project).or_default() += count;
+        }
+        if is_model && is_project {
+            *filters.results.entry(status.into()).or_default() += count;
+        }
     }
-    let tx = db
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| format!("无法开始请求事件更新：{error}"))?;
-    let (revision, indexed): (i64, i64) = tx
+    Ok(filters)
+}
+
+/// 筛选结果按本地时间对齐的时段计数，只用索引列聚合，
+/// 不读取请求 JSON。缺少发生时间的记录单列在 untimed，按时间倒序排在最后。
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Timeline {
+    pub bounds: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_per_bucket: Option<i64>,
+    pub success: Vec<u64>,
+    pub failed: Vec<u64>,
+    pub untimed: StatusCounts,
+}
+#[derive(Debug, Default, Serialize)]
+pub struct StatusCounts {
+    pub success: u64,
+    pub failed: u64,
+}
+
+const TIMELINE_BUCKETS: i64 = 120;
+const MINUTE: i64 = 60_000;
+const DAY: i64 = 1440 * MINUTE;
+
+/// 选择不超过 TIMELINE_BUCKETS 段的最小整齐步长；超过一周时取整天倍数。
+fn timeline_step(span: i64) -> i64 {
+    [
+        1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080,
+    ]
+    .into_iter()
+    .map(|m| m * MINUTE)
+    .find(|step| (span - 1) / step + 1 <= TIMELINE_BUCKETS)
+    .unwrap_or_else(|| ((span - 1) / (TIMELINE_BUCKETS * DAY) + 1) * DAY)
+}
+
+fn local_day_start(date: chrono::NaiveDate) -> Option<i64> {
+    use chrono::{Local, TimeZone};
+    (0..1440).find_map(|minute| {
+        let time = date.and_hms_opt(minute / 60, minute % 60, 0)?;
+        Local.from_local_datetime(&time).earliest().map(|time| time.timestamp_millis())
+    })
+}
+
+fn timeline_bounds(from: i64, end: i64) -> (Vec<i64>, Option<i64>) {
+    use chrono::{Days, Local, TimeZone};
+    let date = Local.timestamp_millis_opt(from).single().map(|time| time.date_naive());
+    let midnight = date.and_then(local_day_start).unwrap_or(from - from.rem_euclid(DAY));
+    let step = timeline_step((end - from).max(1));
+    if let Some(mut day) = date.filter(|_| step >= DAY) {
+        let days = step / DAY;
+        let mut bounds = vec![midnight];
+        while bounds.len() == 1 || *bounds.last().unwrap() < end {
+            let Some(next) = day.checked_add_days(Days::new(days as u64)) else {
+                bounds.push(end.max(bounds.last().unwrap().saturating_add(1)));
+                break;
+            };
+            day = next;
+            if let Some(time) = local_day_start(day) {
+                bounds.push(time);
+            }
+        }
+        return (bounds, Some(days));
+    }
+    let start = midnight + (from - midnight) / step * step;
+    let n = ((end - start).saturating_sub(1) / step + 1).max(1);
+    ((0..=n).map(|i| start.saturating_add(i.saturating_mul(step))).collect(), None)
+}
+
+fn timeline(
+    tx: &Connection,
+    filter: &str,
+    values: &[rusqlite::types::Value],
+    from: Option<i64>,
+    to: Option<i64>,
+    now: i64,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Timeline, String> {
+    let error = |_| "无法统计请求时间分布".to_owned();
+    let (oldest, newest): (Option<i64>, Option<i64>) = tx
         .query_row(
-            "SELECT revision,indexed FROM usage_request_index WHERE agent=?1",
-            [agent],
+            &format!(
+                "SELECT min(time),max(time) FROM usage_request_events WHERE {filter} AND time>0"
+            ),
+            params_from_iter(values),
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
-    if indexed == 0 {
-        // 仅升级旧账本时全量建立身份索引。事务失败/取消时旧事件仍然完整可用。
-        let mut statement = tx
-            .prepare("SELECT path,data FROM usage_ledger_sources WHERE agent=?1")
-            .map_err(|_| "无法读取请求事件来源")?;
-        let rows = statement
-            .query_map([agent], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    super::storage::decode::<FileCache>(r.get_ref(1)?)?,
-                ))
-            })
-            .map_err(|_| "无法读取请求事件来源")?;
-        for row in rows {
-            if cancel() {
-                return Err("请求事件读取已取消".into());
-            }
-            let (path, file) = row.map_err(|_| "无法读取请求事件来源")?;
-            super::ledger::source_keys(&tx, agent, &PathBuf::from(path), &file)?;
+        .map_err(error)?;
+    let end = to
+        .unwrap_or_else(|| newest.map_or(now, |time| now.max(time.saturating_add(1))))
+        .max(1);
+    let from = from.or(oldest).unwrap_or(end).clamp(1, end);
+    let (bounds, days_per_bucket) = timeline_bounds(from, end);
+    let n = bounds.len() - 1;
+    let mut result = Timeline {
+        bounds,
+        days_per_bucket,
+        success: vec![0; n],
+        failed: vec![0; n],
+        untimed: StatusCounts::default(),
+    };
+    let mut stmt = tx
+        .prepare(&format!(
+            "SELECT time,{IS_FAILED} FROM usage_request_events WHERE {filter}"
+        ))
+        .map_err(error)?;
+    let mut rows = stmt.query(params_from_iter(values)).map_err(error)?;
+    while let Some(row) = rows.next().map_err(error)? {
+        if cancel() {
+            return Err("请求记录读取已取消".into());
         }
-        tx.execute(
-            "UPDATE usage_ledger_sources SET dirty=1 WHERE agent=?1",
-            [agent],
-        )
-        .map_err(|_| "无法升级请求来源索引")?;
-        tx.execute("DELETE FROM usage_request_events WHERE agent=?1", [agent])
-            .map_err(|_| "无法升级请求事件索引")?;
+        let time: i64 = row.get(0).map_err(error)?;
+        let failed: bool = row.get(1).map_err(error)?;
+        // 分页倒序偏移需要包含落在首尾边界之外的已选记录。
+        let bucket = (time > 0).then(|| {
+            result.bounds.partition_point(|bound| *bound <= time).saturating_sub(1).min(n - 1)
+        });
+        let count = match (bucket, failed) {
+            (Some(i), true) => &mut result.failed[i],
+            (Some(i), false) => &mut result.success[i],
+            (None, true) => &mut result.untimed.failed,
+            (None, false) => &mut result.untimed.success,
+        };
+        *count += 1;
     }
-    loop {
-        let seed: Option<String> = tx
-            .query_row(
-                "SELECT path FROM usage_ledger_sources WHERE agent=?1 AND dirty=1 LIMIT 1",
-                [agent],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|_| "无法读取变化来源")?;
-        let Some(seed) = seed else { break };
-        let mut files = BTreeMap::<PathBuf, FileCache>::new();
-        // 共享请求 ID、分页或父子关系的来源一起归并；无关会话的 data 不会被读取。
-        let mut statement = tx
-            .prepare(
-                "WITH RECURSIVE affected(id) AS (
-            SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2 UNION
-            SELECT b.source FROM affected a
-            JOIN usage_source_keys k ON k.source=a.id
-            JOIN usage_source_keys b ON b.key=k.key
-            JOIN usage_ledger_sources related ON related.id=b.source AND related.agent=?1
-        ) SELECT s.path,s.data FROM affected a JOIN usage_ledger_sources s
-            ON s.id=a.id ORDER BY s.path",
-            )
-            .map_err(|_| "无法查询相关会话")?;
-        let rows = statement
-            .query_map(params![agent, seed], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    super::storage::decode::<FileCache>(r.get_ref(1)?)?,
-                ))
-            })
-            .map_err(|_| "无法读取相关会话")?;
-        for row in rows {
-            if cancel() {
-                return Err("请求事件读取已取消".into());
-            }
-            let (path, mut file) = row.map_err(|_| "无法读取相关会话")?;
-            for sample in file.samples.iter_mut().chain(&mut file.failures) {
-                if sample.request.source.is_none() {
-                    sample.request.source = file
-                        .origin_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned());
-                }
-            }
-            files.insert(path.into(), file);
-        }
-        update_sources(&tx, agent, &files, cancel)?;
-    }
-    tx.execute(
-        "UPDATE usage_request_index SET indexed=?2 WHERE agent=?1",
-        params![agent, revision],
-    )
-    .map_err(|_| "无法保存请求事件版本")?;
-    tx.commit().map_err(|_| "请求事件索引未能落盘".into())
+    Ok(result)
 }
 
-fn update_sources(
-    tx: &Connection,
-    agent: &str,
-    files: &BTreeMap<PathBuf, FileCache>,
-    cancel: &dyn Fn() -> bool,
-) -> Result<(), String> {
-    let (samples, mut partial, mut warnings) = normalize::records(agent, &files);
-    let known: BTreeSet<_> = samples.iter().map(|s| s.key.as_str()).collect();
-    if files.values().any(|f| {
-        f.state.missing_usage > 0
-            || f.state
-                .unmeasured_ids
-                .iter()
-                .any(|id| !known.contains(id.as_str()))
-    }) {
-        warnings.push("部分助手记录没有 usage，不能从文字推算消耗".into());
+impl Timeline {
+    fn len(&self) -> u64 {
+        self.success.iter().chain(&self.failed).sum::<u64>()
+            + self.untimed.success
+            + self.untimed.failed
     }
-    if files.values().any(|f| f.state.bad_lines > 0) {
-        warnings.push("部分日志记录损坏或过大，已保留可读取计量".into());
-    }
-    if files.values().any(|f| f.pending) {
-        warnings.push("未写完的日志尾行将在写入完成后补入".into());
-    }
-    warnings.extend(files.values().filter_map(|f| f.problem.clone()));
-    warnings.sort();
-    warnings.dedup();
-    partial |= !warnings.is_empty();
-    let health = serde_json::to_string(&super::summary::Health { partial, warnings })
-        .map_err(|_| "无法保存计量完整性信息")?;
-    let samples = normalize::unique(
-        files
-            .values()
-            .flat_map(|f| f.failures.iter().cloned())
-            .chain(samples),
-    );
-    let owner = files.keys().next().ok_or("请求来源为空")?.to_string_lossy();
-    let owner_id: i64 = tx
-        .query_row(
-            "SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2",
-            params![agent, owner],
-            |r| r.get(0),
-        )
-        .map_err(|_| "无法定位请求来源")?;
-    let mut obsolete = BTreeSet::new();
-    for path in files.keys() {
-        let mut stmt = tx
-            .prepare_cached("SELECT id FROM usage_request_events WHERE agent=?1 AND source=(SELECT id FROM usage_ledger_sources WHERE agent=?1 AND path=?2)")
-            .map_err(|_| "无法读取原请求事件")?;
-        let ids = stmt
-            .query_map(params![agent, path.to_string_lossy()], |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|_| "无法更新请求事件索引")?
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(|_| "无法更新请求事件索引")?;
-        obsolete.extend(ids);
-        tx.execute(
-            "UPDATE usage_ledger_sources SET dirty=0,health=NULL WHERE agent=?1 AND path=?2",
-            params![agent, path.to_string_lossy()],
-        )
-        .map_err(|_| "无法完成请求来源更新")?;
-    }
-    tx.execute(
-        "UPDATE usage_ledger_sources SET health=?3 WHERE agent=?1 AND path=?2",
-        params![agent, owner, health],
-    )
-    .map_err(|_| "无法保存计量完整性信息")?;
-    {
-        let mut insert = tx.prepare("INSERT INTO usage_request_events VALUES (?1,?2,?3,?4,?5,?6,?7)
-            ON CONFLICT(id) DO UPDATE SET time=excluded.time,model=excluded.model,status=excluded.status,data=excluded.data,source=excluded.source
-            WHERE usage_request_events.data != excluded.data OR usage_request_events.source != excluded.source").map_err(|_| "无法保存请求事件")?;
-        for sample in samples.into_iter().filter(|s| {
-            s.model != "<synthetic>"
-                && !(s.request.scope.as_deref() == Some("usage_delta") && s.tokens.total() == 0)
-        }) {
-            if cancel() {
-                return Err("请求事件读取已取消".into());
-            }
-            let event = from_sample(agent, sample);
-            let data = serde_json::to_string(&event).map_err(|_| "无法编码请求事件")?;
-            obsolete.remove(&event.id);
-            insert
-                .execute(params![
-                    event.id,
-                    agent,
-                    event.time,
-                    event.model,
-                    event.status,
-                    data,
-                    owner_id
-                ])
-                .map_err(|_| "无法保存请求事件")?;
-        }
-    }
-    // 新发现的父历史或明确响应 ID 可能取代旧累计差额。仅清除被归并取代的索引行，
-    // 来源删除不会走这条分支：持久账本始终保留先前采集的原始观测。
-    for id in obsolete {
-        tx.execute("DELETE FROM usage_request_events WHERE id=?1", [id])
-            .map_err(|_| "无法归并请求事件")?;
-    }
-    Ok(())
 }
 
 pub fn read(query: EventQuery, cancel: &dyn Fn() -> bool) -> Result<EventPage, String> {
     if cancel() {
-        return Err("请求事件读取已取消".into());
+        return Err("请求记录读取已取消".into());
     }
-    let mut db = super::ledger::reader(&super::ledger::path()?)?;
+    let mut db = super::ledger::reader(&super::ledger::path()?, cancel)?;
     page(&mut db, query, cancel)
 }
 
@@ -335,32 +290,42 @@ pub(super) fn page(
     query: EventQuery,
     cancel: &dyn Fn() -> bool,
 ) -> Result<EventPage, String> {
+    page_with_pricer(db, query, super::pricing::global(), cancel)
+}
+
+pub(super) fn page_with_pricer(
+    db: &mut Connection,
+    query: EventQuery,
+    pricer: &super::pricing::Pricer,
+    cancel: &dyn Fn() -> bool,
+) -> Result<EventPage, String> {
     if query
         .agent
         .as_deref()
         .is_some_and(|a| !super::AGENTS.contains(&a))
     {
-        return Err("不支持的请求事件来源".into());
+        return Err("不支持的请求记录来源".into());
     }
     if query
         .status
         .as_deref()
-        .is_some_and(|s| !["success", "failed", "unknown"].contains(&s))
+        .is_some_and(|s| !["success", "failed"].contains(&s))
     {
         return Err("不支持的请求结果筛选".into());
     }
     if query.from.zip(query.to).is_some_and(|(a, b)| a >= b) {
-        return Err("请求事件时间范围无效".into());
+        return Err("请求记录时间范围无效".into());
     }
     if cancel() {
-        return Err("请求事件读取已取消".into());
+        return Err("请求记录读取已取消".into());
     }
-    // count、页数据和版本来自同一个读快照；新写入只在下一次查询呈现。
-    let tx = db.transaction().map_err(|_| "无法读取请求事件快照")?;
+    let pricing_snapshot = pricer.snapshot();
+    // 总数、页数据和版本共用一个快照。
+    let tx = db.transaction().map_err(|_| "无法读取请求记录快照")?;
     let revision: String = {
         let mut stmt = tx
             .prepare("SELECT agent,indexed FROM usage_request_index ORDER BY agent")
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(format!(
@@ -369,35 +334,16 @@ pub(super) fn page(
                     r.get::<_, i64>(1)?
                 ))
             })
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?;
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("无法读取请求事件版本：{error}"))?
+            .map_err(|error| format!("无法读取请求记录版本：{error}"))?
             .join("|")
     };
-    let models = {
-        let mut statement = tx.prepare("SELECT DISTINCT model FROM usage_request_events
-            WHERE (?1 IS NULL OR agent=?1) AND (?2 IS NULL OR time>=?2) AND (?3 IS NULL OR time<?3) ORDER BY model")
-            .map_err(|_| "无法读取请求模型")?;
-        let models = statement
-            .query_map(params![query.agent, query.from, query.to], |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|_| "无法读取请求模型")?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "无法读取请求模型")?;
-        models
-    };
-    let mut predicates = vec!["1=1".to_owned()];
+    let mut predicates = vec![DISTINCT_REQUESTS.to_owned()];
     let mut values = Vec::<rusqlite::types::Value>::new();
-    for (column, value) in [
-        ("agent", query.agent),
-        ("model", query.model),
-        ("status", query.status),
-    ] {
-        if let Some(v) = value {
-            predicates.push(format!("{column}=?"));
-            values.push(v.into());
-        }
+    if let Some(agent) = &query.agent {
+        predicates.push("agent=?".into());
+        values.push(agent.clone().into());
     }
     if let Some(time) = query.from {
         predicates.push("time>=?".into());
@@ -407,15 +353,45 @@ pub(super) fn page(
         predicates.push("time<?".into());
         values.push(time.into());
     }
+    let filters = query
+        .include_filters
+        .then(|| filter_counts(&tx, &predicates.join(" AND "), &values, &query, cancel))
+        .transpose()?;
+    for (column, value) in [("model", query.model), (PROJECT, query.project)] {
+        if let Some(value) = value {
+            predicates.push(format!("{column}=?"));
+            values.push(value.into());
+        }
+    }
+    if let Some(status) = query.status {
+        predicates.push(if status == "failed" {
+            IS_FAILED.into()
+        } else {
+            format!("NOT ({IS_FAILED})")
+        });
+    }
     let filter = predicates.join(" AND ");
-    let total: i64 = tx
+    let timeline = timeline(
+        &tx,
+        &filter,
+        &values,
+        query.from,
+        query.to,
+        chrono::Utc::now().timestamp_millis(),
+        cancel,
+    )?;
+    let total = timeline.len();
+    let (has_cache_writes, has_service_tiers) = tx
         .query_row(
-            &format!("SELECT count(*) FROM usage_request_events WHERE {filter}"),
-            params_from_iter(&values),
-            |r| r.get(0),
+            &format!(
+                "SELECT
+                EXISTS(SELECT 1 FROM usage_request_events WHERE {filter} AND {CACHE_WRITES}),
+                EXISTS(SELECT 1 FROM usage_request_events WHERE {filter} AND {SERVICE_TIER})"
+            ),
+            params_from_iter(values.iter().chain(&values)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| "无法读取请求事件数量")?;
-    let total = u64::try_from(total).map_err(|_| "请求事件数量无效")?;
+        .map_err(|_| "无法读取请求列信息")?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let pages = total.div_ceil(u64::from(limit)).max(1);
     let mut page = query.page.unwrap_or(1).clamp(1, pages);
@@ -449,26 +425,35 @@ pub(super) fn page(
             .prepare(&format!(
                 "SELECT data FROM usage_request_events WHERE {filter} ORDER BY time DESC,id DESC LIMIT ? OFFSET ?"
             ))
-            .map_err(|_| "无法读取请求事件")?;
+            .map_err(|_| "无法读取请求记录")?;
         let rows = stmt
             .query_map(params_from_iter(&values), |r| r.get::<_, String>(0))
-            .map_err(|_| "无法读取请求事件")?;
+            .map_err(|_| "无法读取请求记录")?;
         for row in rows {
             if cancel() {
-                return Err("请求事件读取已取消".into());
+                return Err("请求记录读取已取消".into());
             }
-            events.push(
-                serde_json::from_str(&row.map_err(|_| "无法读取请求事件")?)
-                    .map_err(|_| "请求事件索引损坏，请刷新重建")?,
-            );
+            let mut event: RequestEvent =
+                serde_json::from_str(&row.map_err(|_| "无法读取请求记录")?)
+                    .map_err(|_| "请求索引损坏，请重试同步")?;
+            event.request.expand_project_path();
+            match pricing_snapshot.price_event(&event) {
+                Ok(cost) => event.cost = Some(cost),
+                Err(issue) => event.pricing_issue = Some(issue),
+            }
+            events.push(event);
         }
     }
     Ok(EventPage {
         events,
         total,
+        has_cache_writes,
+        has_service_tiers,
         page,
         page_size: limit,
         revision,
-        models,
+        pricing_revision: pricing_snapshot.revision,
+        timeline,
+        filters,
     })
 }

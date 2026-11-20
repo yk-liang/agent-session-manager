@@ -12,25 +12,25 @@ mod event_tests;
 mod events;
 #[cfg(test)]
 mod model_tests;
-mod models;
+mod message_meta;
 mod storage;
 #[cfg(test)]
 mod v2_tests;
-
-pub(crate) fn usage_model_names(ids: &[String]) -> std::collections::HashMap<String, String> {
-    let names = models::names();
-    ids.iter()
-        .filter_map(|id| names.get(id).map(|name| (id.clone(), name.clone())))
-        .collect()
-}
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
+use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
+pub(crate) use message_meta::{client_id, model_id};
+pub(crate) use storage::MESSAGE_ERROR_SQL;
 
 fn data_home() -> PathBuf {
+    if let Ok(path) = std::env::var("OPENCODE_DATA_DIR") {
+        if !path.is_empty() {
+            return super::expand_tilde(&path);
+        }
+    }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
             return super::expand_tilde(&xdg).join("opencode");
@@ -65,15 +65,25 @@ pub(crate) fn open_db(path: &Path) -> Result<Connection, String> {
     open_db_scoped(path, None)
 }
 
+pub(crate) fn session_ids(path: &Path) -> Result<Vec<String>, String> {
+    let db = open_db(path)?;
+    let read = || -> rusqlite::Result<Vec<String>> {
+        let mut stmt = db.prepare("SELECT id FROM session")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    };
+    read().map_err(|error| format!("无法确认 OpenCode 会话 {}：{error}", path.display()))
+}
+
 fn open_db_scoped(path: &Path, session: Option<&str>) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| format!("打开 OpenCode 会话库失败: {e}"))?;
+    .map_err(|e| format!("无法打开 OpenCode 会话库：{e}"))?;
     conn.busy_timeout(std::time::Duration::from_millis(300))
         .map_err(|e| e.to_string())?;
-    storage::prepare(&conn, session).map_err(|e| format!("读取 OpenCode 数据结构失败: {e}"))?;
+    storage::prepare(&conn, session).map_err(|e| format!("无法读取 OpenCode 数据库结构：{e}"))?;
     Ok(conn)
 }
 
@@ -101,10 +111,13 @@ fn is_placeholder_title(title: &str) -> bool {
 /// 按会话归属计入完整性状态，否则损坏记录会被静默隐藏
 const REAL_MESSAGE_FILTER: &str = "CASE WHEN json_valid(m.data) THEN COALESCE(json_extract(m.data, '$.summary'), 0) != 1 ELSE 0 END";
 const REAL_TEXT_FILTER: &str = "CASE WHEN json_valid(p.data) THEN
-               json_extract(p.data, '$.type') = 'text'
+               (
+                   (json_extract(p.data, '$.type') = 'text' AND TRIM(COALESCE(json_extract(p.data, '$.text'), '')) <> '')
+                   OR (json_extract(m.data, '$.role') = 'user' AND json_extract(p.data, '$.type') = 'file')
+               )
                AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
                AND COALESCE(json_extract(p.data, '$.ignored'), 0) = 0
-               AND TRIM(COALESCE(json_extract(p.data, '$.text'), '')) <> '' ELSE 0 END";
+               ELSE 0 END";
 
 /// 按角色把计数累加进 (user, assistant) 元组；其余角色忽略
 fn add_role_count(counts: &mut (u32, u32), role: &str, n: u32) {
@@ -152,7 +165,7 @@ fn batch_message_counts(
     );
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
-        Err(e) => return super::ParseOutcome::Failed(format!("消息计数查询准备失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法准备消息计数查询：{e}")),
     };
     let rows = match stmt.query_map([], |r| {
         Ok((
@@ -162,7 +175,7 @@ fn batch_message_counts(
         ))
     }) {
         Ok(r) => r,
-        Err(e) => return super::ParseOutcome::Failed(format!("消息计数查询失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法查询消息数：{e}")),
     };
     let mut bad_rows = 0u32;
     for row in rows {
@@ -176,7 +189,7 @@ fn batch_message_counts(
     if bad_rows > 0 {
         return super::ParseOutcome::Degraded(
             map,
-            format!("OpenCode 有 {bad_rows} 条消息计数记录读取失败，消息数可能不准"),
+            format!("OpenCode 有 {bad_rows} 条消息无法计数"),
         );
     }
     // json_valid 守卫排除了损坏行，但排除 ≠ 完整：
@@ -265,7 +278,7 @@ fn first_user_text(
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(e) => {
-            warnings.push(format!("查询会话 {session_id} 标题失败: {e}"));
+            warnings.push(format!("查询会话 {session_id} 标题失败：{e}"));
             return None;
         }
     };
@@ -274,7 +287,7 @@ fn first_user_text(
     }) {
         Ok(r) => r,
         Err(e) => {
-            warnings.push(format!("查询会话 {session_id} 标题失败: {e}"));
+            warnings.push(format!("查询会话 {session_id} 标题失败：{e}"));
             return None;
         }
     };
@@ -356,7 +369,7 @@ fn query_session_rows(
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
-            return super::ParseOutcome::Failed(format!("OpenCode session 表查询准备失败: {e}"))
+            return super::ParseOutcome::Failed(format!("无法准备 OpenCode 会话查询：{e}"))
         }
     };
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -420,7 +433,7 @@ fn query_session_rows(
         })
     }) {
         Ok(r) => r,
-        Err(e) => return super::ParseOutcome::Failed(format!("OpenCode session 表查询失败: {e}")),
+        Err(e) => return super::ParseOutcome::Failed(format!("无法查询 OpenCode 会话：{e}")),
     };
     let mut out = Vec::new();
     let mut bad_rows = 0u32;
@@ -442,20 +455,24 @@ fn query_session_rows(
     super::ParseOutcome::Ok(out)
 }
 
-/// catalog 实现，数据库路径可注入（测试用 fixture 库）。
 /// 批量计数/会话表读取均三态化：部分失败降级为告警 + 已有数据，
 /// 不再让整个 catalog 因局部问题直接失败。
+#[cfg(test)]
 fn catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
+    cached_catalog(path, CatalogFilter { include_empty, ..Default::default() }, &|| false)
+}
+
+fn cached_catalog(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     let mut wal = path.as_os_str().to_os_string();
     wal.push("-wal");
     super::catalog_cache::database(
         &[path.to_path_buf(), PathBuf::from(wal)],
-        include_empty,
-        || scan_catalog_at(path, include_empty),
+        filter,
+        || scan_catalog_at(path, filter, cancelled),
     )
 }
 
-fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, String> {
+fn scan_catalog_at(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> bool) -> Result<super::Catalog, String> {
     if !path.exists() {
         return Ok(super::Catalog {
             projectless_session_ids: Vec::new(),
@@ -465,14 +482,16 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
             warnings: Vec::new(),
         });
     }
-    let conn = open_db(path)?;
+    let db = open_db(path)?;
+    let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let conn = &snapshot;
     let mut warnings = Vec::new();
     // 批量计数三态：必须保留"计数是否完整"——split() 会把 Ok 与
-    // Degraded 拍平成同一个 Some(map)，丢失部分缺失的信号。
+    // 合并计数时保留部分读取失败的状态。
     // 只有完整计数才能把不在表中的会话判为空；降级/失败时
     // 已有条目也可能只是部分计数（坏行会丢掉某个 role 分组），
     // 不能仅凭存在就信任，一律逐会话重查
-    let (counts_complete, counts) = match batch_message_counts(&conn) {
+    let (counts_complete, counts) = match batch_message_counts(conn) {
         super::ParseOutcome::Ok(map) => (true, map),
         super::ParseOutcome::Degraded(map, w) => {
             warnings.push(w);
@@ -485,12 +504,13 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
     };
     // 降级时逐会话回退需要区分"有损坏记录"与"查询失败"，
     // 给出准确的告警；检测失败则 None，统一兜底措辞
+    super::check_catalog_cancelled(cancelled)?;
     let corrupt = if counts_complete {
         None
     } else {
-        corrupt_sessions(&conn)
+        corrupt_sessions(conn)
     };
-    let (rows, ws) = load_session_rows(&conn).split();
+    let (rows, ws) = load_session_rows(conn).split();
     warnings.extend(ws);
     let Some(rows) = rows else {
         // 会话表完全不可读：告警已记录，返回空目录
@@ -502,15 +522,19 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
             warnings,
         });
     };
-    let historical_models = models::latest(&conn, None, &mut warnings);
+    super::check_catalog_cancelled(cancelled)?;
+    let mut message_metadata = message_meta::latest(conn, None, &mut warnings);
+    super::check_catalog_cancelled(cancelled)?;
+    let mut sizes = storage::session_sizes(conn, None);
     let mut missing_id = 0u32;
     let mut items = Vec::new();
     for row in rows {
+        super::check_catalog_cancelled(cancelled)?;
         if row.id.is_empty() {
             missing_id += 1;
             continue;
         }
-        if row.archived {
+        if row.archived && !filter.include_archived {
             continue;
         }
         // 子代理会话（有 parent_id）不作为普通可恢复会话展示
@@ -525,14 +549,14 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
         let (cnt, bypass_empty_filter) = if counts_complete {
             (counts.get(&row.id).copied().unwrap_or((0, 0)), false)
         } else {
-            match session_message_counts(&conn, &row.id) {
+            match session_message_counts(conn, &row.id) {
                 Some(c) => (c, false),
                 None => {
                     // 计数未知：保底展示 + 告警（区分损坏记录/查询失败），
                     // 绝不能把未知当空会话过滤（未知 ≠ 空）
                     let reason = match corrupt.as_ref().and_then(|c| c.get(&row.id)) {
                         Some(n) => format!("有 {n} 条消息记录不是合法 JSON"),
-                        None => "消息计数查询失败或字段类型异常".to_string(),
+                        None => "无法查询消息数或字段类型异常".to_string(),
                     };
                     warnings.push(format!(
                         "会话 {} {reason}，已按可见处理，计数可能不准",
@@ -543,16 +567,18 @@ fn scan_catalog_at(path: &Path, include_empty: bool) -> Result<super::Catalog, S
             }
         };
         let meta = build_meta(
-            &conn,
+            conn,
             &row,
             cnt,
-            include_empty || bypass_empty_filter,
+            filter.include_empty || bypass_empty_filter,
             &mut warnings,
         );
         let Some(mut meta) = meta else { continue };
-        if let Some(model) = historical_models.get(&row.id) {
-            model.apply(&mut meta);
+        if let Some(message) = message_metadata.remove(&row.id) {
+            meta.model = message.model;
+            meta.client = message.client;
         }
+        meta.size_bytes = sizes.remove(&row.id);
         let mut wal = path.as_os_str().to_os_string();
         wal.push("-wal");
         meta.source_files = vec![path.to_path_buf(), PathBuf::from(wal)];
@@ -598,7 +624,7 @@ fn read_session_mode_at(
     view: bool,
 ) -> Result<SessionDetail, String> {
     if !is_valid_session_id(session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let db = open_db_scoped(path, Some(session_id))?;
     // 元数据、计数和分段使用同一个只读快照，CLI 同时追加时不会混合两个版本。
@@ -611,9 +637,11 @@ fn read_session_mode_at(
     });
     let mut meta =
         build_meta(conn, &row, counts, true, &mut warnings).ok_or("未找到该 OpenCode 会话")?;
-    if let Some(model) = models::latest(conn, Some(session_id), &mut warnings).get(session_id) {
-        model.apply(&mut meta);
+    if let Some(message) = message_meta::latest(conn, Some(session_id), &mut warnings).remove(session_id) {
+        meta.model = message.model;
+        meta.client = message.client;
     }
+    meta.size_bytes = storage::session_sizes(conn, Some(session_id)).remove(session_id);
     let (events, issues) = events::read(conn, path, session_id, view)?;
     warnings.extend(issues);
     Ok(SessionDetail {
@@ -625,20 +653,13 @@ fn read_session_mode_at(
 
 fn search_events_at(path: &Path, meta: &SessionMeta) -> Result<Vec<Value>, String> {
     if !is_valid_session_id(&meta.session_id) {
-        return Err("非法会话 ID".into());
+        return Err("会话 ID 无效".into());
     }
     let db = open_db_scoped(path, Some(&meta.session_id))?;
     let snapshot = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    // 只读取目标身份和有序事件；不重算标题、计数或查询模型目录。
     let (row, mut warnings) = session_row(&snapshot, &meta.session_id)?;
-    let directory = row
-        .directory
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .unwrap_or("(unknown)");
     if row.id != meta.session_id
-        || escape_dir(directory) != meta.project_dir
-        || row.archived
+        || project_id(&row) != meta.project_dir
         || row.is_child
     {
         return Err("会话来源已变化，请刷新后重试".into());
@@ -666,31 +687,28 @@ impl AgentSource for OpenCodeSource {
     fn data_dir(&self) -> Option<PathBuf> {
         Some(data_home())
     }
-    fn watch_paths(&self, usage: bool) -> super::AgentWatchPaths {
+    fn watch_paths(&self) -> super::AgentWatchPaths {
         super::AgentWatchPaths {
             root_files: vec!["opencode.db", "opencode.db-wal"],
-            root_file_patterns: if usage {
-                vec![("opencode", ".db"), ("opencode", ".db-wal")]
-            } else {
-                vec![]
-            },
             ..Default::default()
         }
     }
     fn supports_fork(&self) -> bool {
         true
     }
+    fn supports_archived_sessions(&self) -> bool {
+        true
+    }
     fn delete_policy(&self) -> super::DeletePolicy {
-        // 委托官方 CLI 删除，直接改库，无法进回收站
+        // 委托官方 CLI 删除，直接改库，无法进废纸篓
         super::DeletePolicy::Permanent
     }
-    fn catalog(&self, include_empty: bool) -> Result<super::Catalog, String> {
-        let mut catalog = catalog_at(&db_path(), include_empty)?;
-        let names = models::names();
-        for meta in &mut catalog.sessions {
-            models::decorate_meta(meta, &names);
-        }
-        Ok(catalog)
+    fn scan_catalog(
+        &self,
+        filter: crate::agents::CatalogFilter,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::Catalog, String> {
+        cached_catalog(&db_path(), filter, cancelled)
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
         token
@@ -702,43 +720,54 @@ impl AgentSource for OpenCodeSource {
         _project_dir: &str,
         session_id: &str,
     ) -> Result<SessionDetail, String> {
-        let mut detail = read_session_mode_at(&db_path(), session_id, true)?;
-        models::decorate_detail(&mut detail, &models::names());
-        Ok(detail)
+        read_session_mode_at(&db_path(), session_id, true)
     }
     fn read_session(&self, _project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
-        let mut detail = read_session_at(&db_path(), session_id)?;
-        models::decorate_detail(&mut detail, &models::names());
-        Ok(detail)
+        read_session_at(&db_path(), session_id)
     }
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         search_events_at(&db_path(), meta)
     }
-    fn delete_session(&self, _project_dir: &str, session_id: &str) -> Result<(), String> {
+    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
         if !is_valid_session_id(session_id) {
-            return Err("非法会话 ID".into());
+            return Err("会话 ID 无效".into());
         }
-        // 委托官方 CLI：会一并清理子代理会话，避免直接改库。
-        // 先解析 opencode 绝对路径：GUI 应用从 Finder 启动只有精简 PATH，
-        // 直接拿名字 spawn 会 ENOENT。删除是破坏性操作，找不到就显式报错
-        let bin = super::find_executable("opencode").ok_or_else(|| {
-            "找不到 opencode 可执行文件（请确认已安装；若已安装，可能是它不在应用可见的 PATH 中）"
-                .to_string()
-        })?;
-        let output = std::process::Command::new(&bin)
-            .args(["session", "delete", session_id])
-            .env(
-                "XDG_DATA_HOME",
-                data_home()
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            )
+        let path = db_path().canonicalize()
+            .map_err(|error| format!("无法定位 OpenCode 会话库：{error}"))?;
+        let db = open_db_scoped(&path, Some(session_id))?;
+        let (row, warnings) = session_row(&db, session_id)?;
+        if !warnings.is_empty() {
+            return Err(warnings.join("；"));
+        }
+        if row.is_child || project_id(&row) != project_dir {
+            return Err("OpenCode 会话所属项目已变化，请刷新列表后重试".into());
+        }
+        drop(db);
+
+        let bin = super::find_executable("opencode")
+            .ok_or("找不到 opencode 可执行文件，请检查是否已安装")?;
+        let mut command = std::process::Command::new(&bin);
+        command.args(["session", "delete", session_id]).env("OPENCODE_DB", &path);
+        if let Some(data_root) = path.parent().and_then(|dir| {
+            dir.ends_with("opencode").then(|| dir.parent()).flatten()
+        }) {
+            command.env("XDG_DATA_HOME", data_root);
+        }
+        let help = std::process::Command::new(&bin).args(["session", "delete", "--help"])
+            .output().map_err(|error| format!("无法读取 OpenCode 删除命令选项：{error}"))?;
+        if !help.status.success() {
+            return Err("当前 OpenCode CLI 不支持会话删除".into());
+        }
+        if String::from_utf8_lossy(&help.stdout).lines().any(|line| line.trim_start().starts_with("--standalone ")) {
+            // 独立进程才能保证数据库路径生效，避免连接到已运行的其他实例。
+            command.arg("--standalone");
+        }
+        let output = command
             .output()
-            .map_err(|e| format!("调用 opencode 失败（{}）: {e}", bin.display()))?;
+            .map_err(|e| format!("无法运行 OpenCode（{}）： {e}", bin.display()))?;
         if !output.status.success() {
             return Err(format!(
-                "opencode session delete 失败: {}",
+                "opencode session delete 失败：{}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
@@ -774,6 +803,10 @@ fn escape_dir(dir: &str) -> String {
     super::escape_path_id(dir)
 }
 
+fn project_id(row: &SessionRow) -> String {
+    escape_dir(row.directory.as_deref().filter(|d| !d.is_empty()).unwrap_or("(unknown)"))
+}
+
 fn build_meta(
     conn: &Connection,
     row: &SessionRow,
@@ -789,19 +822,14 @@ fn build_meta(
     if title.is_none() {
         title = first_user_text(conn, &row.id, warnings);
     }
-    let dir = row
-        .directory
-        .clone()
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "(unknown)".to_string());
     Some(SessionMeta {
         session_id: row.id.clone(),
-        project_dir: escape_dir(&dir),
+        project_dir: project_id(row),
         cwd: row.directory.clone(),
         title,
         model: None,
-        model_name: None,
         version: row.version.clone(),
+        client: None,
         git_branch: None,
         entrypoint: None,
         first_ts: row.created_ms.and_then(ms_to_iso),
@@ -810,8 +838,9 @@ fn build_meta(
         assistant_count: assistant_text,
         real_user_count: real_user,
         assistant_text_count: assistant_text,
-        size_bytes: 0,
+        size_bytes: None,
         has_transcript: true,
+        archived: row.archived,
         stats_pending: false,
         source_files: Vec::new(),
     })
@@ -834,14 +863,15 @@ mod tests {
             CREATE TABLE part (id TEXT, message_id TEXT, time_created INTEGER, data TEXT);
             INSERT INTO session VALUES ('ses_cached', 'original', '/tmp/x', NULL, 1, 1, NULL, NULL);
             INSERT INTO message VALUES ('m1', 'ses_cached', 1, '{\"role\":\"user\"}');
-            INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"question\"}');
+            INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"问题\"}');
             PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
-        assert_eq!(
-            catalog_at(&path, false).unwrap().sessions[0].assistant_text_count,
-            0
-        );
+        let initial = catalog_at(&path, false).unwrap();
+        let initial_bytes =
+            (r#"{"role":"user"}"#.len() + r#"{"type":"text","text":"问题"}"#.len()) as u64;
+        assert_eq!(initial.sessions[0].assistant_text_count, 0);
+        assert_eq!(initial.sessions[0].size_bytes, Some(initial_bytes));
         let before = path.metadata().unwrap();
         conn.execute_batch(
             "INSERT INTO message VALUES ('m2', 'ses_cached', 2, '{\"role\":\"assistant\"}');
@@ -858,10 +888,19 @@ mod tests {
         );
         let updated = catalog_at(&path, false).unwrap();
         assert_eq!(updated.sessions[0].assistant_text_count, 1);
+        let added_bytes =
+            (r#"{"role":"assistant"}"#.len() + r#"{"type":"text","text":"answer"}"#.len()) as u64;
+        assert_eq!(
+            updated.sessions[0].size_bytes,
+            Some(initial_bytes + added_bytes)
+        );
         assert_eq!(updated.sessions[0].title.as_deref(), Some("renamed"));
         conn.execute("UPDATE session SET time_archived=99", [])
             .unwrap();
         assert!(catalog_at(&path, false).unwrap().sessions.is_empty());
+        let archived = cached_catalog(&path, CatalogFilter { include_archived: true, ..Default::default() }, &|| false).unwrap();
+        assert!(archived.sessions[0].archived);
+        assert!(read_session_at(&path, "ses_cached").unwrap().meta.archived);
     }
 
     #[test]
@@ -886,25 +925,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_semantics_per_agent() {
-        // OpenCode 委托官方 CLI 删除（永久）；其余 agent 移入回收站
-        assert_eq!(
-            OpenCodeSource.delete_policy(),
-            crate::agents::DeletePolicy::Permanent
-        );
-        for s in crate::agents::all_sources() {
-            if s.id() != "opencode" {
-                assert_eq!(
-                    s.delete_policy(),
-                    crate::agents::DeletePolicy::Trash,
-                    "agent {} 应移入回收站",
-                    s.id()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn placeholder_titles() {
         assert!(is_placeholder_title(
             "New session - 2026-09-03T04:51:43.382Z"
@@ -921,7 +941,7 @@ mod tests {
         assert_eq!(ms_to_iso(0), None);
         assert_eq!(
             ms_to_iso(1788417099162),
-            Some("2026-09-03T06:31:39Z".to_string())
+            Some("2026-09-03T06:31:39.162Z".to_string())
         );
     }
 
@@ -961,7 +981,7 @@ mod tests {
         assert_eq!(
             warnings.len(),
             1,
-            "标题命中后的坏行告警不得丢失: {warnings:?}"
+            "标题命中后的坏行告警不得丢失：{warnings:?}"
         );
         assert!(warnings[0].contains("1 条"), "{}", warnings[0]);
     }
@@ -1046,7 +1066,7 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_good"),
-            "健康会话不得被损坏会话连坐隐藏: {ids:?}"
+            "健康会话不得被损坏会话连坐隐藏：{ids:?}"
         );
         assert!(
             ids.iter().any(|id| id == "ses_bad"),
@@ -1054,7 +1074,7 @@ mod tests {
         );
         assert!(
             catalog.warnings.iter().any(|w| w.contains("不是合法 JSON")),
-            "损坏记录必须产生告警: {:?}",
+            "损坏记录必须产生告警：{:?}",
             catalog.warnings
         );
     }
@@ -1100,11 +1120,11 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_ws"),
-            "合法 JSON 不得被误删: {ids:?}"
+            "合法 JSON 不得被误删：{ids:?}"
         );
         assert!(
             catalog.warnings.is_empty(),
-            "不得误报损坏: {:?}",
+            "不得误报损坏：{:?}",
             catalog.warnings
         );
         let meta = catalog
@@ -1195,11 +1215,11 @@ mod tests {
             .collect();
         assert!(
             ids.iter().any(|id| id == "ses_p"),
-            "部分计数条目不得被当空会话隐藏: {ids:?}"
+            "部分计数条目不得被当空会话隐藏：{ids:?}"
         );
         assert!(
             catalog.warnings.iter().any(|w| w.contains("ses_p")),
-            "计数未知必须告警: {:?}",
+            "计数未知必须告警：{:?}",
             catalog.warnings
         );
     }
@@ -1279,7 +1299,7 @@ mod tests {
 
         let conn = open_db(&path).unwrap();
         let (rows, ws) = load_session_rows(&conn).split();
-        assert!(ws.is_empty(), "正常库不应产生降级告警: {ws:?}");
+        assert!(ws.is_empty(), "正常库不应产生降级告警：{ws:?}");
         let rows = rows.expect("fixture 库应可读");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -1298,6 +1318,6 @@ mod tests {
         // 占位标题被替换为首条用户消息
         assert_eq!(meta.title.as_deref(), Some("OpenCode 第一条消息"));
         assert_eq!(meta.project_dir, "-tmp-oc");
-        assert_eq!(meta.first_ts.as_deref(), Some("2026-09-03T06:30:00Z"));
+        assert_eq!(meta.first_ts.as_deref(), Some("2026-09-03T06:30:00.000Z"));
     }
 }

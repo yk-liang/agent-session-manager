@@ -1,33 +1,54 @@
-import type { Project, SessionMeta } from "./types";
-import { sessionKey } from "./utils.ts";
+import type { Catalog, Project, SessionMeta } from "./types";
+import { compareTimestamps, sessionKey } from "./utils.ts";
 
-// 仅用于侧栏选择；请求后端时仍传递 SessionMeta 原有的 projectDir。
 export const PROJECTLESS_GROUP = "group:projectless";
 export interface SessionGroup extends Project { projectless: boolean }
-const NO_HINTS: ReadonlyMap<string, string | null> = new Map();
 
-export function sessionGroup(session: SessionMeta, projectlessIds: ReadonlySet<string>, hints: ReadonlyMap<string, string | null> = NO_HINTS): string {
-  const root = hints.get(sessionKey(session));
-  if (root !== undefined) return root === null ? PROJECTLESS_GROUP : `group:root:${root}`;
-  return projectlessIds.has(session.sessionId) ? PROJECTLESS_GROUP : session.projectDir;
-}
-
-export function groupSessions(projects: Project[], sessions: SessionMeta[], projectlessIds: ReadonlySet<string>, hints: ReadonlyMap<string, string | null> = NO_HINTS): SessionGroup[] {
-  if (projectlessIds.size === 0 && hints.size === 0) return projects.map((project) => ({ ...project, projectless: false }));
-  const paths = new Map(projects.map((project) => [project.dirName, project.displayPath]));
+function buildCatalogGroups(catalog: Catalog) {
+  const projectlessIds = new Set(catalog.projectlessSessionIds);
+  const hints = new Map(catalog.sessionGroupHints?.map(hint => [sessionKey(hint), hint.root]));
+  const regroup = projectlessIds.size > 0 || hints.size > 0;
+  const paths = new Map(catalog.projects.map(project => [project.dirName, project.displayPath]));
+  const byGroup = new Map<string, SessionMeta[]>();
+  const projectlessKeys = new Set<string>();
   const groups = new Map<string, SessionGroup>();
-  for (const session of sessions) {
-    const key = sessionGroup(session, projectlessIds, hints);
-    const projectless = key === PROJECTLESS_GROUP;
-    let group = groups.get(key);
+
+  for (const session of catalog.sessions) {
+    const key = sessionKey(session);
+    const root = hints.get(key);
+    const projectless = root === null || root === undefined && projectlessIds.has(session.sessionId);
+    const dirName = projectless ? PROJECTLESS_GROUP : root === undefined ? session.projectDir : `group:root:${root}`;
+    const rows = byGroup.get(dirName);
+    if (rows) rows.push(session);
+    else byGroup.set(dirName, [session]);
+    if (projectless) projectlessKeys.add(key);
+    if (!regroup) continue;
+
+    const group = groups.get(dirName);
     if (!group) {
-      group = { dirName: key, displayPath: projectless ? "未归属项目" : hints.get(sessionKey(session)) ?? paths.get(key) ?? session.cwd ?? session.projectDir,
-        projectless, sessionCount: 0, lastActivity: null };
-      groups.set(key, group);
+      const displayPath = projectless ? "未归属项目" : root ?? paths.get(dirName) ?? session.cwd ?? session.projectDir;
+      groups.set(dirName, { dirName, displayPath, projectless, sessionCount: 1, lastActivity: session.lastTs });
+      continue;
     }
     group.sessionCount++;
-    if (session.lastTs && (!group.lastActivity || session.lastTs > group.lastActivity)) group.lastActivity = session.lastTs;
+    if (compareTimestamps(session.lastTs, group.lastActivity) > 0) group.lastActivity = session.lastTs;
   }
-  return [...groups.values()].sort((a,b) => Number(b.projectless) - Number(a.projectless)
-    || (b.lastActivity ?? "").localeCompare(a.lastActivity ?? ""));
+
+  return {
+    groups: regroup ? [...groups.values()].sort((a, b) => Number(b.projectless) - Number(a.projectless)
+      || compareTimestamps(b.lastActivity, a.lastActivity))
+      : catalog.projects.map(project => ({ ...project, projectless: false })),
+    byGroup, hints, projectlessKeys,
+  };
+}
+
+const catalogGroupCache = new WeakMap<Catalog, ReturnType<typeof buildCatalogGroups>>();
+
+export function catalogGroups(catalog: Catalog) {
+  let view = catalogGroupCache.get(catalog);
+  if (!view) {
+    view = buildCatalogGroups(catalog);
+    catalogGroupCache.set(catalog, view);
+  }
+  return view;
 }

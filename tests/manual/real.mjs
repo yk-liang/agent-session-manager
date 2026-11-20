@@ -100,7 +100,7 @@ for (const line of readFileSync(jsonl, "utf8").split("\n")) {
 console.log("events:", events.length);
 
 const mock = {
-  list_agents: [{ id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: "trash" }],
+  list_agents: [{ id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: "trash" }],
   resume_command: "qoder --resume real",
   catalog: {
     projects: [

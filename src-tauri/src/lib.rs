@@ -1,4 +1,5 @@
 mod agents;
+mod session_catalog;
 mod session_watch;
 mod usage;
 
@@ -6,28 +7,16 @@ pub fn run_usage_collector_if_requested() -> Option<i32> {
     usage::collector::run_if_requested()
 }
 
-#[tauri::command]
-fn collector_status(service: tauri::State<usage::service::Service>) -> Result<usage::service::Status, String> {
-    service.status()
-}
-#[tauri::command]
-async fn set_collector_enabled(app: tauri::AppHandle, enabled: bool) -> Result<usage::service::Status, String> {
-    run_backend(move || app.state::<usage::service::Service>().set_enabled(enabled)).await
-}
-#[tauri::command]
-fn open_collector_settings(service: tauri::State<usage::service::Service>) -> Result<(), String> {
-    service.open_settings()
-}
-
 use agents::profiles::workspace::{ChangeKind, ChangePreview, Validation, Workspace};
 use agents::profiles::{CurrentConfig, ProfileSummary};
-use agents::{AgentInfo, Catalog, SessionDetail};
+use agents::{AgentInfo, CatalogFilter, SessionDetail};
+use session_catalog::{SessionCatalogs, Snapshot};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
-/// 位 0 为未保存草稿，位 1 为进行中的配置操作。原生关闭与退出均需复核。
+/// 位 0 表示有未保存的草稿，位 1 表示正在修改配置。
 #[derive(Default)]
-struct ConfigGuard(AtomicU8);
+struct ConfigEditGuard(AtomicU8);
 
 #[cfg(target_os = "macos")]
 fn install_guarded_quit(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -48,8 +37,7 @@ fn install_guarded_quit(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     }
     let position =
         position.ok_or_else(|| std::io::Error::other("Default Quit menu item was not found"))?;
-    // 预定义 Quit 在 macOS 上直接发 terminate:，不会先经过 ExitRequested。
-    // 仅替换此项，保留系统的编辑、窗口、服务菜单和原有快捷键。
+    // macOS 的默认退出项可能绕过 ExitRequested。
     app_menu.remove_at(position)?;
     let quit = MenuItem::with_id(
         app,
@@ -64,7 +52,7 @@ fn install_guarded_quit(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
 }
 
 #[tauri::command]
-fn set_config_guard(state: tauri::State<'_, ConfigGuard>, dirty: bool, busy: bool) {
+fn set_config_guard(state: tauri::State<'_, ConfigEditGuard>, dirty: bool, busy: bool) {
     state
         .0
         .store(u8::from(dirty) | (u8::from(busy) << 1), Ordering::SeqCst);
@@ -73,18 +61,17 @@ fn set_config_guard(state: tauri::State<'_, ConfigGuard>, dirty: bool, busy: boo
 #[tauri::command]
 fn confirm_config_exit(
     app: tauri::AppHandle,
-    state: tauri::State<'_, ConfigGuard>,
+    state: tauri::State<'_, ConfigEditGuard>,
 ) -> Result<(), String> {
     if state.0.load(Ordering::SeqCst) & 2 != 0 {
-        return Err("配置操作正在处理中，请稍后再退出".into());
+        return Err("配置操作仍在进行，请稍后退出。".into());
     }
     state.0.store(0, Ordering::SeqCst);
     app.exit(0);
     Ok(())
 }
 
-// 同步命令会在窗口线程执行。扫描、文件锁与外部进程都可能等待，
-// 必须放进阻塞线程池，让慢 I/O 期间窗口仍可切页、刷新或关闭。
+// 文件 I/O 和外部命令在线程池执行，避免阻塞窗口线程。
 async fn run_backend<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -92,12 +79,30 @@ where
 {
     tauri::async_runtime::spawn_blocking(work)
         .await
-        .map_err(|error| format!("后台操作失败: {error}"))?
+        .map_err(|error| format!("后台操作失败：{error}"))?
 }
 
 #[tauri::command]
 async fn list_agents() -> Result<Vec<AgentInfo>, String> {
     run_backend(|| Ok(agents::list_agents())).await
+}
+
+#[tauri::command]
+async fn count_sessions(
+    agent: String,
+    include_empty: bool,
+    include_archived: bool,
+) -> Result<Option<usize>, String> {
+    run_backend(move || {
+        let source = agents::find_source(&agent)?;
+        let filter = CatalogFilter {
+            include_empty,
+            include_archived: include_archived && source.supports_archived_sessions(),
+        };
+        let catalog = source.scan_catalog(filter, &|| false)?;
+        Ok(catalog.warnings.is_empty().then_some(catalog.sessions.len()))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -110,38 +115,25 @@ async fn open_data_dir(agent: String) -> Result<(), String> {
     .await
 }
 
-static USAGE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static EVENT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static SUMMARY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[tauri::command]
-async fn sync_request_events(
-    app: tauri::AppHandle,
+fn usage_sync_status(collector: tauri::State<'_, usage::collector::Desktop>) -> usage::collector::SyncStatus {
+    collector.status()
+}
+
+#[tauri::command]
+fn check_usage_now(collector: tauri::State<'_, usage::collector::Desktop>) {
+    collector.check_now();
+}
+
+#[tauri::command]
+fn recollect_usage(
     agent: String,
-    generation: u64,
-) -> Result<usage::summary::Synced, String> {
-    USAGE_GENERATION.fetch_max(generation, Ordering::SeqCst);
-    run_backend(move || {
-        let last = std::cell::RefCell::new((std::time::Instant::now(), ""));
-        usage::summary::sync_with_progress(
-            &agent,
-            &|| USAGE_GENERATION.load(Ordering::SeqCst) != generation,
-            &|progress| {
-                let mut last = last.borrow_mut();
-                if progress.phase != last.1
-                    || last.0.elapsed().as_millis() >= 200
-                    || progress.total_files == Some(progress.checked_files)
-                {
-                    *last = (std::time::Instant::now(), progress.phase);
-                    let _ = app.emit(
-                        "usage-sync-progress",
-                        serde_json::json!({ "generation": generation, "progress": progress }),
-                    );
-                }
-            },
-        )
-    })
-    .await
+    collector: tauri::State<'_, usage::collector::Desktop>,
+) -> Result<usage::collector::SyncStatus, String> {
+    collector.recollect(agent)
 }
 
 #[tauri::command]
@@ -183,50 +175,134 @@ fn cancel_request_events(generation: u64) {
 }
 
 #[tauri::command]
-fn cancel_usage(generation: u64) {
-    USAGE_GENERATION.fetch_max(generation, Ordering::SeqCst);
+async fn clear_orphan_requests(
+    query: usage::events::CleanupQuery,
+    collector: tauri::State<'_, usage::collector::Desktop>,
+) -> Result<usize, String> {
+    let removed = run_backend(move || usage::events::clear_orphans(query)).await?;
+    if removed > 0 {
+        collector.ledger_changed();
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
-async fn catalog(agent: String, include_empty: Option<bool>) -> Result<Catalog, String> {
+async fn get_model_prices(
+    agent: Option<String>,
+) -> Result<usage::pricing::ModelPricesResponse, String> {
+    run_backend(move || usage::pricing::list_model_prices(agent.as_deref())).await
+}
+
+#[tauri::command]
+async fn set_custom_price(
+    app: tauri::AppHandle,
+    input: usage::pricing::CustomPriceInput,
+) -> Result<usage::pricing::PricingCatalogStatus, String> {
     run_backend(move || {
-        let source = agents::find_source(&agent)?;
-        let catalog = source.quick_catalog(include_empty.unwrap_or(false))?;
-        agents::search::register(source.as_ref(), &catalog);
-        Ok(catalog)
+        let status = usage::pricing::set_custom_price(input)?;
+        let _ = app.emit("usage-pricing-updated", status.revision);
+        Ok(status)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_custom_price(
+    app: tauri::AppHandle,
+    model: String,
+) -> Result<usage::pricing::PricingCatalogStatus, String> {
+    run_backend(move || {
+        let status = usage::pricing::delete_custom_price(&model)?;
+        let _ = app.emit("usage-pricing-updated", status.revision);
+        Ok(status)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn refresh_reference_prices(
+    app: tauri::AppHandle,
+) -> Result<usage::pricing::PricingCatalogStatus, String> {
+    run_backend(move || {
+        let status = usage::pricing::refresh_reference_prices();
+        let _ = app.emit("usage-pricing-updated", status.revision);
+        Ok(status)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn search_reference_prices(
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<usage::pricing::ReferenceSearchItem>, String> {
+    run_backend(move || Ok(usage::pricing::search_reference_prices(&query, limit.unwrap_or(30))))
+        .await
+}
+
+#[tauri::command]
+async fn catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    agent: String,
+    include_empty: bool,
+    include_archived: Option<bool>,
+    generation: u64,
+    revision: Option<u64>,
+) -> Result<Option<Snapshot>, String> {
+    let state = state.inner().clone();
+    run_backend(move || {
+        state.load(
+            agents::find_source(&agent)?.as_ref(),
+            CatalogFilter {
+                include_empty,
+                include_archived: include_archived.unwrap_or(false),
+            },
+            generation,
+            revision,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    generation: u64,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    run_backend(move || {
+        state.cancel(generation);
+        Ok(())
     }).await
 }
 
-// 同一时间只运行一次精确统计。切换上下文时取消后续文件读取，首屏不等待此锁。
-static REFINEMENT: AtomicU64 = AtomicU64::new(0);
 #[tauri::command]
-fn cancel_catalog_refinement(generation: u64) { REFINEMENT.fetch_max(generation, Ordering::SeqCst); }
-#[tauri::command]
-async fn refine_catalog(agent: String, include_empty: bool, generation: u64) -> Result<Catalog, String> {
-    REFINEMENT.fetch_max(generation, Ordering::SeqCst);
+async fn refine_catalog(
+    state: tauri::State<'_, std::sync::Arc<SessionCatalogs>>,
+    agent: String,
+    include_empty: bool,
+    include_archived: Option<bool>,
+    generation: u64,
+    revision: Option<u64>,
+) -> Result<Option<Snapshot>, String> {
+    let state = state.inner().clone();
     run_backend(move || {
-        static RUNNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        let cancelled = || REFINEMENT.load(Ordering::SeqCst) != generation;
-        if cancelled() { return Err("目录更新已取消".into()); }
-        let source = agents::find_source(&agent)?;
-        let catalog = source.refine_catalog(include_empty, &cancelled)?;
-        if cancelled() { return Err("目录更新已取消".into()); }
-        agents::search::register(source.as_ref(), &catalog);
-        Ok(catalog)
-    }).await
+        state.refine(
+            agents::find_source(&agent)?.as_ref(),
+            CatalogFilter {
+                include_empty,
+                include_archived: include_archived.unwrap_or(false),
+            },
+            generation,
+            revision,
+        )
+    })
+    .await
 }
+
 #[tauri::command]
 async fn read_tool_payload(token: String) -> Result<serde_json::Value, String> {
     run_backend(move || agents::read_tool_payload(&token)).await
-}
-
-#[tauri::command]
-async fn resolve_model_names(agent: String, models: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
-    if models.len() > 256 || models.iter().any(|id| id.len() > 512 || id.chars().any(char::is_control)) {
-        return Err("模型标识数量或长度超出限制".into());
-    }
-    run_backend(move || Ok(agents::find_source(&agent)?.resolve_model_names(&models))).await
 }
 
 #[tauri::command]
@@ -269,14 +345,30 @@ async fn delete_session(
 ) -> Result<(), String> {
     run_backend(move || {
         let source = agents::find_source(&agent)?;
+        if source.delete_policy() == agents::DeletePolicy::ReadOnly {
+            return Err("该 Agent 的会话为只读".into());
+        }
         let targets = source.deletion_targets(&project_dir, &session_id)?;
         usage::preserve_before_delete(&agent, targets.as_deref(), || {
             // 保存期间可能新建主日志或状态目录；实际删除集合必须仍与已保存的范围一致。
             if targets.is_some() && source.deletion_targets(&project_dir, &session_id)? != targets {
-                return Err("会话删除目标已变化，请重试删除".into());
+                return Err("会话文件已变化，请重新确认后删除".into());
             }
             source.delete_session(&project_dir, &session_id)
         })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_session_archived(
+    agent: String,
+    project_dir: String,
+    session_id: String,
+    archived: bool,
+) -> Result<(), String> {
+    run_backend(move || {
+        agents::find_source(&agent)?.set_session_archived(&project_dir, &session_id, archived)
     })
     .await
 }
@@ -306,9 +398,14 @@ async fn resume_in_terminal(
         let source = agents::find_source(&agent)?;
         let cmd = source
             .resume_command(&session_id, fork.unwrap_or(false))
-            .ok_or_else(|| "该 agent 不支持恢复会话".to_string())?;
+            .ok_or_else(|| "该 Agent 不支持恢复会话".to_string())?;
         let full = match cwd {
-            Some(dir) => format!("cd {} && {}", agents::shell_quote(&dir), cmd),
+            Some(dir) => {
+                if !std::path::Path::new(&dir).is_dir() {
+                    return Err(format!("原工作目录不可用，无法恢复会话：{dir}"));
+                }
+                format!("cd -- {} && {}", agents::shell_quote(&dir), cmd)
+            }
             None => cmd,
         };
         agents::run_in_terminal(&full)
@@ -425,28 +522,19 @@ mod command_tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(ConfigGuard::default())
+        .manage(ConfigEditGuard::default())
         .manage(session_watch::SessionWatcher::default())
-        .manage(usage::service::Service::default())
+        .manage(std::sync::Arc::new(SessionCatalogs::default()))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             install_guarded_quit(app.handle())?;
-            let service_app = app.handle().clone();
-            let generation = USAGE_GENERATION.load(Ordering::SeqCst);
-            tauri::async_runtime::spawn_blocking(move || {
-                if service_app.state::<usage::service::Service>().ensure().is_err() {
-                    eprintln!("Background token collector registration failed; inspect usage service status");
-                }
-                // 每次启动只同步一次，不依赖可选的登录服务。
-                let cancelled = || USAGE_GENERATION.load(Ordering::SeqCst) != generation;
-                for agent in usage::AGENTS {
-                    // 用量页接管同步后停止启动任务，避免冷启动重复读取大历史。
-                    if cancelled() {
-                        break;
-                    }
-                    if usage::summary::sync(agent, &cancelled).is_err() && !cancelled() {
-                        eprintln!("Request sync failed for {agent}; open the usage page to retry");
-                    }
+            let sync_app = app.handle().clone();
+            app.manage(usage::collector::Desktop::start(move |status| {
+                let _ = sync_app.emit("usage-sync-status", status);
+            }));
+            tauri::async_runtime::spawn_blocking(|| {
+                if usage::service::ensure_login_service().is_err() {
+                    eprintln!("Could not register the background usage collector.");
                 }
             });
             tauri::async_runtime::spawn_blocking(|| {
@@ -454,11 +542,17 @@ pub fn run() {
                     eprintln!("Configuration recovery failed; open the configuration workspace to inspect the conflict");
                 }
             });
+            let pricing_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(status) = usage::pricing::refresh_if_stale() {
+                    let _ = pricing_app.emit("usage-pricing-updated", status.revision);
+                }
+            });
             Ok(())
         })
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "asm-guarded-quit" {
-                if app.state::<ConfigGuard>().0.load(Ordering::SeqCst) != 0 {
+                if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
                     let _ = app.emit("config-exit-requested", ());
                 } else {
                     app.exit(0);
@@ -467,21 +561,18 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {
-                if *focused { window.state::<usage::service::Service>().check(); }
+                if *focused { usage::service::check_login_service(); }
                 window.state::<session_watch::SessionWatcher>().set_foreground(*focused);
                 let _ = window.emit("session-window-focus", focused);
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.state::<ConfigGuard>().0.load(Ordering::SeqCst) != 0 {
+                if window.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
                     api.prevent_close();
                     let _ = window.emit("config-exit-requested", ());
                 }
             }
         })
-        // 单实例：第二次启动只聚焦已有窗口（UX 兜底）。
-        // 注意：该插件在 macOS 上先探测 socket 再异步建监听，存在双进程
-        // 都通过探测的竞态，不能保证互斥；配置库的跨进程互斥由
-        // profiles 模块的 flock 排他锁保证（见 store_lock）
+        // 单实例插件只负责聚焦窗口，配置库通过 flock 防止跨进程并发写入。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
@@ -492,23 +583,25 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
-            refine_catalog, cancel_catalog_refinement, read_tool_payload,
+            refine_catalog, cancel_catalog, read_tool_payload,
             list_agents,
             open_data_dir,
             catalog,
-            sync_request_events, read_usage_summary, cancel_usage_summary,
+            usage_sync_status, check_usage_now, recollect_usage, read_usage_summary, cancel_usage_summary, count_sessions,
             read_request_events,
             cancel_request_events,
-            cancel_usage,
-            collector_status,
-            set_collector_enabled,
-            open_collector_settings,
-            resolve_model_names,
+            clear_orphan_requests,
+            get_model_prices,
+            set_custom_price,
+            delete_custom_price,
+            refresh_reference_prices,
+            search_reference_prices,
             watch_sessions,
             search_conversations,
             cancel_conversation_search,
             read_session,
             delete_session,
+            set_session_archived,
             resume_command,
             resume_in_terminal,
             get_current_config,
@@ -526,9 +619,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // 兜底处理运行时发起的退出；用户确认退出的命令已先清除 guard。
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<usage::collector::Desktop>().stop();
+            }
+            // 外部退出请求也需要检查配置草稿。
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if app.state::<ConfigGuard>().0.load(Ordering::SeqCst) != 0 {
+                if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
                     api.prevent_exit();
                     let _ = app.emit("config-exit-requested", ());
                 }

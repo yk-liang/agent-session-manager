@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn projectless_catalog_exposes_only_existing_marked_ids_and_keeps_operation_identity() {
-        use super::super::{catalog_in, delete_session_with, escape_cwd, read_session_in};
+        use super::super::{catalog_in, escape_cwd, read_session_in};
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("sessions");
         let day = root.join("2099/12/31");
@@ -203,11 +203,6 @@ mod tests {
                 .project_dir,
             session.project_dir
         );
-        delete_session_with(&root, &session.project_dir, "unassigned", |paths| {
-            assert_eq!(paths.len(), 1);
-            Ok(())
-        })
-        .unwrap();
         assert_eq!(fs::read_to_string(&state).unwrap(), text);
     }
 

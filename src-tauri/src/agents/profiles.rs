@@ -1,16 +1,8 @@
-//! 多 Agent 配置方案快照：由各数据源声明受管理的配置文件，负责
-//! 保存、列表、应用（持久事务与安全恢复）与删除。
-//!
-//! 安全要点：
-//! - 配置可能含凭据：存储目录强制 0700，写入文件一律 0600
-//! - 方案列表只返回摘要；文件内容和差异按需返回，不写入日志
-//! - 配置库事务（list/save/delete/apply）由 flock 排他锁串行化：
-//!   单实例插件在 macOS 有探测竞态，不能替代跨进程互斥
-//! - 应用前把所有原文件克隆进各自专属的暂存事务目录（保留权限/ACL），
-//!   新内容原子替换；失败时暂存回改名恢复，绝不把"读不到"当成"不存在"
+//! 配置可能含有凭据。方案目录权限为 0700，写入文件为 0600，列表只返回摘要。
+//! 配置库以 flock 串行化跨进程访问。应用配置前保留原文件的权限和 ACL，
+//! 事务失败时通过重命名恢复。
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -32,7 +24,6 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 快照中的单个配置文件：key 是稳定逻辑键，content 是原始文本内容
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigSnapshot {
@@ -51,7 +42,6 @@ pub struct Profile {
     pub captured_keys: Option<Vec<String>>,
 }
 
-/// 前端可见的单文件在场标记（不含内容）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePresence {
@@ -60,7 +50,6 @@ pub struct FilePresence {
     pub present: bool,
 }
 
-/// 前端可见的配置方案摘要：不含任何配置内容（可能包括凭据）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
@@ -70,7 +59,6 @@ pub struct ProfileSummary {
     pub files: Vec<FilePresence>,
 }
 
-/// 依据 agent 的 config_spec 生成摘要：逐文件标出快照中是否留有内容
 fn summarize(p: &Profile, spec: &[ConfigFile]) -> ProfileSummary {
     let files = spec
         .iter()
@@ -88,86 +76,11 @@ fn summarize(p: &Profile, spec: &[ConfigFile]) -> ProfileSummary {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct ProfileStore {
     profiles: Vec<Profile>,
 }
 
-/// 反序列化中转：兼容旧格式（Qoder 专属的 settings/mcp/modelsDefault 字段）
-#[derive(Deserialize, Default)]
-struct RawStore {
-    #[serde(default)]
-    profiles: Vec<RawProfile>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawProfile {
-    name: String,
-    #[serde(default)]
-    agent: Option<String>,
-    created_at: u64,
-    #[serde(default)]
-    files: Option<Vec<ConfigSnapshot>>,
-    #[serde(default)]
-    captured_keys: Option<Vec<String>>,
-    // 旧格式字段（解析后的 JSON），仅在缺少 files 时用于一次性迁移
-    #[serde(default)]
-    settings: Option<Value>,
-    #[serde(default)]
-    mcp: Option<Value>,
-    #[serde(default)]
-    models_default: Option<Value>,
-}
-
-impl RawProfile {
-    /// 归一到新格式：已是 files 直接用；旧格式迁移为 agent=qoder + 原始文本 files
-    fn into_profile(self) -> Profile {
-        let agent = self.agent.unwrap_or_else(|| "qoder".to_string());
-        if let Some(files) = self.files {
-            return Profile {
-                name: self.name,
-                agent,
-                created_at: self.created_at,
-                files,
-                captured_keys: self.captured_keys,
-            };
-        }
-        let mut files = Vec::new();
-        for (key, v) in [
-            ("settings.json", self.settings),
-            ("mcp.json", self.mcp),
-            (".models/default", self.models_default),
-        ] {
-            if let Some(v) = v {
-                // 迁移一次性把解析后的 JSON 转为美化文本，之后按原始字节管理
-                let content = serde_json::to_string_pretty(&v).unwrap_or_default();
-                files.push(ConfigSnapshot {
-                    key: key.to_string(),
-                    content,
-                });
-            }
-        }
-        // 只有旧 Qoder 字段格式能证明完整采集范围。其他 agent 缺少
-        // files 时不能凭此继承 settings.json 的删除权限。
-        let captured_keys = (agent == "qoder").then(|| {
-            vec![
-                "settings.json".to_string(),
-                "mcp.json".to_string(),
-                ".models/default".to_string(),
-            ]
-        });
-        Profile {
-            name: self.name,
-            agent,
-            created_at: self.created_at,
-            files,
-            captured_keys,
-        }
-    }
-}
-
-/// 当前受管理文件；排除独立凭证文件，但正文仍可能内嵌密钥，不应写入日志。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentFile {
@@ -186,21 +99,8 @@ pub struct CurrentConfig {
 }
 
 fn store_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "无法确定 home 目录".to_string())?;
-    let new_dir = home.join(".agent-session-manager");
-    // 从旧名 ~/.qoder-session-manager 自动迁移；探测严格化
-    // （只有 NotFound 才算缺失，探测错误显性化），
-    // 迁移失败必须报错，否则会打开空的新库，历史配置看似"消失"
-    let old_dir = home.join(".qoder-session-manager");
-    if !super::present(&new_dir)? && super::present(&old_dir)? {
-        fs::rename(&old_dir, &new_dir).map_err(|e| {
-            format!(
-                "迁移配置目录 {:?} → {:?} 失败: {e}；请人工处理，历史配置仍在旧目录中",
-                old_dir, new_dir
-            )
-        })?;
-    }
-    Ok(new_dir)
+    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
+    Ok(home.join(".agent-session-manager"))
 }
 
 /// 配置库可能含凭据：目录强制 0700。
@@ -214,7 +114,7 @@ fn ensure_store_dir() -> Result<PathBuf, String> {
     builder.recursive(true).mode(0o700);
     builder
         .create(&dir)
-        .map_err(|e| format!("创建配置目录 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("创建配置目录 {:?} 失败：{e}", dir))?;
     let meta = dir
         .symlink_metadata()
         .map_err(|e| format!("无法读取配置目录 {:?}: {e}", dir))?;
@@ -225,14 +125,14 @@ fn ensure_store_dir() -> Result<PathBuf, String> {
         ));
     }
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("设置配置目录权限 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("设置配置目录权限 {:?} 失败：{e}", dir))?;
     fs::File::open(&dir)
         .and_then(|f| f.sync_all())
-        .map_err(|e| format!("持久化配置目录 {:?} 失败: {e}", dir))?;
+        .map_err(|e| format!("持久化配置目录 {:?} 失败：{e}", dir))?;
     if let Some(parent) = dir.parent() {
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化配置父目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化配置父目录 {:?} 失败：{e}", parent))?;
     }
     Ok(dir)
 }
@@ -247,7 +147,7 @@ struct StoreLockGuard {
     _file: fs::File,
 }
 
-/// 在给定目录上获取配置库事务排他锁（可注入，测试用 tempdir）。
+/// 配置事务共用排他锁，防止多个进程同时写入。
 /// tauri-plugin-single-instance 在 macOS 上先探测 socket 再异步建监听，
 /// 双进程同时启动可能都通过探测（监听建立失败者仅记日志继续启动），
 /// 无法保证互斥；因此这里用 flock 同步阻塞获取排他锁，
@@ -271,13 +171,13 @@ fn lock_store_in(dir: &Path) -> Result<StoreLockGuard, String> {
             opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
             let f = opts
                 .open(&lock_path)
-                .map_err(|e| format!("打开配置库锁文件 {:?} 失败: {e}", lock_path))?;
+                .map_err(|e| format!("打开配置库锁文件 {:?} 失败：{e}", lock_path))?;
             // fd 元数据即实际打开对象的身份：必须是普通文件，
             // FIFO/目录等特殊文件一律拒绝，绝不带着它进入 flock
             //（O_NONBLOCK 不影响后续 flock 的阻塞语义）
             let meta = f
                 .metadata()
-                .map_err(|e| format!("读取配置库锁文件 {:?} 元数据失败: {e}", lock_path))?;
+                .map_err(|e| format!("读取配置库锁文件 {:?} 元数据失败：{e}", lock_path))?;
             if !meta.is_file() {
                 return Err(format!(
                     "配置库锁文件 {:?} 不是普通文件（FIFO/目录等），请先人工处理",
@@ -286,13 +186,12 @@ fn lock_store_in(dir: &Path) -> Result<StoreLockGuard, String> {
             }
             f
         }
-        Err(e) => return Err(format!("创建配置库锁文件 {:?} 失败: {e}", lock_path)),
+        Err(e) => return Err(format!("创建配置库锁文件 {:?} 失败：{e}", lock_path)),
     };
-    // 同步阻塞获取排他锁：覆盖 list/save/delete/apply 整个事务
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
         return Err(format!(
-            "获取配置库排他锁 {:?} 失败: {}",
+            "获取配置库排他锁 {:?} 失败：{}",
             lock_path,
             std::io::Error::last_os_error()
         ));
@@ -340,7 +239,7 @@ fn tighten_store_permissions(path: &Path) -> Result<(), String> {
                     ));
                 }
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                    .map_err(|e| format!("收紧配置目录权限 {:?} 失败: {e}", dir))?;
+                    .map_err(|e| format!("收紧配置目录权限 {:?} 失败：{e}", dir))?;
             }
         }
     }
@@ -361,7 +260,7 @@ fn tighten_store_permissions(path: &Path) -> Result<(), String> {
                 ));
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("收紧配置库权限 {:?} 失败: {e}", path))?;
+                .map_err(|e| format!("收紧配置库权限 {:?} 失败：{e}", path))?;
         }
     }
     Ok(())
@@ -389,7 +288,7 @@ fn read_store_file(path: &Path) -> Result<Option<String>, String> {
     }
     let mut raw = String::new();
     file.read_to_string(&mut raw)
-        .map_err(|e| format!("读取配置库 {:?} 失败: {e}", path))?;
+        .map_err(|e| format!("读取配置库 {:?} 失败：{e}", path))?;
     Ok(Some(raw))
 }
 
@@ -400,19 +299,8 @@ fn load_store() -> Result<ProfileStore, String> {
         // 文件不存在 = 还没有任何配置，属正常情况
         return Ok(ProfileStore::default());
     };
-    let raw: RawStore = serde_json::from_str(&raw).map_err(|e| {
-        format!(
-            "配置库 {:?} 已损坏（{e}），请先人工处理，避免覆盖现有数据",
-            path
-        )
-    })?;
-    // 旧格式 profile 在此归一化迁移，历史 Qoder 快照不丢失
-    Ok(ProfileStore {
-        profiles: raw
-            .profiles
-            .into_iter()
-            .map(RawProfile::into_profile)
-            .collect(),
+    serde_json::from_str(&raw).map_err(|e| {
+        format!("配置库 {path:?} 已损坏（{e}），请先人工处理，避免覆盖现有数据")
     })
 }
 
@@ -440,29 +328,26 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .mode(0o600)
         .open(&tmp)
-        .map_err(|e| format!("写入临时文件 {:?} 失败: {e}", tmp))?;
+        .map_err(|e| format!("写入临时文件 {:?} 失败：{e}", tmp))?;
     if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
         let _ = fs::remove_file(&tmp);
-        return Err(format!("写入临时文件 {:?} 失败: {e}", tmp));
+        return Err(format!("写入临时文件 {:?} 失败：{e}", tmp));
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("替换 {:?} 失败: {e}", path)
+        format!("替换 {:?} 失败：{e}", path)
     })?;
     if let Some(parent) = path.parent() {
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化目录 {:?} 失败：{e}", parent))?;
     }
     Ok(())
 }
 
-/// 读取配置文件原始字节：不存在 = Ok(None)；读取失败 = Err。
-/// 不做格式解析（TOML/JSONC/JSON 通吃）；O_NONBLOCK + fd 普通文件复核
-/// 挡住 FIFO/目录等特殊文件（FIFO 会永久阻塞）。这里不加 O_NOFOLLOW：
-/// agent 自己的配置可能是 dotfiles 管理的符号链接，跟随到普通文件读取是正常预期
-///（写入事务仍会显式拒绝符号链接，避免悄悄替换）。
-/// 有字节即 present、忠实快照：旧“损坏 JSON 不得当不存在”的隐患自然消解。
+/// 按字节读取配置。只有文件不存在时返回 `None`。
+/// 非阻塞打开后检查文件类型，避免读取 FIFO 时卡住。
+/// 读取允许指向普通文件的符号链接，写入事务会拒绝链接。
 fn read_config_raw(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let mut opts = fs::OpenOptions::new();
     opts.read(true);
@@ -480,7 +365,7 @@ fn read_config_raw(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
-        .map_err(|e| format!("读取配置文件 {:?} 失败: {e}", path))?;
+        .map_err(|e| format!("读取配置文件 {:?} 失败：{e}", path))?;
     Ok(Some(buf))
 }
 
@@ -646,7 +531,7 @@ fn backup_from_staged(staged: &Path, path: &Path) -> Result<PathBuf, String> {
     loop {
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let backup = parent.join(format!("{file_name}.bak-{}-{seq}", now_millis()));
-        let mut src = fs::File::open(staged).map_err(|e| format!("备份 {:?} 失败: {e}", path))?;
+        let mut src = fs::File::open(staged).map_err(|e| format!("备份 {:?} 失败：{e}", path))?;
         let mut dst = match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -656,27 +541,27 @@ fn backup_from_staged(staged: &Path, path: &Path) -> Result<PathBuf, String> {
             Ok(f) => f,
             // 极端碰撞：换个名字再来
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("备份 {:?} 失败: {e}", path)),
+            Err(e) => return Err(format!("备份 {:?} 失败：{e}", path)),
         };
         std::io::copy(&mut src, &mut dst).map_err(|e| {
             let _ = fs::remove_file(&backup);
-            format!("备份 {:?} 失败: {e}", path)
+            format!("备份 {:?} 失败：{e}", path)
         })?;
         dst.sync_all()
-            .map_err(|e| format!("持久化备份 {:?} 失败: {e}", backup))?;
+            .map_err(|e| format!("持久化备份 {:?} 失败：{e}", backup))?;
         fs::File::open(parent)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("持久化备份目录 {:?} 失败: {e}", parent))?;
+            .map_err(|e| format!("持久化备份目录 {:?} 失败：{e}", parent))?;
         return Ok(backup);
     }
 }
 
 /// 写入新配置文件：先在同目录写满并 fsync 临时文件，再原子 rename 到目标。
 /// 写入原始字节：TOML/JSONC/JSON 逐字节还原，保留注释与手写格式，
-/// 不做解析/美化（旧版“重新美化输出”行为已弃用）。
+/// 按原始字节写入，保留格式及注释。
 fn write_config_file(path: &Path, content: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建目录 {:?} 失败: {e}", parent))?;
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录 {:?} 失败：{e}", parent))?;
     }
     atomic_write(path, content)
 }
@@ -692,9 +577,9 @@ fn apply_snapshot_in(
         #[cfg(not(test))]
         {
             trash::delete_all([path.to_path_buf()])
-                .map_err(|e| format!("移入回收站 {:?} 失败: {e}", path))
+                .map_err(|e| format!("移入废纸篓 {:?} 失败：{e}", path))
         }
-        // 测试二进制中的配置事务永远不用系统回收站。
+        // 测试二进制中的配置事务永远不用系统废纸篓。
         #[cfg(test)]
         {
             fs::remove_file(path).map_err(|e| e.to_string())
@@ -964,7 +849,7 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap_err();
-        assert!(err.contains("回滚"), "错误信息应说明已回滚: {err}");
+        assert!(err.contains("回滚"), "错误信息应说明已回滚：{err}");
         assert_eq!(
             fs::read_to_string(&a).unwrap(),
             r#"{"keep":"me"}"#,
@@ -1026,7 +911,7 @@ mod tests {
             (bad, Some(br#"{}"#.to_vec())),
         ])
         .unwrap_err();
-        assert!(err.contains("无法读取"), "捕获失败必须显性化: {err}");
+        assert!(err.contains("无法读取"), "捕获失败必须显性化：{err}");
         assert_eq!(
             fs::read_to_string(&a).unwrap(),
             r#"{"keep":"me"}"#,
@@ -1097,7 +982,6 @@ mod tests {
     #[test]
     fn read_store_file_no_follow_and_type_check() {
         let dir = tempfile::tempdir().unwrap();
-        // 普通文件正常读取
         let ok = dir.path().join("ok.json");
         fs::write(&ok, r#"{"a":1}"#).unwrap();
         assert_eq!(read_store_file(&ok).unwrap().as_deref(), Some(r#"{"a":1}"#));
@@ -1125,7 +1009,7 @@ mod tests {
         let b = dir.path().join("mcp.json");
         fs::write(&a, r#"{"orig":"a"}"#).unwrap();
         fs::write(&b, r#"{"orig":"b"}"#).unwrap();
-        // b 的回收站操作失败时，a 的暂存必须仍完整，不能降级为 .bak 恢复。
+        // b 的废纸篓操作失败时，a 的暂存必须仍完整，不能降级为 .bak 恢复。
         let err = apply_snapshot_with(
             &[
                 (a.clone(), Some(br#"{"new":true}"#.to_vec())),
@@ -1154,7 +1038,7 @@ mod tests {
         fs::write(&path, r#"{"keep":"me"}"#).unwrap();
 
         let err = apply_snapshot_with(&[(path.clone(), None)], write_config_file, |_| {
-            Err("注入的回收站失败".to_string())
+            Err("注入的废纸篓失败".to_string())
         })
         .unwrap_err();
         assert!(err.contains("回滚"), "{err}");
@@ -1168,7 +1052,7 @@ mod tests {
         let b = dir.path().join("mcp.json");
         fs::write(&a, r#"{"orig":"a"}"#).unwrap();
         fs::write(&b, r#"{"orig":"b"}"#).unwrap();
-        // a 用非常规权限 0400：它先发布，随后 b 的回收站操作失败，
+        // a 用非常规权限 0400：它先发布，随后 b 的废纸篓操作失败，
         // a 必须从完整暂存恢复，不能依赖只保字节的 .bak。
         fs::set_permissions(&a, fs::Permissions::from_mode(0o400)).unwrap();
         let err = apply_snapshot_with(
@@ -1296,28 +1180,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pi_empty_or_missing_files_does_not_gain_qoder_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = vec![ConfigFile {
-            key: "settings.json".into(),
-            label: "settings.json".into(),
-            path: dir.path().join("settings.json"),
-        }];
-        for raw in [
-            r#"{"name":"legacy","agent":"pi","createdAt":1,"files":[]}"#,
-            r#"{"name":"legacy","agent":"pi","createdAt":1}"#,
-        ] {
-            let profile = serde_json::from_str::<RawProfile>(raw)
-                .unwrap()
-                .into_profile();
-            assert!(
-                profile_slots(&profile, &spec).is_err(),
-                "未采集过 Pi settings 的快照不得获得删除权限: {raw}"
-            );
-        }
-    }
-
-    #[test]
     fn captured_scope_distinguishes_known_absent_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -1418,49 +1280,4 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 
-    #[test]
-    fn legacy_profile_migrates_to_qoder_files() {
-        // 旧格式（settings/mcp/modelsDefault 字段、无 files/agent）→ agent=qoder + files
-        let raw = r#"{"profiles":[{"name":"old","createdAt":1,"settings":{"a":1},"mcp":{"servers":{}}}]}"#;
-        let store: RawStore = serde_json::from_str(raw).unwrap();
-        let profiles: Vec<Profile> = store
-            .profiles
-            .into_iter()
-            .map(RawProfile::into_profile)
-            .collect();
-        assert_eq!(profiles.len(), 1);
-        let p = &profiles[0];
-        assert_eq!(p.agent, "qoder", "旧格式应迁移为 qoder");
-        assert!(p.files.iter().any(|f| f.key == "settings.json"));
-        assert!(p.files.iter().any(|f| f.key == "mcp.json"));
-        assert!(
-            !p.files.iter().any(|f| f.key == ".models/default"),
-            "未提供的旧字段不应凭空生成 file"
-        );
-        let captured: Vec<&str> = p
-            .captured_keys
-            .as_deref()
-            .unwrap()
-            .iter()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            captured,
-            vec!["settings.json", "mcp.json", ".models/default"],
-            "旧 Qoder 字段格式的完整采集范围是已知的"
-        );
-    }
-
-    #[test]
-    fn new_format_profile_kept_as_is() {
-        // 新格式（已含 files）：不走迁移，原样保留
-        let raw = r#"{"profiles":[{"name":"n","agent":"codex","createdAt":2,"files":[{"key":"config.toml","content":"x=1\n"}],"capturedKeys":["config.toml"]}]}"#;
-        let store: RawStore = serde_json::from_str(raw).unwrap();
-        let p = store.profiles.into_iter().next().unwrap().into_profile();
-        assert_eq!(p.agent, "codex");
-        assert_eq!(p.files.len(), 1);
-        assert_eq!(p.files[0].key, "config.toml");
-        assert_eq!(p.files[0].content, "x=1\n");
-        assert_eq!(p.captured_keys, Some(vec!["config.toml".to_string()]));
-    }
 }

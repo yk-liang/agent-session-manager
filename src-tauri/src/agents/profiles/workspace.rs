@@ -2,6 +2,7 @@
 //! 所有写入仍复用 profiles 的事务；预览携带双方版本，确认时重新复核。
 
 use super::*;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
@@ -142,7 +143,7 @@ fn read_slots(spec: &[ConfigFile]) -> Result<Slots, String> {
 
 pub(super) fn check_revision(spec: &[ConfigFile], expected: &str) -> Result<(), String> {
     if slots_revision(&read_slots(spec)?) != expected {
-        return Err("配置文件已被外部修改，请刷新并比较后重试；本次未覆盖磁盘内容".into());
+        return Err("配置文件已被外部修改。请重新读取并核对内容，磁盘文件已保留。".into());
     }
     Ok(())
 }
@@ -721,7 +722,7 @@ fn apply_change_in(
     check_revision(spec, expected_current)?;
     let (title, slots) = target_slots(agent, spec, profiles, history, kind, target)?;
     if slots_revision(&slots) != expected_target {
-        return Err("目标配置已变化，请重新查看差异后再确认".into());
+        return Err("目标配置已变化。请重新预览差异。".into());
     }
     let current = read_slots(spec)?;
     if slots
@@ -734,7 +735,7 @@ fn apply_change_in(
     // 备份期间 CLI 也可能修改文件：写入前再复核一次，冲突时保留备份但不覆盖。
     check_revision(spec, expected_current)?;
     if slots_revision(&current) != expected_current {
-        return Err("配置文件已被外部修改，请刷新并比较后重试".into());
+        return Err("配置文件已被外部修改。请重新预览差异。".into());
     }
     apply_snapshot_in(
         history.parent().ok_or("缺少配置存储目录")?,
@@ -899,7 +900,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(preview.files[0].action, "remove");
-        // 删除原先不存在的配置文件走注入的事务，不操作真实回收站。
+        // 删除原先不存在的配置文件走注入的事务，不操作真实废纸篓。
         let (_, slots) = target_slots(
             "test",
             &spec,

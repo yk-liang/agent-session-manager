@@ -9,7 +9,7 @@ interface Props {
   title?: string;
   className: string;
   iconClassName?: string;
-  children: ReactNode;
+  children?: ReactNode;
   onCopied?: () => void;
   onError: (error: unknown) => void;
 }
@@ -27,9 +27,7 @@ export default function CopyButton({ value, label, title, className, iconClassNa
     const call = ++generation.current;
     try {
       await writeText(value);
-      // 切换会话或卸载后，旧剪贴板请求不能给新的按钮显示成功。
       if (call !== generation.current) return;
-      // 只有新一次复制成功才重新计时；等待写入时，上次反馈仍应按时消失。
       clearTimeout(timer.current);
       setCopied(true);
       onCopied?.();
@@ -41,7 +39,7 @@ export default function CopyButton({ value, label, title, className, iconClassNa
       onError(error);
     }
   };
-  return <button className={`copy-button ${className}`} onClick={() => void copy()} aria-label={label} title={copied ? "已复制" : title ?? label} data-copied={copied}>
+  return <button type="button" className={`copy-button ${className}`} onClick={() => void copy()} aria-label={label} title={copied ? "已复制" : title ?? label} data-copied={copied}>
     {children}<UiIcon icon={copied ? Check : Copy} size={12} className={`copy-feedback-icon ${iconClassName}`} />
     <span className="sr-only" role="status">{copied ? "已复制" : ""}</span>
   </button>;

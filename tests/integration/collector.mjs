@@ -31,12 +31,17 @@ try {
  for(const id of ['claude','codex','opencode','pi'])mkdirSync(roots[id][0],{recursive:true});
  writeFileSync(path.join(roots.claude[0],'session.jsonl'),family('msg_first',10));
  writeFileSync(path.join(roots.codex[0],'session.jsonl'),[JSON.stringify({type:'session_meta',payload:{id:'codex-fixture'}}),JSON.stringify({type:'event_msg',timestamp:new Date().toISOString(),payload:{type:'token_count',info:{total_token_usage:{input_tokens:20,output_tokens:2,total_tokens:22}}}}),''].join('\n'));
- writeFileSync(path.join(roots.pi[0],'session.jsonl'),[JSON.stringify({type:'session',id:'pi-fixture'}),JSON.stringify({type:'message',id:'reply',timestamp:new Date().toISOString(),message:{role:'assistant',model:'fixture',usage:{input:30,output:3}}}),''].join('\n'));
+ writeFileSync(path.join(roots.pi[0],'session.jsonl'),[JSON.stringify({type:'session',id:'pi-fixture'}),JSON.stringify({type:'message',id:'reply',timestamp:new Date().toISOString(),message:{role:'assistant',model:'fixture',usage:{input:30,output:3,cost:{total:1234}}}}),''].join('\n'));
  await exec('python3',['-c',`import sqlite3,json,sys,time
-c=sqlite3.connect(sys.argv[1]);c.executescript('CREATE TABLE session(id TEXT PRIMARY KEY,time_created INTEGER);CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT);');t=int(time.time()*1000);c.execute('INSERT INTO session VALUES (?,?)',('fixture',t-1));c.execute('INSERT INTO message VALUES (?,?,?,?)',('a','fixture',t,json.dumps({'role':'assistant','modelID':'fixture','time':{'created':t},'tokens':{'input':40,'output':4}})));c.commit()`,path.join(roots.opencode[0],'opencode.db')]);
+c=sqlite3.connect(sys.argv[1]);c.executescript('CREATE TABLE session(id TEXT PRIMARY KEY,time_created INTEGER);CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT);');t=int(time.time()*1000);c.execute('INSERT INTO session VALUES (?,?)',('fixture',t-1));c.execute('INSERT INTO message VALUES (?,?,?,?)',('a','fixture',t,json.dumps({'role':'assistant','modelID':'fixture','time':{'created':t},'tokens':{'input':40,'output':4},'cost':2345})));c.commit()`,path.join(roots.opencode[0],'opencode.db')]);
  start();const initialPid=child.pid;
  await until(()=>Object.keys(JSON.parse(readFileSync(path.join(control,'status.json'),'utf8')).collectedAt).length===5);
  const initial=await observed();for(const id of ['claude','codex','opencode','pi'])assert.equal(initial[id].length,1,id);
+ for(const id of ['opencode','pi']){
+  const [event]=initial[id];
+  assert.equal(Object.hasOwn(event.request,'costUsd'),false);
+  assert.equal(Object.hasOwn(event,'cost'),false);
+ }
  const began=performance.now();appendFileSync(path.join(roots.claude[0],'session.jsonl'),family('msg_continued',11));
  await until(async()=> (await observed()).claude.some(s=>s.inputTokens===11));
  console.log(JSON.stringify({check:'append_without_gui',latency_ms:Math.round(performance.now()-began)}));

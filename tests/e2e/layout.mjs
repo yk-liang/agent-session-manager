@@ -47,7 +47,7 @@ try {
     }));
     window.__TAURI_INTERNALS__ = { transformCallback: (cb) => cb, invoke: async (command, args) => {
       if (command === "list_agents") return [
-        ["qoder", "Qoder CLI"], ["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"], ["pi", "Pi"],
+        ["qoder", "Qoder"], ["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"], ["pi", "Pi"],
       ].map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, deletePolicy: "trash" }));
       if (command === "catalog") return { sessions, projects: sessions.map((s) => ({ dirName: s.projectDir, displayPath: s.cwd, sessionCount: 1, lastActivity: null })), warnings: [] };
       if (command === "read_session") return { meta: sessions.find((s) => s.sessionId === args.sessionId), events: [
@@ -63,7 +63,8 @@ try {
   assert.equal(await page.getByRole("separator").count(), 2);
   await expectSizes(220, 320);
   await page.locator(".session-card").first().click();
-  await page.getByText("拖拽后对话仍然可读。", { exact: true }).waitFor();
+  const prompt = page.locator(".detail-body").getByText("拖拽后对话仍然可读。", { exact: true });
+  await prompt.waitFor();
   await page.getByRole("searchbox").click();
   await drag(sidebarDivider, 80);
   await expectSizes(300, 320);
@@ -74,7 +75,7 @@ try {
   for (const divider of [sidebarDivider, listDivider]) {
     assert.equal(await divider.evaluate((el) => getComputedStyle(el, "::before").width), "1px", "鼠标移开后分隔线应恢复细线");
   }
-  assert.ok(await page.getByText("拖拽后对话仍然可读。", { exact: true }).isVisible());
+  assert.ok(await prompt.isVisible());
   await checkBounds();
   pass("both dividers resize actual panels without replacing the open conversation");
 

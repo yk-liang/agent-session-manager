@@ -1,168 +1,271 @@
-import type { Catalog, SessionMeta } from "./types";
-import { sessionKey } from "./utils.ts";
+import type { Catalog, CatalogFilter, Project, SessionMeta } from "./types";
+import { compareTimestamps, sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
-type CatalogLoader = (agent: string, includeEmpty: boolean) => Promise<Catalog>;
-type NameLoader = (agent: string, models: string[]) => Promise<Record<string, string>>;
+export const DEFAULT_CATALOG_FILTER: CatalogFilter = { includeEmpty: false, includeArchived: false };
+export function catalogFilterFor({ includeEmpty, includeArchived }: CatalogFilter, supportsArchivedSessions = false): CatalogFilter {
+  return { includeEmpty, includeArchived: includeArchived && supportsArchivedSessions };
+}
 
-/** 每个 Agent 的两种空会话筛选分别保存快照；并发刷新复用同一请求。 */
-export class AgentCatalogCache {
-  private snapshots = new Map<string, Catalog>();
-  private pending = new Map<string, Promise<Catalog>>();
-  private generations = new Map<string, number>();
-  private revisions = new Map<string, number>();
-  private names = new Map<string, Map<string, string>>();
-  private pendingNames = new Map<string, Promise<void>>();
-  private readFailures = new Map<string, Map<string, SessionMeta>>();
-  private loader: CatalogLoader;
-  private nameLoader: NameLoader;
+type CatalogLoader = (agent: string, filter: CatalogFilter, generation: number, revision?: number) => Promise<Catalog | null>;
+const scopeKey = (agent: string, { includeEmpty, includeArchived }: CatalogFilter) =>
+  JSON.stringify([agent, includeEmpty, includeArchived]);
 
-  constructor(loader: CatalogLoader, nameLoader: NameLoader) {
-    this.loader = loader;
-    this.nameLoader = nameLoader;
-  }
+const matchesFilter = (session: SessionMeta, filter: CatalogFilter) =>
+  (filter.includeArchived || !session.archived)
+  && (filter.includeEmpty || session.realUserCount > 0 || session.statsPending);
 
-  private key(agent: string, includeEmpty: boolean) { return JSON.stringify([agent, includeEmpty]); }
-  peek(agent: string, includeEmpty: boolean) { return this.snapshots.get(this.key(agent, includeEmpty)); }
-
-  withNames(agent: string, meta: SessionMeta): SessionMeta {
-    const name = meta.model ? this.names.get(agent)?.get(meta.model) : undefined;
-    return name && name !== meta.modelName ? { ...meta, modelName: name } : meta;
-  }
-
-  /** 改名/切换模型只更新已打开详情的展示信息，保留这份正文对应的统计与来源身份。 */
-  withCurrentMetadata(agent: string, includeEmpty: boolean, meta: SessionMeta): SessionMeta {
-    const latest = this.peek(agent, includeEmpty)?.sessions.find(s => sessionKey(s) === sessionKey(meta));
-    if (!latest) return this.withNames(agent, meta);
-    const named = this.withNames(agent, latest);
-    return meta.title === named.title && meta.model === named.model && meta.modelName === named.modelName
-      ? meta : {...meta, title:named.title, model:named.model, modelName:named.modelName};
-  }
-
-  private decorate(agent: string, catalog: Catalog, includeEmpty: boolean): Catalog {
-    const names = new Map(this.names.get(agent));
-    for (const session of catalog.sessions) {
-      if (session.model && session.modelName) names.set(session.model, session.modelName);
+function withSessions(catalog: Catalog, sessions: SessionMeta[], previous?: Catalog): Catalog {
+  const paths = new Map(previous?.projects.map(project => [project.dirName, project.displayPath]));
+  for (const project of catalog.projects) paths.set(project.dirName, project.displayPath);
+  const groups = new Map<string, Project>();
+  for (const session of sessions) {
+    const group = groups.get(session.projectDir);
+    if (group) {
+      group.sessionCount++;
+      if (compareTimestamps(session.lastTs, group.lastActivity) > 0) group.lastActivity = session.lastTs;
+    } else {
+      groups.set(session.projectDir, {
+        dirName: session.projectDir,
+        displayPath: paths.get(session.projectDir) ?? session.cwd ?? session.projectDir,
+        sessionCount: 1,
+        lastActivity: session.lastTs,
+      });
     }
-    this.names.set(agent, names);
+  }
+  const projects = [...groups.values()].sort((a, b) =>
+    compareTimestamps(b.lastActivity, a.lastActivity) || a.dirName.localeCompare(b.dirName));
+  return { ...catalog, projects, sessions };
+}
+
+interface CatalogScope {
+  agent: string;
+  filter: CatalogFilter;
+  sequence: number;
+  snapshot?: Catalog;
+  count?: number | null;
+  countRequest?: Promise<void>;
+  pending?: { generation: number; request: Promise<Catalog> };
+}
+
+export class AgentCatalogCache {
+  private scopes = new Map<string, CatalogScope>();
+  private readFailures = new Map<string, Map<string, SessionMeta>>();
+  private listeners = new Set<() => void>();
+  private countRevision = 0;
+  private loader: CatalogLoader;
+
+  constructor(loader: CatalogLoader) {
+    this.loader = loader;
+  }
+
+  private scope(agent: string, filter: CatalogFilter) {
+    const key = scopeKey(agent, filter);
+    let scope = this.scopes.get(key);
+    if (!scope) {
+      scope = { agent, filter, sequence: 0 };
+      this.scopes.set(key, scope);
+    }
+    return scope;
+  }
+
+  peek(agent: string, filter: CatalogFilter) {
+    return this.scopes.get(scopeKey(agent, filter))?.snapshot;
+  }
+
+  count(agent: string, filter: CatalogFilter) {
+    return this.scopes.get(scopeKey(agent, filter))?.count;
+  }
+
+  countVersion = () => this.countRevision;
+
+  refreshCount(agent: string, filter: CatalogFilter, load: () => Promise<number | null>): Promise<void> {
+    const scope = this.scope(agent, filter);
+    if (scope.countRequest) return scope.countRequest;
+    const { sequence, snapshot } = scope;
+    const request = load().catch(() => null).then(count => {
+      if (scope.sequence !== sequence || scope.snapshot !== snapshot) return;
+      if (this.setCount(scope, count)) this.notify();
+    }).finally(() => {
+      if (scope.countRequest === request) scope.countRequest = undefined;
+    });
+    scope.countRequest = request;
+    return request;
+  }
+
+  visible(agent: string, filter: CatalogFilter) {
+    return this.peek(agent, filter)
+      ?? (filter.includeEmpty ? this.peek(agent, { ...filter, includeEmpty: false }) : undefined)
+      ?? (filter.includeArchived ? this.peek(agent, { ...filter, includeArchived: false }) : undefined)
+      ?? (filter.includeEmpty && filter.includeArchived ? this.peek(agent, DEFAULT_CATALOG_FILTER) : undefined);
+  }
+
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+
+  private setCount(scope: CatalogScope, count: number | null) {
+    if (scope.count === count) return false;
+    scope.count = count;
+    this.countRevision++;
+    return true;
+  }
+
+  private notify() {
+    for (const listener of this.listeners) listener();
+  }
+
+  private publish(scope: CatalogScope, catalog: Catalog, updateCount = true) {
+    const countChanged = updateCount && !catalog.sessions.some(session => session.statsPending)
+      && this.setCount(scope, catalog.warnings.length ? null : catalog.sessions.length);
+    if (scope.snapshot !== catalog) {
+      scope.snapshot = catalog;
+      this.notify();
+    } else if (countChanged) this.notify();
+    return catalog;
+  }
+
+  withCurrentMetadata(agent: string, filter: CatalogFilter, meta: SessionMeta): SessionMeta {
+    const snapshot = this.visible(agent, filter);
+    const key = sessionKey(meta);
+    const latest = snapshot?.sessions.find(session => sessionKey(session) === key);
+    if (!latest) return meta;
+    const title = latest.statsPending ? latest.title ?? meta.title : latest.title;
+    const model = latest.statsPending ? meta.model : latest.model;
+    const archived = latest.archived ?? false;
+    return meta.title === title && meta.model === model && (meta.archived ?? false) === archived
+      ? meta : { ...meta, title, model, archived };
+  }
+
+  /**
+   * 预览只读文件头，标题、模型和消息数暂缺；后台统计完成前沿用同一来源会话上次确认的值，
+   * 避免卡片在“有值 → 空 → 有值”之间跳动。预览带来的新值（如重命名、时间、大小、归档）照常生效。
+   */
+  private retainKnownStats(scope: CatalogScope, catalog: Catalog): Catalog {
+    if (!catalog.sessions.some(session => session.statsPending)) return catalog;
+    const previous = this.visible(scope.agent, scope.filter);
+    if (!previous?.sessions.length) return catalog;
+    const known = new Map<string, SessionMeta>();
+    for (const session of previous.sessions) {
+      if (!session.statsPending || session.statsRetained) known.set(sessionKey(session), session);
+    }
+    let changed = false;
+    const sessions = catalog.sessions.map(session => {
+      const last = session.statsPending ? known.get(sessionKey(session)) : undefined;
+      if (!last) return session;
+      changed = true;
+      return {
+        ...session,
+        title: session.title ?? last.title,
+        model: session.model ?? last.model,
+        userCount: last.userCount,
+        assistantCount: last.assistantCount,
+        realUserCount: last.realUserCount,
+        assistantTextCount: last.assistantTextCount,
+        statsRetained: true,
+      };
+    });
+    return changed ? { ...catalog, sessions } : catalog;
+  }
+
+  private decorate({ agent, filter, snapshot }: CatalogScope, catalog: Catalog): Catalog {
     const failures = this.readFailures.get(agent);
-    const sessions = [...catalog.sessions];
-    const sessionKeys = new Set(sessions.map(sessionKey));
+    const sessionKeys = catalog.warnings.length && failures?.size ? new Set(catalog.sessions.map(sessionKey)) : null;
     const restored: SessionMeta[] = [];
     // 扫描也失败时保留已知失败会话的摘要，不能让正文打不开的卡片随刷新消失。
-    if (catalog.warnings.length) {
+    if (sessionKeys) {
       for (const failed of failures?.values() ?? []) {
-        if ((includeEmpty || failed.realUserCount > 0 || failed.statsPending) && !sessionKeys.has(sessionKey(failed))) {
+        if (matchesFilter(failed, filter) && !sessionKeys.has(sessionKey(failed))) {
           restored.push(failed);
           sessionKeys.add(sessionKey(failed));
         }
       }
     }
-    const projects = new Map(catalog.projects.map(p => [p.dirName, p]));
-    const previous = new Map(this.peek(agent, includeEmpty)?.projects.map(p => [p.dirName, p]));
-    for (const session of restored) {
-      const project = projects.get(session.projectDir);
-      const metadata = project ?? previous.get(session.projectDir) ?? {
-        dirName: session.projectDir, displayPath: session.cwd ?? session.projectDir, lastActivity: session.lastTs,
-      };
-      projects.set(session.projectDir, {...metadata, sessionCount: (project?.sessionCount ?? 0) + 1});
-    }
-    return {
-      ...catalog,
-      projects: restored.length ? [...projects.values()] : catalog.projects,
-      sessions: [...sessions, ...restored].map(session => ({
-        ...this.withNames(agent, session), readError: failures?.get(sessionKey(session))?.readError,
-      })),
-    };
+    const rows = restored.length ? [...catalog.sessions, ...restored] : catalog.sessions;
+    const sessions = rows.map(session => {
+      const readError = failures?.size ? failures.get(sessionKey(session))?.readError : undefined;
+      return readError === session.readError ? session : { ...session, readError };
+    });
+    if (restored.length) return withSessions(catalog, sessions, snapshot);
+    return sessions.some((session, index) => session !== catalog.sessions[index])
+      ? { ...catalog, sessions } : catalog;
   }
 
   /** 只有同一会话的正文重试成功才清除失败；名称补全和摘要缓存命中都不代表正文可读。 */
   setReadError(agent: string, session: SessionMeta, error: string | null) {
     const failures = this.readFailures.get(agent) ?? new Map<string, SessionMeta>();
+    if (failures.get(sessionKey(session))?.readError === (error ?? undefined)) return;
     if (error !== null) failures.set(sessionKey(session), {...session, readError: error});
     else failures.delete(sessionKey(session));
     this.readFailures.set(agent, failures);
-    for (const empty of [false, true]) {
-      const current = this.peek(agent, empty);
-      if (current) this.snapshots.set(this.key(agent, empty), this.decorate(agent, current, empty));
+    for (const scope of this.scopes.values()) {
+      if (scope.agent === agent && scope.snapshot) this.publish(scope, this.decorate(scope, scope.snapshot), false);
     }
   }
 
-  load(agent: string, includeEmpty: boolean): Promise<Catalog> {
-    const key = this.key(agent, includeEmpty);
-    const running = this.pending.get(key);
-    if (running) return running;
-    const generation = this.generations.get(agent) ?? 0;
-    this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
-    const request = this.loader(agent, includeEmpty).then((catalog) => {
-      // 删除完成前启动的扫描不能把已删除卡片写回缓存。
-      if (generation !== (this.generations.get(agent) ?? 0)) return this.peek(agent, includeEmpty) ?? EMPTY_CATALOG;
-      const next = this.decorate(agent, catalog, includeEmpty);
-      this.snapshots.set(key, next);
-      return next;
-    }).finally(() => { if (this.pending.get(key) === request) this.pending.delete(key); });
-    this.pending.set(key, request);
+  load(agent: string, filter: CatalogFilter, generation: number): Promise<Catalog> {
+    const scope = this.scope(agent, filter);
+    if (scope.pending && scope.pending.generation === generation) return scope.pending.request;
+    const sequence = ++scope.sequence;
+    const request = this.loader(agent, filter, generation, scope.snapshot?.revision).then(catalog => {
+      if (catalog && sequence === scope.sequence) return this.publish(scope, this.settle(scope, catalog));
+      return scope.snapshot ?? EMPTY_CATALOG;
+    }).finally(() => {
+      if (scope.pending?.request === request) scope.pending = undefined;
+    });
+    scope.pending = { generation, request };
     return request;
   }
 
-  /** 精确统计完成前若又刷新或删除，旧响应不得覆盖新目录。 */
-  async refine(agent: string, includeEmpty: boolean, loader: CatalogLoader): Promise<Catalog | undefined> {
-    const key = this.key(agent, includeEmpty);
-    const revision = this.revisions.get(key);
-    const generation = this.generations.get(agent) ?? 0;
-    const result = await loader(agent, includeEmpty);
-    if (revision !== this.revisions.get(key) || generation !== (this.generations.get(agent) ?? 0)) return undefined;
-    const next = this.decorate(agent, result, includeEmpty);
-    this.snapshots.set(key, next);
-    return next;
+  async refine(agent: string, filter: CatalogFilter, load: (revision?: number) => Promise<Catalog | null>) {
+    const scope = this.scope(agent, filter);
+    const sequence = scope.sequence;
+    const catalog = await load(scope.snapshot?.revision);
+    if (catalog && sequence === scope.sequence) return this.publish(scope, this.settle(scope, catalog));
   }
 
-  async enrich(agent: string, includeEmpty: boolean, refreshKnown = false): Promise<Catalog | undefined> {
-    const catalog = this.peek(agent, includeEmpty);
-    // Qoder 的历史模型使用不透明 ID，需要外部名称目录；其他数据源本身携带可读标识。
-    if (!catalog || (!refreshKnown && agent !== "qoder")) return catalog;
-    const models = [...new Set(catalog.sessions.filter((s) => s.model && (refreshKnown || !s.modelName)).map((s) => s.model!))].sort();
-    if (!models.length) return catalog;
-    const key = JSON.stringify([agent, models]);
-    let request = this.pendingNames.get(key);
-    if (!request) {
-      request = (async () => {
-        for (let offset = 0; offset < models.length; offset += 256) {
-          const resolved = await this.nameLoader(agent, models.slice(offset, offset + 256));
-          const names = new Map(this.names.get(agent));
-          for (const [id, name] of Object.entries(resolved)) names.set(id, name);
-          this.names.set(agent, names);
-        }
-        // 补全结果只更新名称，不能用查询开始时的旧列表覆盖后来刷新、删除后的快照。
-        for (const empty of [false, true]) {
-          const current = this.peek(agent, empty);
-          if (current) this.snapshots.set(this.key(agent, empty), {
-            ...current, sessions: current.sessions.map((session) => this.withNames(agent, session)),
-          });
-        }
-      })().finally(() => { this.pendingNames.delete(key); });
-      this.pendingNames.set(key, request);
-    }
-    await request;
-    return this.peek(agent, includeEmpty);
+  private settle(scope: CatalogScope, catalog: Catalog) {
+    return this.decorate(scope, this.retainKnownStats(scope, catalog));
   }
 
   remove(agent: string, removed: SessionMeta[]) {
     const keys = new Set(removed.map(sessionKey));
     for (const key of keys) this.readFailures.get(agent)?.delete(key);
-    this.generations.set(agent, (this.generations.get(agent) ?? 0) + 1);
-    for (const empty of [false, true]) {
-      const key = this.key(agent, empty);
-      this.pending.delete(key);
-      const current = this.snapshots.get(key);
-      if (!current) continue;
-      const sessions = current.sessions.filter((s) => !keys.has(sessionKey(s)));
-      const projects = current.projects.map((project) => {
-        const rows = sessions.filter((s) => s.projectDir === project.dirName);
-        return { ...project, sessionCount: rows.length,
-          lastActivity: rows.map((s) => s.lastTs).filter((ts): ts is string => !!ts).sort().pop() ?? null };
-      }).filter((project) => project.sessionCount > 0);
-      this.snapshots.set(key, { ...current, projects, sessions });
+    this.updateSnapshots(agent, catalog => withSessions(catalog, catalog.sessions.filter(row => !keys.has(sessionKey(row)))));
+  }
+
+  setArchived(agent: string, session: SessionMeta, archived: boolean) {
+    const key = sessionKey(session);
+    const failures = this.readFailures.get(agent);
+    const failed = failures?.get(key);
+    if (failed) failures?.set(key, { ...failed, archived });
+    this.updateSnapshots(agent, (catalog, filter) => {
+      const previous = catalog.sessions.find(row => sessionKey(row) === key);
+      const updated = { ...(previous ?? session), archived };
+      if (!matchesFilter(updated, filter)) {
+        return previous ? withSessions(catalog, catalog.sessions.filter(row => row !== previous)) : catalog;
+      }
+      if (previous) {
+        const sessions = catalog.sessions.map(row => row === previous ? updated : row);
+        return { ...catalog, sessions };
+      }
+      const sessions = [...catalog.sessions, updated].sort((a, b) =>
+        compareTimestamps(b.lastTs, a.lastTs) || a.projectDir.localeCompare(b.projectDir)
+        || a.sessionId.localeCompare(b.sessionId));
+      return withSessions(catalog, sessions);
+    });
+  }
+
+  private updateSnapshots(agent: string, update: (catalog: Catalog, filter: CatalogFilter) => Catalog) {
+    for (const scope of this.scopes.values()) {
+      if (scope.agent !== agent) continue;
+      scope.sequence++;
+      scope.pending = undefined;
+      scope.countRequest = undefined;
+      if (!scope.snapshot) continue;
+      const updated = update(scope.snapshot, scope.filter);
+      if (updated !== scope.snapshot) this.publish(scope, { ...updated, revision: undefined });
     }
   }
 }

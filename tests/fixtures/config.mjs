@@ -15,7 +15,7 @@ export function configMockBootstrap(input) {
   const fixtures = input.fixtures ?? input;
   const native = input.native ?? false;
   const oldInvoke = window.__TAURI_INTERNALS__?.invoke;
-  const names = { qoder: "Qoder CLI", claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "Pi" };
+  const names = { qoder: "Qoder", claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "Pi" };
   const state = {
     configs: Object.fromEntries(Object.entries(fixtures).map(([agent, files]) => [agent, files.map((file) => ({ ...file, label: file.key, path: `/Users/demo/.${agent}/${file.key}`, present: file.content !== null }))])),
     profiles: {}, backups: {}, calls: [], writes: [], sequence: 0,
@@ -101,7 +101,7 @@ export function configMockBootstrap(input) {
       if (command === "plugin:event|unlisten") { delete state.listeners[args.eventId]; return null; }
       if (command === "set_config_guard") { state.guard = structuredClone(args); return null; }
       if (command === "confirm_config_exit") {
-        if (state.guard.busy) throw Error("配置操作正在处理中，请稍后再退出");
+        if (state.guard.busy) throw Error("配置操作仍在进行，请稍后退出。");
         state.guard = { dirty: false, busy: false }; state.exitCount++; return null;
       }
       if (command === "watch_sessions") return null;
@@ -145,8 +145,8 @@ export function configMockBootstrap(input) {
     if (command === "preview_config_change") return structuredClone(preview(args.agent, args.kind, args.target));
     if (command === "apply_config_change") {
       const fresh = preview(args.agent, args.kind, args.target);
-      if (args.expectedCurrent !== fresh.currentRevision) throw Error("配置文件已被外部修改，请重新读取差异");
-      if (args.expectedTarget !== fresh.targetRevision) throw Error("目标配置已变化，请重新读取差异");
+      if (args.expectedCurrent !== fresh.currentRevision) throw Error("配置文件已被外部修改。请重新预览差异。");
+      if (args.expectedTarget !== fresh.targetRevision) throw Error("目标配置已变化。请重新预览差异。");
       const next = targetFiles(args.agent, args.kind, args.target);
       backup(args.agent, files.filter((file) => next.some((f) => f.key === file.key)), args.kind === "profile" ? `应用配置「${args.target}」` : "恢复备份");
       for (const file of next) Object.assign(files.find((f) => f.key === file.key), file);

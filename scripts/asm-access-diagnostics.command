@@ -6,11 +6,11 @@ umask 077
 
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' 'Usage: bash asm-access-diagnostics.command [--collect-only] [failing-file-path]' \
-    'Default: capture a fresh GUI retry. --collect-only: collect existing logs without prompting.'
+    'By default, capture logs during a retry in the app. Use --collect-only to read existing logs.'
   exit 0
 fi
 if [[ "$(/usr/bin/uname -s)" != Darwin ]]; then
-  printf '%s\n' 'This diagnostic requires macOS.' >&2
+  printf '%s\n' 'This script requires macOS.' >&2
   exit 1
 fi
 asm_collect_only=false
@@ -19,7 +19,7 @@ if [[ "${1:-}" == "--collect-only" ]]; then
   shift
 fi
 if (( $# > 1 )); then
-  printf '%s\n' 'Expected at most one failing file path; quote paths containing spaces.' >&2
+  printf '%s\n' 'Pass one file path at most. Quote paths that contain spaces.' >&2
   exit 1
 fi
 asm_sample=${1:-}
@@ -50,7 +50,7 @@ run() {
   printf 'command_exit: %s\n' "$asm_status" >> "$asm_report"
 }
 
-printf '%s\n' 'ASM access diagnostic v2' \
+printf '%s\n' 'Agent Session Manager access diagnostics v2' \
   'Scope: app identity, process ancestry, security extensions, path metadata, matching system logs.' \
   'Session contents and configuration values are not collected.' \
   'System extensions do not list every security product (some run as daemons).' \
@@ -64,7 +64,7 @@ run 'Executable SHA-256' /usr/bin/shasum -a 256 "$asm_binary"
 run 'Signature identity and designated requirement' /usr/bin/codesign -d --verbose=4 -r- "$asm_app"
 run 'Entitlements' /usr/bin/codesign -d --entitlements :- "$asm_app"
 run 'Signature verification (all architectures)' /usr/bin/codesign --verify --strict --all-architectures --verbose=2 "$asm_app"
-run 'System extensions (installed does not prove an extension denied access)' /usr/bin/systemextensionsctl list
+run 'Installed system extensions' /usr/bin/systemextensionsctl list
 run 'Device management status' /usr/bin/profiles status -type enrollment
 
 printf '\n--- App processes and their ancestors (no command arguments) ---\n' >> "$asm_report"
@@ -102,8 +102,8 @@ if [[ "$asm_collect_only" == false ]]; then
   printf '\n--- Live system logs during GUI retry ---\n' >> "$asm_report"
   /usr/bin/log stream --timeout 180 --style compact --level debug --predicate "$asm_predicate" >> "$asm_report" 2>&1 &
   asm_stream_pid=$!
-  printf '\n%s\n' 'Keep the current app open. Click Retry scan / Retry read, then return here.' \
-    'Press Enter after the error appears (capture ends after 180 seconds).'
+  printf '\n%s\n' 'Keep the app open and retry the operation that failed.' \
+    'Return here and press Enter when the error appears. Capture stops after 180 seconds.'
   if ! read -r -t 180 asm_response; then
     printf '\nretry_confirmation: timed out or stdin unavailable\n' >> "$asm_report"
   else
@@ -114,7 +114,7 @@ fi
 run 'Matching persisted system logs (last 3 minutes)' /usr/bin/log show --last 3m --style compact --info --debug --predicate "$asm_predicate"
 run 'Finished at (UTC)' /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
 printf '\nReport: %s\n' "$asm_report"
-printf '%s\n' 'Review paths, app names, and system log messages before sharing. No data was uploaded.'
+printf '%s\n' 'Review any paths, app names, and system logs before sharing this report.'
 if [[ "$asm_collect_only" == false ]]; then
   /usr/bin/open -R "$asm_report" 2>/dev/null || true
 fi

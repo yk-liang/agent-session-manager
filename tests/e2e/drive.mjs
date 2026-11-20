@@ -11,7 +11,6 @@ const SESSION_DETAIL = {
     cwd: "/tmp/demo",
     title: "测试会话",
     model: "mode-xyz",
-    modelName: "Qwen3.8-Max-DogFooding",
     version: "1.1.41",
     gitBranch: "main",
     firstTs: "2026-09-03T06:00:00Z",
@@ -127,7 +126,7 @@ const OPENCODE_CONFIG = {
   ],
 };
 const CODEX_DETAIL = {
-  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4", modelName: null },
+  meta: { ...SESSION_DETAIL.meta, sessionId: "codex-1111", title: "Codex 会话", model: "gpt-5.4", client: "Codex Desktop", version: "0.99.0" },
   events: [
     { type: "user", uuid: "cu1", message: { role: "user", content: "codex 用户消息" } },
     { type: "assistant", uuid: "ca1", message: { role: "assistant", content: "codex 助手正文" } },
@@ -135,9 +134,9 @@ const CODEX_DETAIL = {
 };
 const mock = {
   list_agents: [
-    { id: "qoder", displayName: "Qoder CLI", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
+    { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, dataDir: "/Users/demo/.qoder", deletePolicy: permanentDelete ? "permanent" : "trash" },
     { id: "claude", displayName: "Claude Code", installed: true, supportsFork: false, dataDir: "/Users/demo/.claude", deletePolicy: "trash" },
-    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, dataDir: "/Users/demo/.codex", deletePolicy: "trash" },
+    { id: "codex", displayName: "Codex", installed: true, supportsFork: false, supportsArchive: true, supportsArchivedSessions: true, dataDir: "/Users/demo/.codex", deletePolicy: "permanent" },
     { id: "opencode", displayName: "OpenCode", installed: true, supportsFork: false, dataDir: "/Users/demo/.config/opencode", deletePolicy: "permanent" },
     { id: "pi", displayName: "Pi", installed: true, supportsFork: false, dataDir: "/Users/demo/.pi/agent", deletePolicy: "trash" },
   ],
@@ -286,9 +285,9 @@ page.on("pageerror", (e) => {
 
 await page.goto(baseURL);
 await page.waitForSelector(".session-card", { timeout: 10000 });
-assert.equal(await page.locator('.session-card .badge').first().textContent(), "Qwen3.8-Max-DogFooding");
-assert.ok((await page.locator('.session-card .badge').first().getAttribute('title')).includes('mode-xyz'));
-await page.getByRole('searchbox').fill('Qwen3.8-Max-DogFooding');
+assert.equal(await page.locator('.session-card .model-label').first().textContent(), "mode-xyz");
+assert.ok((await page.locator('.session-card .model-label').first().getAttribute('title')).includes('mode-xyz'));
+await page.getByRole('searchbox').fill('mode-xyz');
 assert.equal(await page.locator('.session-card').count(), 1);
 await page.getByRole('searchbox').fill('');
 await page.screenshot({ path: `${artifactDir}/qsm-1-list-${engine}.png` });
@@ -296,7 +295,7 @@ console.log("STEP1 list view OK");
 
 // Selecting the current Agent is idempotent; automatic updates own rescanning.
 const callsBefore = await page.evaluate(() => window.__CATALOG_CALLS__);
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.waitForSelector(".session-card", { timeout: 5000 });
 const callsAfter = await page.evaluate(() => window.__CATALOG_CALLS__);
 const cardsAfter = await page.locator(".session-card").count();
@@ -315,15 +314,21 @@ await page.getByRole('button', {name: /^复制会话 ID：/}).click();
 assert.equal(await page.evaluate(()=>window.__COPIED_TEXT__), SESSION_DETAIL.meta.sessionId);
 assert.equal(await page.locator('.detail-meta .model-label').count(), 0);
 await page.getByRole('button', {name:'更多信息',exact:true}).click();
-assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "Qwen3.8-Max-DogFooding");
-assert.ok((await page.getByRole('group',{name:'会话信息'}).textContent()).includes('/tmp/demo'));
+const sessionInfo = page.getByRole('group',{name:'会话信息'});
+assert.equal(await sessionInfo.locator('.model-label').textContent(), "mode-xyz");
+assert.ok((await sessionInfo.textContent()).includes('/tmp/demo'));
+assert.equal(await sessionInfo.locator('dt').filter({ hasText: /^客户端$/ }).locator('..').locator('dd').textContent(), 'Qoder 1.1.41');
 await page.keyboard.press('Escape');
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);
-// 再次选择会话：旧详情及其操作按钮必须立即不可操作（新请求 1.2s 后才返回）
+// 再次选择同一会话：重读期间保留原正文，直到新响应返回（新请求 1.2s 后才返回）
+const detailBeforeReopen = (await page.locator(".detail-body").textContent()) ?? "";
 await page.click(".session-card");
 const detailWhileLoading = await page.locator(".detail-body").count();
-console.log("STEP1a old detail cleared on re-open:", detailWhileLoading === 0 ? "OK" : "FAILED");
-if (detailWhileLoading !== 0) process.exit(1);
+const textWhileLoading = detailWhileLoading === 1 ? ((await page.locator(".detail-body").textContent()) ?? "") : "";
+const sessionIdWhileLoading = await page.locator(".session-id code").textContent();
+const keptOnReopen = detailWhileLoading === 1 && detailBeforeReopen.length > 0 && textWhileLoading === detailBeforeReopen && sessionIdWhileLoading === SESSION_DETAIL.meta.sessionId;
+console.log("STEP1a same-session re-read keeps detail:", keptOnReopen ? "OK" : "FAILED");
+if (!keptOnReopen) process.exit(1);
 await chooseAgent(page, { label: "Codex" });
 if (process.env.CATALOG_FAIL === "1") {
   // catalog 失败时不得残留旧 agent 的列表
@@ -351,20 +356,21 @@ const codexText = (await page.locator(".detail-body").textContent()) ?? "";
 assert.equal(await page.locator('.detail-meta .model-label').count(),0);
 await page.getByRole('button',{name:'更多信息',exact:true}).click();
 assert.equal(await page.getByRole('group',{name:'会话信息'}).locator('.model-label').textContent(), "gpt-5.4");
+assert.equal(await sessionInfo.locator('dt').filter({ hasText: /^客户端$/ }).locator('..').locator('dd').textContent(), 'Codex Desktop 0.99.0');
 await page.locator('.detail-title').click();
 assert.equal(await page.getByRole('group',{name:'会话信息'}).count(),0);
 console.log("STEP1e codex detail:", codexText.includes("codex 助手正文") ? "OK" : "FAILED");
 if (!codexText.includes("codex 助手正文")) process.exit(1);
 
 // 切回 Qoder，继续后续流程
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.waitForSelector('.session-card:has-text("测试会话")', { timeout: 5000 });
 
 await page.click(".session-card");
 await page.waitForSelector(".detail-body .msg", { timeout: 10000 });
 await page.screenshot({ path: `${artifactDir}/qsm-2-detail-${engine}.png` });
 console.log("STEP2 detail view OK, collapsibles:", await page.locator(".collapsible").count());
-const orphanResults = await page.locator('.collapsible.tool .collapsible-head:has-text("工具结果")').count();
+const orphanResults = await page.locator('.collapsible.tool .collapsible-head:has-text("工具输出")').count();
 console.log(
   `STEP2a malformed/orphan blocks: errors=${pageErrors.length}, orphanResults=${orphanResults} -> ${
     pageErrors.length === 0 && orphanResults === 1 ? "OK" : "FAILED"
@@ -416,8 +422,8 @@ console.log("STEP6 delete modal shown:", JSON.stringify(await page.locator(".mod
 const modalBody = (await page.locator(".modal-body").textContent()) ?? "";
 const confirmLabel = (await page.locator(".modal-actions button.danger").textContent()) ?? "";
 const expectTrash = !permanentDelete;
-const bodyOk = expectTrash ? modalBody.includes("回收站") : modalBody.includes("不可恢复");
-const labelOk = expectTrash ? confirmLabel.includes("移入回收站") : confirmLabel.includes("永久删除");
+const bodyOk = expectTrash ? modalBody.includes("废纸篓") : modalBody.includes("无法恢复");
+const labelOk = expectTrash ? confirmLabel.includes("移入废纸篓") : confirmLabel.includes("永久删除");
 console.log(`STEP6b wording: body=${JSON.stringify(modalBody)} label=${JSON.stringify(confirmLabel)} -> ${bodyOk && labelOk ? "OK" : "FAILED"}`);
 if (!bodyOk || !labelOk) process.exit(1);
 await page.click(".modal-actions button:not(.danger)");
@@ -429,7 +435,7 @@ await page.click(".modal-actions button.danger");
 await page.waitForTimeout(300);
 console.log("STEP8 confirm triggers delete_session:", invokeLog.includes("delete_session") ? "OK" : "FAILED");
 const toastText = (await page.locator(".toast").first().textContent()) ?? "";
-const toastOk = expectTrash ? toastText.includes("移入回收站") : toastText.includes("永久删除");
+const toastOk = expectTrash ? toastText.includes("移入废纸篓") : toastText.includes("已删除");
 console.log("STEP9 toast shown:", toastOk ? `OK (${toastText})` : `FAILED (${toastText})`);
 if (!toastOk) process.exit(1);
 
@@ -456,11 +462,12 @@ await page.evaluate(({ projects, sessions }) => {
   window.__CATALOG_BY_AGENT__.pi = { projects: [], sessions: [], warnings: [] };
 }, { projects: manyProjects, sessions: manySessions });
 await page.locator(".tabs button", { hasText: "会话" }).click();
+await chooseAgent(page, "codex");
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 }]) {
   await page.setViewportSize(viewport);
-  await chooseAgent(page, { label: "Qoder CLI" });
-  await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
+  await chooseAgent(page, { label: "Qoder" });
+  await page.locator(".sidebar-projects-header").getByText("60 个会话", { exact: true }).waitFor();
   const agentControl = page.getByRole("combobox", { name: "当前 Agent" });
   const allSessions = page.locator(".sidebar .project-item", { hasText: "全部会话" });
   const agentPosition = await agentControl.boundingBox();
@@ -493,7 +500,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 
   await page.screenshot({ path: `${artifactDir}/qsm-sidebar-bottom-${viewport.width}-${engine}.png` });
 
   await page.mouse.click(allPosition.x + allPosition.width / 2, allPosition.y + allPosition.height / 2);
-  await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 60);
+  await page.locator(".sidebar .project-item.active", { hasText: "全部会话" }).waitFor();
+  await page.locator(".session-card", { hasText: "项目 1 的会话" }).waitFor();
   assert.equal(await page.locator(".sidebar-project-list").evaluate((el) => el.scrollTop), projectScroll);
 
   assert.ok(agentPosition.y >= 0 && agentPosition.y + agentPosition.height <= 48);
@@ -506,7 +514,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 960, height: 600 
 }
 
 await chooseAgent(page, { label: "Pi" });
-await page.locator(".sidebar .empty-hint", { hasText: "未发现会话" }).waitFor();
+await page.locator(".sidebar .empty-hint", { hasText: "暂无会话" }).waitFor();
 await page.getByRole("combobox", { name: "当前 Agent" }).click();
 assert.equal(await page.getByRole("option").count(), 5);
 await page.keyboard.press("Escape");
@@ -536,7 +544,7 @@ await page.evaluate((sessions) => {
   window.__CATALOG_BY_AGENT__.qoder = { projects, sessions, warnings: [] };
 }, batchSessions);
 await page.locator(".tabs button", { hasText: "会话" }).click();
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input[type=checkbox]").count(), 4);
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
@@ -544,7 +552,7 @@ await page.locator(".session-card input").first().check();
 await page.locator('.search-box input[type="search"]').fill("保留");
 assert.equal(await page.locator(".session-card").count(), 1);
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 1);
 assert.ok((await page.locator(".batch-targets").textContent()).includes("保留的会话"));
@@ -554,33 +562,34 @@ assert.equal(await page.locator(".modal").count(), 0);
 assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), beforeCancelledDelete);
 await page.locator('.search-box input[type="search"]').fill("");
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "取消全选", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 await page.locator(".session-card input").first().check();
-await page.locator(".show-empty-toggle input").check();
+await page.getByRole("checkbox", { name: "显示空会话", exact: true }).check();
 await page.waitForFunction(() => document.querySelectorAll(".session-card input:checked").length === 0);
-await page.locator(".show-empty-toggle input").uncheck();
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("checkbox", { name: "显示空会话", exact: true }).uncheck();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.locator('.sidebar button[title="/tmp/project-a"]').click();
 assert.equal(await page.locator(".batch-toolbar").count(), 0);
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 2);
 await chooseAgent(page, { label: "Claude Code" });
 assert.equal(await page.locator(".batch-toolbar").count(), 0);
-await chooseAgent(page, { label: "Qoder CLI" });
+await chooseAgent(page, { label: "Qoder" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 console.log("STEP13 selection, filtered select-all, confirmation cancellation and context isolation: OK");
 
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.locator(".session-card", { hasText: "保留的会话" }).locator("input").uncheck();
 assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 3);
-assert.ok((await page.locator(".modal-body").textContent()).includes("Qoder CLI 的 3 个会话"));
-assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "永久删除，无法恢复" : "移入系统回收站"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("将删除 Qoder 的 3 个会话。"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
+assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "无法恢复" : "废纸篓还原"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
 const scansBeforeBatch = await page.evaluate(() => window.__CATALOG_CALLS__);
@@ -596,7 +605,7 @@ assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd
 assert.ok((await page.locator(".batch-status").textContent()).includes("0 / 3"));
 assert.ok(await page.getByRole("button", { name: "完成", exact: true }).isDisabled());
 assert.ok(await page.locator('.search-box input[type="search"]').isDisabled());
-assert.ok(await page.locator(".show-empty-toggle input").isDisabled());
+assert.ok(await page.getByRole("checkbox", { name: "显示空会话", exact: true }).isDisabled());
 assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).count(), 0);
 assert.ok(await page.locator(".tabs button", { hasText: "配置" }).isDisabled());
 assert.ok(await page.getByRole("combobox", { name: "当前 Agent" }).isDisabled());
@@ -617,7 +626,8 @@ await page.evaluate(() => {
   window.__PENDING_DELETES__.shift()();
 });
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
-await page.locator(".catalog-error", { hasText: "mock catalog refresh failure" }).waitFor();
+await page.getByRole("alert", { name: "无法读取会话列表", exact: true })
+  .locator(".read-error-summary", { hasText: "mock catalog refresh failure" }).waitFor();
 assert.equal(await page.locator(".session-card").count(), 2);
 assert.equal(await page.locator(".session-card input:checked").count(), 1);
 assert.ok((await page.locator(".sidebar-projects-header").textContent()).includes("2 个会话"));
@@ -642,7 +652,7 @@ console.log("STEP13b sequential project-qualified deletion, duplicate-submit pro
 
 await page.getByRole("button", { name: "完成", exact: true }).click();
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.locator(".tabs button", { hasText: "配置" }).click();
 await page.locator(".tabs button", { hasText: "会话" }).click();
 assert.equal(await page.locator(".batch-toolbar").count(), 0);
@@ -654,14 +664,14 @@ await page.evaluate((session) => {
 }, batchSessions[3]);
 await chooseAgent(page, { label: "OpenCode" });
 await page.getByRole("button", { name: "批量管理", exact: true }).click();
-await page.getByRole("button", { name: "全选当前结果", exact: true }).click();
+await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
-assert.ok((await page.locator(".modal-body").textContent()).includes("会话将永久删除，无法恢复"));
-assert.ok((await page.locator(".modal-body").textContent()).includes("关联的子会话"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("删除后无法恢复"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
 assert.ok((await page.locator(".modal-actions .danger").textContent()).includes("永久删除（1）"));
 await page.locator(".modal-actions .danger").click();
-await page.locator(".session-cards .empty-hint", { hasText: "没有匹配的会话" }).waitFor();
-assert.ok(await page.getByRole("button", { name: "全选当前结果", exact: true }).isDisabled());
+await page.locator(".session-cards .empty-hint", { hasText: "暂无会话" }).waitFor();
+assert.ok(await page.getByRole("button", { name: "全选结果", exact: true }).isDisabled());
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
 await page.getByRole("button", { name: "完成", exact: true }).click();
 assert.ok(await page.getByRole("button", { name: "批量管理", exact: true }).isDisabled());

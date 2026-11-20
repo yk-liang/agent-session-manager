@@ -17,7 +17,7 @@ try{
     window.__QODER_GROUP__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
-      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder CLI":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
+      if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
       if(command==="catalog"){
         const sessions=args.agent==="qoder"?state.rows:[meta("shared","codex-src","Codex 会话","/tmp/codex")];
         return {sessions,projects:sessions.map(s=>({dirName:s.projectDir,displayPath:s.cwd,sessionCount:1,lastActivity:null})),warnings:[],...(args.agent==="qoder"?{sessionGroupHints:state.rows.filter(s=>s.projectDir!=="manual").map(s=>({projectDir:s.projectDir,sessionId:s.sessionId,root:s.projectDir==="auto"?null:"/Users/demo/work/real-project"}))}:{projectlessSessionIds:["shared"]})};
@@ -60,8 +60,8 @@ try{
   await page.locator(".session-card").click();await page.locator(".search-target mark").waitFor();
   pass("project search targets source directories and locates the matched message");
   await page.getByRole("searchbox").fill("");await page.getByRole("button",{name:"批量管理",exact:true}).click();
-  await page.getByRole("button",{name:"全选当前结果",exact:true}).click();await page.getByRole("button",{name:"删除所选",exact:true}).click();
-  await page.getByRole("dialog").getByRole("button",{name:"移入回收站（2）",exact:true}).click();
+  await page.getByRole("button",{name:"全选结果",exact:true}).click();await page.getByRole("button",{name:"删除所选",exact:true}).click();
+  await page.getByRole("dialog").getByRole("button",{name:"移入废纸篓（2）",exact:true}).click();
   await page.waitForFunction(()=>window.__QODER_GROUP__.deleted.length===2);
   assert.deepEqual((await page.evaluate(()=>window.__QODER_GROUP__.deleted)).map(t=>[t.projectDir,t.sessionId]).sort(),[["run-a","shared"],["run-b","b"]]);
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===2);

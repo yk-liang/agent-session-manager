@@ -124,7 +124,7 @@ try {
   await page.goto(baseURL);
   await page.locator('.session-card').first().waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
-  assert.equal(await page.locator('.session-card .model-label').first().textContent(), 'ASM Live Model');
+  assert.equal(await page.locator('.session-card .model-label').first().textContent(), 'asm-live/live');
   for (let index = 0; index < 2; index++) {
     await page.locator('.session-card').nth(index).click();
     await page.locator('.detail-body').getByText('ASM OpenCode v2 live answer', { exact: true }).first().waitFor();

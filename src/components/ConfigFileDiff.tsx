@@ -4,10 +4,12 @@ import UiIcon from "./UiIcon";
 import { configDiff } from "../configDiff";
 import type { ConfigFileChange } from "../types";
 
+const actionTones = { create: "success", replace: "warning", remove: "error", unchanged: undefined };
+
 const actionLabels = {
-  create: "新增",
+  create: "创建",
   replace: "覆盖",
-  remove: "移除",
+  remove: "删除",
   unchanged: "不变",
 };
 
@@ -39,17 +41,17 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
     <details className="config-diff-file" open={file.action !== "unchanged"}>
       <summary>
         <UiIcon icon={ChevronRight} className="details-caret" />
-        <span className={`change-tag ${file.action}`}>
+        <span className="status-tag" data-tone={actionTones[file.action]}>
           {actionLabels[file.action]}
         </span>
         <strong>{file.label}</strong>
         <span className="diff-path">{file.path}</span>
       </summary>
       {file.action === "remove" && (
-        <p className="diff-removal">此文件将移入回收站。</p>
+        <p className="diff-removal">此文件将移入废纸篓。</p>
       )}
       {file.action === "unchanged" ? (
-        <p className="hint diff-empty">文件内容与目标一致。</p>
+        <p className="hint diff-empty">内容一致。</p>
       ) : (
         <>
           <div
@@ -59,7 +61,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
             <div className="diff-legend">
               <span>原行</span>
               <span>新行</span>
-              <span>− 移除 / + 新增</span>
+              <span>− 删除 / + 新增</span>
             </div>
             {visible.map(({ row, index }, position) => (
               <div key={index}>
@@ -67,7 +69,7 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
                   <div className="diff-gap">
                     … 省略{" "}
                     {index - (position ? visible[position - 1].index + 1 : 0)}{" "}
-                    行未变化内容
+                    行未改动内容
                   </div>
                 )}
                 <div className={`diff-line ${row.kind}`}>
@@ -86,15 +88,16 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
             ))}
             {visible.length > 0 &&
               visible[visible.length - 1].index < rows.length - 1 && (
-                <div className="diff-gap">… 其余内容未变化</div>
+                <div className="diff-gap">… 其余行未改动</div>
               )}
           </div>
           {rows.length >= 24 && (
             <button
-              className="text-button diff-expand"
+              type="button"
+              className="btn-ghost btn-sm diff-expand"
               onClick={() => setShowAll(!showAll)}
             >
-              {showAll ? "仅看变更附近" : "展开完整差异"}
+              {showAll ? "收起未改动的行" : "展开完整差异"}
             </button>
           )}
         </>

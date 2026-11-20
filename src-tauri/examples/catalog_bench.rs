@@ -4,7 +4,6 @@
 mod agents;
 
 fn main() {
-    let mut names = None;
     for round in 1..=3 {
         for source in agents::all_sources() {
             if !source.is_installed() {
@@ -22,27 +21,6 @@ fn main() {
                 "sessions": catalog.sessions.len(), "catalog_ms": elapsed_ms,
                 "register_ms": register_ms, "warnings": catalog.warnings.len()})
             );
-            if round == 1 && source.id() == "qoder" {
-                let models: Vec<_> = catalog
-                    .sessions
-                    .iter()
-                    .filter_map(|s| s.model.clone())
-                    .collect();
-                names = Some(std::thread::spawn(move || {
-                    let start = std::time::Instant::now();
-                    let resolved = agents::find_source("qoder")
-                        .unwrap()
-                        .resolve_model_names(&models);
-                    println!(
-                        "{}",
-                        serde_json::json!({"agent":"qoder", "background_names_ms":
-                        start.elapsed().as_secs_f64() * 1000.0, "resolved_names": resolved.len()})
-                    );
-                }));
-            }
         }
-    }
-    if let Some(task) = names {
-        task.join().unwrap();
     }
 }

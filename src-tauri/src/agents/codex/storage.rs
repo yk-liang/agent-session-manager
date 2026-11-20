@@ -1,7 +1,71 @@
-//! Codex 日志的存储格式边界：上层始终读取解压后的字节，元数据仍描述磁盘文件。
+//! Codex 活跃与归档日志的目录布局和读取方式。
+use crate::agents::{check_catalog_cancelled, read_dir_warned};
 use std::fs::{File, Metadata};
 use std::io::{self, BufReader, Error, ErrorKind, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(super) const ARCHIVED_SESSIONS: &str = "archived_sessions";
+
+pub(super) fn archived_root(active_root: &Path) -> PathBuf {
+    active_root.with_file_name(ARCHIVED_SESSIONS)
+}
+
+pub(super) fn is_archived(active_root: &Path, path: &Path) -> bool {
+    path.starts_with(archived_root(active_root))
+}
+
+pub(super) fn rollouts(
+    active_root: &Path,
+    include_archived: bool,
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for year in read_dir_warned(active_root, warnings) {
+        check_catalog_cancelled(cancelled)?;
+        for month in read_dir_warned(&year.path(), warnings) {
+            for day in read_dir_warned(&month.path(), warnings) {
+                read_rollouts(&day.path(), &mut paths, warnings, cancelled)?;
+            }
+        }
+    }
+    if include_archived {
+        let directory = archived_root(active_root);
+        if !directory
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == ErrorKind::NotFound)
+        {
+            read_rollouts(&directory, &mut paths, warnings, cancelled)?;
+        }
+    }
+    Ok(paths)
+}
+
+fn read_rollouts(
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    check_catalog_cancelled(cancelled)?;
+    for entry in read_dir_warned(directory, warnings) {
+        check_catalog_cancelled(cancelled)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("rollout-")
+            && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
+        {
+            let path = entry.path();
+            if !path
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == 0)
+            {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(())
+}
 
 enum Input {
     Plain(File),

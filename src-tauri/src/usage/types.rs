@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// 输入已包含缓存，输出已包含思考；细分字段不再次计入总量。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -10,8 +11,32 @@ pub struct Tokens {
     pub cache_write_tokens: u64,
     pub reasoning_tokens: u64,
     pub unclassified_tokens: u64,
+    /// cache_write_tokens 中按 1 小时 TTL 写入的部分。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_1h_tokens: u64,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 impl Tokens {
+    pub(super) fn refine_prompt(&mut self, other: &Self, cache_in_input: bool) {
+        let uncached = |tokens: &Self| {
+            tokens
+                .input_tokens
+                .saturating_sub(tokens.cache_read_tokens)
+                .saturating_sub(tokens.cache_write_tokens)
+        };
+        let input = uncached(self).max(uncached(other));
+        self.cache_read_tokens = self.cache_read_tokens.max(other.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.max(other.cache_write_tokens);
+        self.cache_write_1h_tokens = self.cache_write_1h_tokens.max(other.cache_write_1h_tokens);
+        self.input_tokens = if cache_in_input {
+            input.saturating_add(self.cache_read_tokens).saturating_add(self.cache_write_tokens)
+        } else {
+            self.input_tokens.max(other.input_tokens)
+        };
+    }
+
     pub fn total(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.output_tokens)
@@ -30,6 +55,9 @@ impl Tokens {
         self.unclassified_tokens = self
             .unclassified_tokens
             .saturating_add(other.unclassified_tokens);
+        self.cache_write_1h_tokens = self
+            .cache_write_1h_tokens
+            .saturating_add(other.cache_write_1h_tokens);
     }
 }
 
@@ -45,9 +73,6 @@ pub struct RecordedFields {
     pub input_incomplete: bool,
     #[serde(default)]
     pub output_incomplete: bool,
-    /// 旧账本没有分项可用性，读取时只能保守迁移，不能把未知的零认作实测。
-    #[serde(default)]
-    pub availability_known: bool,
     pub cache_read_recorded: bool,
     pub cache_write_recorded: bool,
     pub reasoning_recorded: bool,
@@ -58,7 +83,6 @@ impl RecordedFields {
         self.output_recorded |= other.output_recorded;
         self.input_incomplete |= other.input_incomplete;
         self.output_incomplete |= other.output_incomplete;
-        self.availability_known |= other.availability_known;
         self.cache_read_recorded |= other.cache_read_recorded;
         self.cache_write_recorded |= other.cache_write_recorded;
         self.reasoning_recorded |= other.reasoning_recorded;
@@ -93,9 +117,13 @@ pub(super) struct Sample {
     /// Claude sidechain 可能重放主请求，优先保留原始主记录。
     #[serde(default)]
     pub replayed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_fallback: bool,
     /// OpenCode fork 会改写消息 ID，保留只含原始请求元数据的摘要以识别复制历史。
     #[serde(default)]
     pub copy_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "RequestIdentities::is_empty")]
+    pub request_identities: RequestIdentities,
     /// Codex 保留累计快照，跨分页建立基线后才转为一次调用的增量。
     pub cumulative: bool,
     #[serde(default)]
@@ -105,34 +133,73 @@ pub(super) struct Sample {
     #[serde(default)]
     pub thread_total: Option<Tokens>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(super) struct RequestIdentities {
+    pub keys: BTreeSet<String>,
+    pub steps: BTreeSet<String>,
+}
+impl RequestIdentities {
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.steps.is_empty()
+    }
+
+    pub fn merge(&mut self, next: &Self) {
+        self.keys.extend(next.keys.iter().cloned());
+        self.steps.extend(next.steps.iter().cloned());
+    }
+}
 impl Sample {
-    pub fn migrate_availability(&mut self) {
-        if !self.details.availability_known {
-            self.details.input_recorded = self.tokens.input_tokens > 0 || !self.partial;
-            self.details.output_recorded = self.tokens.output_tokens > 0 || !self.partial;
-            self.details.input_incomplete = self.partial;
-            self.details.output_incomplete = self.partial;
-            self.details.availability_known = true;
+    pub fn unmeasured(
+        key: String,
+        session: &str,
+        model: String,
+        timestamp: i64,
+        offset: u64,
+    ) -> Self {
+        Self {
+            key,
+            session: session.into(),
+            model,
+            timestamp,
+            offset,
+            tokens: Tokens::default(),
+            details: RecordedFields::default(),
+            request: Default::default(),
+            partial: true,
+            ordinal: None,
+            complete: true,
+            replayed: false,
+            claude_fallback: false,
+            copy_fingerprint: None,
+            request_identities: Default::default(),
+            cumulative: false,
+            response_id: None,
+            last_usage: None,
+            thread_total: None,
         }
     }
+
+
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ParserState {
     #[serde(default)]
-    pub requests: super::request_parse::RequestState,
+    pub requests: super::codex::RequestState,
+    #[serde(default)]
+    pub claude: std::collections::BTreeMap<String, super::claude::RequestStart>,
+    #[serde(default)]
+    pub pi: super::pi::Context,
     pub session: String,
     pub model: String,
     pub parent_session: Option<String>,
+    #[serde(default)]
+    pub forked_from: Option<String>,
     pub history_base: Option<HistoryBase>,
     /// fork 边界属于父线程，不能用于过滤子线程自己的 ordinal。
     pub parent_before: Option<u64>,
     pub created_at: Option<i64>,
-    pub bad_lines: u64,
-    pub missing_usage: u64,
-    pub saw_assistant: bool,
-    /// 缺计量的分块可能稍后补齐；不把每个分块当成一次漏计请求。
-    pub unmeasured_ids: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub compactions: std::collections::BTreeSet<String>,
 }
@@ -148,7 +215,6 @@ pub(super) struct HistoryBase {
 pub struct UsageRow {
     pub date: String,
     pub model: String,
-    pub model_name: String,
     #[serde(flatten)]
     pub tokens: Tokens,
     #[serde(flatten)]
@@ -167,7 +233,6 @@ pub struct UsageReport {
     pub partial: bool,
     pub file_count: usize,
     pub measured_file_count: usize,
-    pub warnings: Vec<String>,
     pub scan_ms: f64,
     pub bytes_read: u64,
 }

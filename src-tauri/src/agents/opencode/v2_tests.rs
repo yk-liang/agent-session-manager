@@ -13,11 +13,7 @@ fn installed_v2_runtime_database_if_requested() {
     };
     let path = PathBuf::from(path);
     let before = std::fs::read(&path).unwrap();
-    let mut catalog = catalog_at(&path, false).unwrap();
-    let names = models::names();
-    for meta in &mut catalog.sessions {
-        models::decorate_meta(meta, &names);
-    }
+    let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(
         catalog.sessions.len(),
@@ -29,7 +25,6 @@ fn installed_v2_runtime_database_if_requested() {
     for meta in &catalog.sessions {
         assert!(meta.version.as_deref().unwrap().starts_with("2."));
         assert_eq!(meta.model.as_deref(), Some("asm-live/live"));
-        assert_eq!(meta.model_name.as_deref(), Some("ASM Live Model"));
         assert!(meta.real_user_count >= 2);
         let full = read_session_at(&path, &meta.session_id).unwrap();
         assert!(full.warnings.is_empty(), "{:?}", full.warnings);
@@ -38,8 +33,7 @@ fn installed_v2_runtime_database_if_requested() {
             .iter()
             .any(|e| e["message"]["content"] == "ASM OpenCode v2 live answer"));
         assert_eq!(search_events_at(&path, meta).unwrap(), full.events);
-        let mut view = read_session_mode_at(&path, &meta.session_id, true).unwrap();
-        models::decorate_detail(&mut view, &names);
+        let view = read_session_mode_at(&path, &meta.session_id, true).unwrap();
         for event in &view.events {
             if let Some(token) = event
                 .pointer("/message/content/0/deferred")
@@ -144,13 +138,28 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() {
     let (_dir, path) = fixture();
+    let db = Connection::open(&path).unwrap();
+    for (id, kind, seq, value) in [
+        ("msg_error", "assistant", 6, json!({"error":{"type":"provider.unavailable"}})),
+        ("msg_idle", "idle", 7, json!({"outcome":"interrupted"})),
+        ("msg_skill", "skill", 8, json!({"name":"Demo","skill":"demo","text":"Skill instructions"})),
+        ("msg_shell", "shell", 9, json!({"status":"exited","command":"fixture","exit":2,
+            "output":{"output":"Command output"}})),
+        ("msg_files", "user", 10, json!({"text":"附件说明","files":[{"name":"preview.png","mime":"image/png","data":"AAAA"}]})),
+    ] {
+        db.execute(
+            "INSERT INTO session_message VALUES (?1,'ses_v2',?2,?3,2000000,2000000,?4)",
+            params![id, kind, seq, value.to_string()],
+        ).unwrap();
+    }
+    drop(db);
     let before = std::fs::read(&path).unwrap();
     let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(catalog.sessions.len(), 1);
     let meta = &catalog.sessions[0];
     assert_eq!(meta.title.as_deref(), Some("First v2 prompt"));
-    assert_eq!((meta.real_user_count, meta.assistant_text_count), (1, 2));
+    assert_eq!((meta.real_user_count, meta.assistant_text_count), (2, 2));
     assert_eq!(meta.model.as_deref(), Some("fixture/latest"));
     let detail = read_session_at(&path, "ses_v2").unwrap();
     assert!(detail.warnings.is_empty(), "{:?}", detail.warnings);
@@ -168,17 +177,31 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
             .events
             .iter()
             .rev()
-            .find(|e| e["type"] == "assistant")
+            .find(|e| e["type"] == "assistant" && e["message"]["content"].is_string())
             .unwrap()["message"]["content"],
         "Latest answer"
     );
+    assert!(detail.events.iter().any(|event| event["type"] == "system" && event["content"] == "provider.unavailable"));
+    assert!(detail.events.iter().any(|e| e["content"] == "轮次已中断"));
+    assert!(detail.events.iter().any(|e| e["context"]["label"] == "技能上下文"));
+    assert!(detail.events.iter().any(|e| e["message"]["content"][0]["content"] == "退出码：2\n\nCommand output"));
+    let content = &detail.events.last().unwrap()["message"]["content"];
+    assert_eq!(content[0]["text"], "附件说明");
+    assert_eq!(content[1]["filename"], "preview.png");
     assert_eq!(search_events_at(&path, meta).unwrap(), detail.events);
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(open_db(&path)
         .unwrap()
         .execute("DELETE FROM main.session_v2", [])
         .is_err());
-    assert_eq!(catalog_at(&path, true).unwrap().sessions.len(), 2);
+    let with_empty = catalog_at(&path, true).unwrap();
+    assert_eq!(with_empty.sessions.len(), 2);
+    let empty = with_empty
+        .sessions
+        .iter()
+        .find(|meta| meta.session_id == "ses_empty")
+        .unwrap();
+    assert!(empty.size_bytes.is_none());
 }
 
 #[test]
@@ -275,6 +298,27 @@ fn v2_and_legacy_can_coexist_without_duplicate_sessions_or_stale_messages() {
     let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
     assert_eq!(catalog.sessions.len(), 2);
+    let v2_size = db
+        .query_row(
+            "SELECT SUM(length(CAST(data AS BLOB))) FROM session_message WHERE session_id = 'ses_v2'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64;
+    let legacy_size =
+        (r#"{"role":"user"}"#.len() + r#"{"type":"text","text":"legacy prompt"}"#.len()) as u64;
+    for (id, bytes) in [("ses_v2", v2_size), ("ses_legacy", legacy_size)] {
+        let meta = catalog
+            .sessions
+            .iter()
+            .find(|meta| meta.session_id == id)
+            .unwrap();
+        assert_eq!(meta.size_bytes, Some(bytes));
+        assert_eq!(
+            read_session_at(&path, id).unwrap().meta.size_bytes,
+            meta.size_bytes
+        );
+    }
     assert_eq!(
         read_session_at(&path, "ses_legacy").unwrap().events[0]["message"]["content"],
         "legacy prompt"

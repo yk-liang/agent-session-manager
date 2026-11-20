@@ -388,12 +388,7 @@ fn export_ordered_fixture_for_browser_if_requested() {
     if std::env::var("ASM_OPENCODE_SCHEMA").as_deref() == Ok("v2") {
         super::v2_tests::convert_browser_fixture(&path);
     }
-    let mut view = read_session_mode_at(&path, "ses_fixture", true).unwrap();
-    let names = super::models::Names::from([
-        ("fixture/model-a".to_string(), "Model Alpha".to_string()),
-        ("fixture/model-b".to_string(), "Model Beta".to_string()),
-    ]);
-    super::models::decorate_detail(&mut view, &names);
+    let view = read_session_mode_at(&path, "ses_fixture", true).unwrap();
     let mut payloads = std::collections::HashMap::new();
     for event in &view.events {
         if let Some(token) = event
@@ -475,8 +470,8 @@ fn search_positions_stay_aligned_after_reasoning_and_tool_parts_are_inserted() {
         fn data_dir(&self) -> Option<PathBuf> {
             Some(self.0.parent().unwrap().into())
         }
-        fn catalog(&self, empty: bool) -> Result<super::super::Catalog, String> {
-            catalog_at(&self.0, empty)
+        fn scan_catalog(&self, filter: crate::agents::CatalogFilter, _: &dyn Fn() -> bool) -> Result<super::super::Catalog, String> {
+            catalog_at(&self.0, filter.include_empty)
         }
         fn read_session(&self, _: &str, id: &str) -> Result<SessionDetail, String> {
             read_session_at(&self.0, id)

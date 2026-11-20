@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentInfo,
   Catalog,
+  CatalogFilter,
   CurrentConfig,
   ProfileSummary,
   SessionDetail,
@@ -15,38 +16,47 @@ import type {
 } from "./types";
 
 export const listAgents = () => invoke<AgentInfo[]>("list_agents");
+export const countSessions = (agent: string, filter: CatalogFilter) =>
+  invoke<number | null>("count_sessions", { agent, ...filter });
 export const openDataDir = (agent: string) => invoke<void>("open_data_dir", { agent });
 
-let usageGeneration = Date.now();
-export const nextUsageGeneration = () => ++usageGeneration;
-export const cancelUsage = () => invoke<void>("cancel_usage", { generation: nextUsageGeneration() });
-export const syncRequestEvents = (agent: string, generation: number) => invoke<import("./types").UsageSync>("sync_request_events", { agent, generation });
+export const usageSyncStatus = () => invoke<import("./usage/types").UsageSyncState>("usage_sync_status");
+export const checkUsageNow = () => invoke<void>("check_usage_now");
+export const recollectUsage = (agent: string) => invoke<import("./usage/types").UsageSyncState>("recollect_usage", { agent });
 let summaryGeneration = Date.now();
 export const nextSummaryGeneration = () => ++summaryGeneration;
-export const readUsageSummary = (query: import("./types").UsageSummaryQuery, generation: number) => invoke<import("./types").UsageSummary>("read_usage_summary", { query, generation });
+export const readUsageSummary = (query: import("./usage/types").UsageSummaryQuery, generation: number) => invoke<import("./usage/types").UsageSummary>("read_usage_summary", { query, generation });
 export const cancelUsageSummary = () => invoke<void>("cancel_usage_summary", { generation: nextSummaryGeneration() });
 let eventGeneration = Date.now();
 export const nextEventGeneration = () => ++eventGeneration;
-export const readRequestEvents = (query: import("./types").EventQuery, generation: number) =>
-  invoke<import("./types").EventPage>("read_request_events", { query, generation });
+export const readRequestEvents = (query: import("./usage/types").EventQuery, generation: number) =>
+  invoke<import("./usage/types").EventPage>("read_request_events", { query, generation });
 export const cancelRequestEvents = () => invoke<void>("cancel_request_events", { generation: nextEventGeneration() });
-export const collectorStatus = () => invoke<import("./types").CollectorStatus>("collector_status");
-export const setCollectorEnabled = (enabled: boolean) => invoke<import("./types").CollectorStatus>("set_collector_enabled", { enabled });
-export const openCollectorSettings = () => invoke<void>("open_collector_settings");
+export const clearOrphanRequests = (agents: string[], olderThanDays: number | null) =>
+  invoke<number>("clear_orphan_requests", { query: { agents, olderThanDays } });
+export const getModelPrices = (agent?: string) =>
+  invoke<import("./usage/types").ModelPricesResponse>("get_model_prices", {
+    agent: agent && agent !== "all" ? agent : null,
+  });
+export const setCustomPrice = (input: import("./usage/types").CustomPriceInput) =>
+  invoke<import("./usage/types").PricingCatalogStatus>("set_custom_price", { input });
+export const deleteCustomPrice = (model: string) =>
+  invoke<import("./usage/types").PricingCatalogStatus>("delete_custom_price", { model });
+export const refreshReferencePrices = () =>
+  invoke<import("./usage/types").PricingCatalogStatus>("refresh_reference_prices");
+export const searchReferencePrices = (query: string, limit = 30) =>
+  invoke<import("./usage/types").ReferenceSearchItem[]>("search_reference_prices", { query, limit });
 
-export const catalog = (agent: string, includeEmpty = false) =>
-  invoke<Catalog>("catalog", { agent, includeEmpty });
+export const catalog = (agent: string, filter: CatalogFilter, generation: number, revision?: number) =>
+  invoke<Catalog | null>("catalog", { agent, ...filter, generation, revision });
 
-let refinementGeneration = Date.now();
-export const nextRefinementGeneration = () => ++refinementGeneration;
-export const refineCatalog = (agent: string, includeEmpty: boolean, generation: number) =>
-  invoke<Catalog>("refine_catalog", { agent, includeEmpty, generation });
-export const cancelCatalogRefinement = () =>
-  invoke<void>("cancel_catalog_refinement", { generation: nextRefinementGeneration() });
+let catalogGeneration = Date.now();
+export const nextCatalogGeneration = () => ++catalogGeneration;
+export const refineCatalog = (agent: string, filter: CatalogFilter, generation: number, revision?: number) =>
+  invoke<Catalog | null>("refine_catalog", { agent, ...filter, generation, revision });
+export const cancelCatalog = () =>
+  invoke<void>("cancel_catalog", { generation: nextCatalogGeneration() });
 export const readToolPayload = (token: string) => invoke<import("./types").ContentBlock>("read_tool_payload", { token });
-
-export const resolveModelNames = (agent: string, models: string[]) =>
-  invoke<Record<string, string>>("resolve_model_names", { agent, models });
 
 export const watchSessions = (agent: string | null, generation: number) =>
   invoke<void>("watch_sessions", { agent, generation });
@@ -70,6 +80,9 @@ export const deleteSession = (
   projectDir: string,
   sessionId: string,
 ) => invoke<void>("delete_session", { agent, projectDir, sessionId });
+
+export const setSessionArchived = (agent: string, session: SessionMeta, archived: boolean) =>
+  invoke<void>("set_session_archived", { agent, projectDir: session.projectDir, sessionId: session.sessionId, archived });
 
 export const resumeCommand = (agent: string, sessionId: string, fork = false) =>
   invoke<string | null>("resume_command", { agent, sessionId, fork });

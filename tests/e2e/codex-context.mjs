@@ -23,11 +23,28 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
     window.__CONTEXT_CALLS__ = [];
+    const archived = new Set();
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       window.__CONTEXT_CALLS__.push({ cmd, args });
-      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, deletePolicy: 'trash' }];
-      if (cmd === 'catalog') return structuredClone(args.includeEmpty ? fixture.all : fixture.catalog);
-      if (cmd === 'read_session') return structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
+      if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, supportsArchive: true, supportsArchivedSessions: true, deletePolicy: 'permanent' }];
+      if (cmd === 'catalog') {
+        const catalog = structuredClone(args.includeEmpty ? fixture.all : fixture.catalog);
+        for (const session of catalog.sessions) session.archived = archived.has(session.sessionId);
+        if (!args.includeArchived) catalog.sessions = catalog.sessions.filter(session => !session.archived);
+        for (const project of catalog.projects) project.sessionCount = catalog.sessions.filter(session => session.projectDir === project.dirName).length;
+        catalog.projects = catalog.projects.filter(project => project.sessionCount);
+        return catalog;
+      }
+      if (cmd === 'read_session') {
+        const detail = structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
+        detail.meta.archived = archived.has(args.sessionId);
+        return detail;
+      }
+      if (cmd === 'set_session_archived') {
+        if (args.archived) archived.add(args.sessionId);
+        else archived.delete(args.sessionId);
+        return null;
+      }
       if (cmd === 'search_conversations') return args.query === 'visible needle' ? fixture.search : { hits: [], skipped: 0, cancelled: false };
       return null;
     } };
@@ -51,7 +68,7 @@ try {
   await developer.click();
   await page.locator('.collapsible.context .collapsible-body').getByText('Runtime instructions: runtime-only-needle', { exact: true }).waitFor();
   await developer.click();
-  const pageState = page.locator('.collapsible.context').filter({ has: page.getByRole('button', { name: '页面上下文 · 未打开页面', exact: true }) }).first();
+  const pageState = page.locator('.collapsible.context').filter({ has: page.getByRole('button', { name: '页面上下文 未打开页面', exact: true }) }).first();
   await pageState.getByRole('button').click();
   assert.equal(await pageState.locator('.code').textContent(), '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>');
   await page.getByRole('checkbox', { name: 'Markdown', exact: true }).check();
@@ -60,7 +77,7 @@ try {
   assert.equal(await page.locator('.toc-item').count(), 2);
   await page.waitForFunction(() => {
     const rows = [...document.querySelectorAll('.event-group')];
-    return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 10) < 1);
+    return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 8) < 1);
   });
   await page.screenshot({ path: path.join(artifactDir, `codex-context-expanded-${engine}.png`) });
   console.log(`PASS: optional context rows have readable Page summaries and preserve expandable original records (${engine})`);
@@ -82,14 +99,53 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.session-card').length === 2);
   const index = fixture.all.sessions.findIndex(s => s.sessionId === 'context-only');
   await page.locator('.session-card').nth(index).click();
-  await page.getByText('暂无对话正文，可勾选“上下文”查看运行记录', { exact: true }).waitFor();
+  await page.getByText('勾选「上下文」查看运行记录。', { exact: true }).waitFor();
   assert.equal(await page.locator('.toc-item').count(), 0);
   await context.check();
   await page.waitForFunction(() => document.querySelectorAll('.collapsible.context').length === 2);
   await page.setViewportSize({ width: 960, height: 760 });
   assert.ok(await page.locator('.detail-header').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
+
+  const showEmpty = page.getByRole('checkbox', { name: '显示空会话', exact: true });
+  const showArchived = page.getByRole('checkbox', { name: '显示已归档', exact: true });
+  const emptyBounds = await showEmpty.boundingBox();
+  const archiveBounds = await showArchived.boundingBox();
+  assert.ok(archiveBounds.x > emptyBounds.x && archiveBounds.y === emptyBounds.y);
+  assert.equal(await showArchived.isChecked(), false);
+  const archive = page.locator('.detail-actions').getByRole('button', { name: '归档', exact: true });
+  assert.equal(await archive.locator('svg').count(), 0, '详情工具栏的归档按钮与同排文本按钮一致');
+  await archive.click();
+  const archivedCard = page.locator('.session-card.archived');
+  await page.locator('.placeholder').waitFor();
+  await showArchived.check();
+  await archivedCard.locator('.archived-ribbon').getByText('已归档', { exact: true }).waitFor();
+  await showEmpty.uncheck();
+  await archivedCard.waitFor({ state: 'hidden' });
+  await showEmpty.check();
+  await archivedCard.getByRole('button', { name: /空会话/ }).first().click();
+  await page.locator('.detail-header').getByText('已归档', { exact: true }).waitFor();
+  await showArchived.uncheck();
+  await page.locator('.placeholder').waitFor();
+  await showArchived.check();
+  await archivedCard.hover();
+  const restore = archivedCard.getByRole('button', { name: /^取消归档/ });
+  await restore.hover();
+  await restore.getByText('取消归档', { exact: true }).waitFor();
+  await restore.click();
+  await archivedCard.waitFor({ state: 'hidden' });
+  await showArchived.uncheck();
+  await page.waitForFunction(() => document.querySelectorAll('.session-card').length === 2);
+  const changes = await page.evaluate(() => window.__CONTEXT_CALLS__.filter(c => c.cmd === 'set_session_archived').map(c => [c.args.sessionId, c.args.archived]));
+  assert.deepEqual(changes, [['context-only', true], ['context-only', false]]);
+  await page.locator('.session-card-open').filter({ hasText: 'First actual request' }).click();
+  await page.locator('.detail-actions').getByRole('button', { name: '删除', exact: true }).click();
+  const confirm = page.getByRole('dialog');
+  await confirm.getByText('删除后无法恢复。').waitFor();
+  await confirm.getByText('子会话也会一并删除。').waitFor();
+  await confirm.getByRole('button', { name: '永久删除', exact: true }).waitFor();
+  await confirm.getByRole('button', { name: '取消', exact: true }).click();
   assert.deepEqual(errors, []);
-  console.log(`PASS: context-only sessions stay empty, retain inspectable records and fit the minimum window width (${engine})`);
+  console.log(`PASS: archive controls, badges and independent empty/archive filters fit the minimum window width (${engine})`);
 } finally {
   await browser?.close();
   rmSync(dir, { recursive: true, force: true });

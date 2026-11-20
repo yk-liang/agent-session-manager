@@ -43,16 +43,19 @@ try {
     await toggle.waitFor();
     assert.equal(await toggle.isChecked(), false);
     assert.equal(await page.locator('.collapsible.context').count(), 0);
-    assert.equal(await page.locator('.toc-item').count(), fixture.detail.meta.realUserCount > 1 ? fixture.detail.meta.realUserCount : 0);
+    assert.equal(await page.locator('.toc-item').count(), fixture.detail.meta.realUserCount);
     assert.ok(!(await page.locator('.detail-body').textContent()).includes(fixture.hidden));
     if (name === 'claude.json' || name === 'qoder.json') {
       assert.ok((await page.locator('.detail-body').textContent()).includes('literal instructions'));
-      assert.ok((await page.locator('.system-line').textContent()).includes('operational error'));
+      await page.locator('.system-line').filter({ hasText: /^Keep this operational error visible$/ }).waitFor();
+      await page.locator('.system-line').filter({ hasText: /^API error line$/ }).waitFor();
     }
     await toggle.check();
     const context = page.locator('.collapsible.context').first();
     await context.waitFor();
     assert.equal(await context.getByRole('button').getAttribute('aria-expanded'), 'false');
+    await context.locator('.collapsible-type > span').waitFor();
+    await context.locator('.collapsible-preview').waitFor();
     await context.getByRole('button').click();
     await context.locator('.code').waitFor();
     assert.ok((await context.locator('.code').textContent()).length > 0);
@@ -62,7 +65,7 @@ try {
     if (name === 'claude.json' || name === 'pi.json') {
       await page.waitForFunction(() => {
         const rows = [...document.querySelectorAll('.event-group')];
-        return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 10) < 1);
+        return rows.every((row, i) => i === 0 || Math.abs(row.getBoundingClientRect().top - rows[i - 1].getBoundingClientRect().bottom - 8) < 1);
       });
       await page.screenshot({ path: path.join(artifactDir, `agent-context-${agent}-${engine}.png`) });
     }

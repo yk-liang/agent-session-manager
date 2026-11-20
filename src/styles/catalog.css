@@ -1,0 +1,381 @@
+.sidebar {
+  width: var(--sidebar-width, 220px);
+  min-width: 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel);
+  overflow: hidden;
+  padding: 10px 8px;
+}
+
+.sidebar-projects-header { flex-shrink: 0; }
+
+.sidebar-project-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.sidebar-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.project-item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.project-item:hover { background: var(--bg-hover); }
+.project-item.active { background: var(--accent-soft); }
+
+.project-path {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-item.active .project-path { color: var(--accent); font-weight: 600; }
+
+.project-meta,
+.session-card-sub {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 1px 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-meta {
+  justify-content: space-between;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.session-list {
+  width: var(--session-list-width, 320px);
+  min-width: 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.search-box { padding: 10px; border-bottom: 1px solid var(--border); }
+.search-box > .notice { margin-top: 8px; }
+
+.session-list-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 6px;
+}
+
+.session-list-filters { display: flex; gap: 8px; white-space: nowrap; }
+.batch-toolbar { padding: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.batch-status { font-size: 12px; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+.batch-actions { display: flex; justify-content: space-between; gap: 8px; }
+.batch-hint { color: var(--text-dim); font-size: 11px; margin-top: 8px; }
+
+.batch-failures {
+  color: var(--danger);
+  font-size: 12px;
+  margin: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
+}
+
+.batch-failures summary { cursor: pointer; }
+
+.batch-failures ul,
+.batch-targets {
+  padding-left: 18px;
+}
+
+.batch-failures li,
+.batch-targets li {
+  margin: 8px 0;
+}
+
+.batch-targets { max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; }
+
+/* 会话位置分两行：目录在上，等宽的会话 ID 在下。 */
+
+.session-location {
+  display: grid;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.session-location code { font: 11px/1.5 var(--font-mono); }
+.deletion-count { color: var(--text); }
+
+.session-card.selectable {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.session-card.selectable .checkbox-box { margin-top: 2px; }
+.session-card-content { min-width: 0; flex: 1; }
+.session-card.empty .session-card-open { opacity: 0.55; }
+
+.session-cards {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  undefined: undefined;
+  overflow-anchor: none;
+}
+
+.session-card-list { position: relative; }
+.session-card-row { position: absolute; inset-inline: 8px; }
+.session-card-row:is(:hover, :focus-within) { z-index: 1; }
+
+.session-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid transparent;
+  background: var(--bg-panel);
+  width: 100%;
+}
+
+.session-card:hover { background: var(--bg-hover); }
+.session-card.active { border-color: var(--accent); background: var(--accent-soft); }
+
+.session-card-open,
+.session-card-open:hover:not(:disabled) {
+  display: grid;
+  grid-area: 1 / 1 / 2 / -1;
+  grid-template-columns: subgrid;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+}
+
+.session-card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.session-card-open > :not(.session-card-title) { grid-column: 1 / -1; }
+
+.session-card-actions {
+  grid-area: 1 / 2;
+  align-self: start;
+  justify-self: end;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  margin: 5px 7px 0 4px;
+  padding: 1px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.session-card:is(:hover, :has(:focus-visible)) { grid-template-columns: minmax(0, 1fr) auto; }
+.session-card:is(:hover, :has(:focus-visible)) .session-card-actions { opacity: 1; pointer-events: auto; }
+.session-card-actions button { position: relative; }
+
+.session-action-tooltip {
+  display: none;
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 4px);
+  right: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.session-card-actions button:hover .session-action-tooltip,
+.session-card-actions:not(:has(button:hover)) button:focus-visible .session-action-tooltip {
+  display: block;
+}
+
+.session-card-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-card-sub {
+  justify-content: space-between;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+  margin-top: 3px;
+}
+
+.session-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
+  min-width: 0;
+}
+
+.session-card-size { color: var(--text-muted); }
+.session-card-sub > time { margin-left: auto; white-space: nowrap; }
+
+.session-card-badges {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.session-card-badges:empty { display: none; }
+
+/* 归档卡降低强调但保持可操作；角标在卡片右上角斜切，标题与悬停操作避开它。 */
+.session-card.archived:not(.active) { background: transparent; border-color: var(--border); }
+.session-card.archived:not(.active):hover { background: var(--bg-hover); }
+.session-card.archived .session-card-title { margin-right: 22px; color: var(--text-dim); font-weight: 500; }
+.session-card.archived .session-card-sub { color: var(--text-muted); }
+
+.session-card.archived .status-tag:not([data-tone="error"]) {
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+.session-card.archived .session-card-actions { margin-right: 38px; }
+
+.archived-ribbon {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  border-top-right-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.archived-ribbon > span {
+  position: absolute;
+  top: 7px;
+  right: -21px;
+  width: 72px;
+  transform: rotate(45deg);
+  background: #3a404c;
+  color: #b9bfc9;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+.session-card.archived.active .archived-ribbon > span { background: #3b4670; color: #c5d0ff; }
+.search-status { margin-top: 8px; color: var(--text-dim); font-size: 11px; }
+.search-status.warning { color: var(--warning); }
+
+.session-search-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.session-search-snippet > span { margin-right: 6px; color: var(--text); }
+
+.search-highlight {
+  background: #f4cd73;
+  color: #221b0b;
+  border-radius: 2px;
+  font-weight: 600;
+}
+
+.event-group.search-target .msg { outline: 1px solid var(--accent); outline-offset: 3px; }
+
+.session-project-path {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
+.empty-hint {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 24px 8px;
+  font-size: 12px;
+}
+
+.read-diagnostics { align-items: stretch; }
+.read-diagnostics p { margin: 8px 0; }
+.read-error-summary { color: var(--text-dim); }
+
+.read-error-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 12px;
+  margin: 8px 0;
+}
+
+.read-error-fields > div { display: contents; }
+.read-error-fields dt { color: var(--text-dim); }
+.read-error-fields dd { font-family: var(--font-mono); user-select: text; }
+
+.read-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.read-diagnostics details { margin-top: 8px; }
+.read-diagnostics summary { cursor: pointer; }
+
+.read-diagnostics pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow-y: auto;
+  user-select: text;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.read-diagnostics .diagnostic-privacy { color: var(--text-dim); font-size: 11px; }

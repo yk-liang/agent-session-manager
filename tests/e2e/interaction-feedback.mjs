@@ -1,15 +1,16 @@
+import { addUsageInitScript } from '../helpers/usage-collector.mjs';
 import { engine, baseURL, artifactDir } from '../helpers/browser.mjs';
 import { chromium, webkit } from 'playwright';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
 const browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ channel: 'chrome', headless: true });
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, timezoneId: 'UTC' });
 const errors = []; page.on('pageerror', error => errors.push(error.message));
 try {
   await page.clock.install({ time: new Date('2026-10-28T12:00:00Z') });
   await page.clock.pauseAt(new Date('2026-10-28T12:00:01Z'));
-  await page.addInitScript(() => {
+  await addUsageInitScript(page, (_, createCollector) => {
     const rows = ['first', 'second'].map(sessionId => ({ sessionId, title: `${sessionId} session`, projectDir: 'project', cwd: '/tmp/project',
       model: null, firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1, sizeBytes: 100, hasTranscript: true }));
     const state = window.__FEEDBACK__ = { rows, catalogs: 0, holdCatalog: false, failCatalog: false, releaseCatalog: null, copyMode: 'success', copied: [], releaseCopy: null, holdSync: false, releaseSync: null, total: 0, listeners: {}, listenerId: 0, watch: { generation: 0, agent: null } };
@@ -19,35 +20,40 @@ try {
     state.changed = () => state.emit('session-files-changed', state.watch);
     window.isTauri = true;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
-    window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (command, args = {}) => {
+    state.collector = createCollector(['claude'], async () => {
+      if (state.holdSync) await new Promise(resolve => state.releaseSync = resolve);
+      state.synced = true;
+      return true;
+    });
+    window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: state.collector.bridge(async (command, args = {}) => {
       if (command === 'plugin:event|listen') { const id = ++state.listenerId; state.listeners[id] = args; return id; }
       if (command === 'plugin:event|unlisten') { delete state.listeners[args.eventId]; return null; }
       if (command === 'watch_sessions') { if (args.generation >= state.watch.generation) state.watch = args; return null; }
-      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, supportsModelNames: false, supportsFastCatalog: false, deletePolicy: 'trash' }];
+      if (command === 'list_agents') return [{ id: 'claude', displayName: 'Claude Code', installed: true, supportsFork: false, deletePolicy: 'trash' }];
       if (command === 'catalog') {
         ++state.catalogs;
         if (state.holdCatalog) await new Promise(resolve => state.releaseCatalog = resolve);
         if (state.failCatalog) throw Error('Catalog unavailable');
         return { sessions: structuredClone(rows), projects: [{ dirName: 'project', displayPath: '/tmp/project', sessionCount: 2, lastActivity: null }], warnings: [] };
       }
-      if (command === 'read_session') return { meta: rows.find(row => row.sessionId === args.sessionId), events: [] };
+      if (command === 'read_session') return { meta: rows.find(row => row.sessionId === args.sessionId), events: [
+        { type: 'user', timestamp: '2026-10-28T09:07:05Z', message: { content: '用户的提问' } },
+        { type: 'assistant', timestamp: '2026-10-28T09:08:06Z', message: {
+          content: [{ type: 'text', text: '# 回答\n' + '原文'.repeat(1800) },
+            { type: 'thinking', thinking: '不属于回复正文' }, { type: 'text', text: '第二段' }],
+        } },
+      ] };
       if (command === 'plugin:clipboard-manager|write_text') {
         if (state.copyMode === 'failure') throw Error('Clipboard unavailable');
         if (state.copyMode === 'pending') await new Promise(resolve => state.releaseCopy = resolve);
         state.copied.push(args.text);
         return;
       }
-      if (command === 'collector_status') return { desired: false, running: false, authorization: 'signingRequired' };
-      if (command === 'sync_request_events') {
-        if (state.holdSync) await new Promise(resolve => state.releaseSync = resolve);
-        state.synced = true;
-        return { updatedAt: Date.now(), checkedFiles: 0, changedFiles: 0, bytesRead: 0 };
-      }
-      if (command === 'read_usage_summary') return { rows: state.total ? [{ agent: 'claude', model: 'fixture', modelName: 'fixture', date: '', bucketStart: args.query.bounds[0] ?? null,
-        inputTokens: state.total, outputTokens: 0, totalTokens: state.total, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false, partial: false }] : [], health: {}, syncedAgents: state.synced ? ['claude'] : [], revision: '1' };
-      if (command === 'read_request_events') return { events: [], models: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
+      if (command === 'read_usage_summary') return { rows: state.total ? [{ agent: 'claude', model: 'fixture', date: '', bucketStart: args.query.bounds[0] ?? null,
+        inputTokens: state.total, outputTokens: 0, totalTokens: state.total, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, unclassifiedTokens: 0, inputRecorded: true, outputRecorded: true, cacheReadRecorded: false, cacheWriteRecorded: false, reasoningRecorded: false, partial: false }] : [], syncedAgents: state.synced ? ['claude'] : [], revision: '1' };
+      if (command === 'read_request_events') return { events: [], total: 0, page: 1, pageSize: args.query.limit ?? 50, revision: '1' };
       return null;
-    } };
+    }) };
   });
   await page.goto(baseURL);
   await page.locator('.session-card', { hasText: 'first session' }).click();
@@ -94,6 +100,31 @@ try {
   assert.equal(await copy.getAttribute('data-copied'), 'false', 'late results must not mark another session as copied');
   console.log(`PASS: inline copy feedback, stable dimensions, expiry/repeat, failure, and late clipboard results (${engine})`);
 
+  await page.evaluate(() => { window.__FEEDBACK__.copyMode = 'success'; });
+  const userMessage = page.locator('.message.user');
+  const agentBubbles = page.locator('.message.assistant');
+  const agentMessage = agentBubbles.last();
+  const footer = (message) => message.locator('.message-actions');
+  const reservedHeight = await userMessage.evaluate(el => el.offsetHeight - el.querySelector('.msg').offsetHeight);
+  assert.ok(reservedHeight >= 24);
+  assert.equal(await footer(userMessage).evaluate(el => getComputedStyle(el).opacity), '0');
+  await userMessage.locator('.msg').hover();
+  assert.equal(await footer(userMessage).evaluate(el => getComputedStyle(el).opacity), '1');
+  assert.equal(await footer(userMessage).locator('time').textContent(), '2026-10-28 09:07:05');
+  await userMessage.getByRole('button', { name: '复制消息', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '用户的提问');
+  const copyMessage = agentMessage.getByRole('button', { name: '复制消息', exact: true });
+  await copyMessage.focus();
+  await copyMessage.press('Enter');
+  await copyMessage.locator('.lucide-check').waitFor();
+  assert.equal(await footer(agentMessage).locator('time').textContent(), '2026-10-28 09:08:06');
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '第二段');
+  await agentBubbles.first().getByRole('button', { name: '复制消息', exact: true }).press('Enter');
+  await page.waitForFunction(() => window.__FEEDBACK__.copied.at(-1) === '# 回答\n' + '原文'.repeat(1800));
+  await page.clock.runFor(2100);
+  await copyMessage.locator('.lucide-copy').waitFor();
+  assert.equal(await userMessage.evaluate(el => el.offsetHeight - el.querySelector('.msg').offsetHeight), reservedHeight);
+
   assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 0);
   await page.evaluate(() => { const s = window.__FEEDBACK__; s.holdCatalog = true; s.changed(); });
   await page.clock.fastForward(6000);
@@ -105,43 +136,43 @@ try {
   await page.locator('.session-card', { hasText: 'refreshed session' }).waitFor();
   await page.evaluate(() => { const s = window.__FEEDBACK__; s.failCatalog = true; s.changed(); });
   await page.clock.fastForward(12000);
-  await page.locator('.catalog-error').waitFor();
+  await page.getByRole('alert', { name: '无法读取会话列表', exact: true }).waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   await page.evaluate(() => { window.__FEEDBACK__.failCatalog = false; });
-  await page.getByRole('button', { name: '重试读取', exact: true }).click();
+  await page.getByRole('button', { name: '重试', exact: true }).click();
   await page.locator('.session-list[aria-busy="false"]').waitFor();
-  assert.equal(await page.locator('.catalog-error').count(), 0);
+  assert.equal(await page.getByRole('alert', { name: '无法读取会话列表', exact: true }).count(), 0);
   console.log(`PASS: file changes update sessions without a refresh button; failures preserve data and offer a contextual retry (${engine})`);
 
-  await page.evaluate(() => { window.__FEEDBACK__.holdSync = true; });
+  await page.evaluate(() => { const state = window.__FEEDBACK__; state.holdSync = true; void state.collector.check(); });
   await page.getByRole('button', { name: '用量', exact: true }).click();
   await page.evaluate(() => window.__FEEDBACK__.emit('session-window-focus', true));
-  await page.getByText('正在读取历史请求…', { exact: true }).waitFor();
+  await page.locator('.usage-chart-empty').getByText('正在同步历史用量…', { exact: true }).waitFor();
   await page.clock.runFor(100);
-  assert.equal(await page.locator('.usage-sync-status,.usage-spin').count(), 0);
+  assert.equal(await page.locator('.usage-coverage,.usage-spin').count(), 0);
   await page.clock.runFor(250);
-  await page.locator('.usage-sync-status').waitFor();
+  await page.locator('.usage-coverage').waitFor();
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  assert.equal(await page.locator('.usage-sync-status .usage-spin').evaluate(el => getComputedStyle(el).animationName), 'none');
+  assert.equal(await page.locator('.usage-coverage .usage-spin').evaluate(el => getComputedStyle(el).animationName), 'none');
   await page.evaluate(() => { const s = window.__FEEDBACK__; s.total = 100; s.holdSync = false; s.releaseSync(); });
-  await page.locator('.usage-stat strong').first().filter({ hasText: /^100$/ }).waitFor();
+  await page.locator('.usage-stat[data-metric="tokens"] strong').filter({ hasText: /^100$/ }).waitFor();
   await page.clock.runFor(400);
-  assert.equal(await page.locator('.usage-sync-status,.usage-spin').count(), 0);
+  assert.equal(await page.locator('.usage-coverage,.usage-spin').count(), 0);
 
   for (const total of [100, 0]) {
     if (total === 0) {
       await page.evaluate(() => { window.__FEEDBACK__.total = 0; });
       await page.getByRole('button', { name: '今日', exact: true }).click();
-      await page.locator('.usage-stat strong').first().filter({ hasText: /^0$/ }).waitFor();
+      await page.locator('.usage-stat[data-metric="tokens"] strong').filter({ hasText: /^0$/ }).waitFor();
     }
-    await page.evaluate(() => { const s = window.__FEEDBACK__; s.releaseSync = null; s.holdSync = true; s.changed(); });
-    await page.clock.fastForward(12000);
+    await page.evaluate(() => { const s = window.__FEEDBACK__; s.releaseSync = null; s.holdSync = true; void s.collector.check(); });
+    await page.waitForFunction(() => !!window.__FEEDBACK__.releaseSync);
     assert.ok(await page.evaluate(() => !!window.__FEEDBACK__.releaseSync), 'file changes must start another sync');
     await page.clock.runFor(500);
-    assert.equal(await page.locator('.usage-stat strong').first().textContent(), String(total));
-    assert.equal(await page.locator('.usage-sync-status,.usage-spin').count(), 0, 'warm updates, including empty ranges, should stay silent');
+    assert.equal(await page.locator('.usage-stat[data-metric="tokens"] strong').textContent(), String(total));
+    assert.equal(await page.locator('.usage-coverage,.usage-spin').count(), 0, 'warm updates, including empty ranges, should stay silent');
     await page.evaluate(() => { const s = window.__FEEDBACK__; s.total = 200; s.holdSync = false; s.releaseSync(); });
-    await page.locator('.usage-stat strong').first().filter({ hasText: /^200$/ }).waitFor();
+    await page.locator('.usage-stat[data-metric="tokens"] strong').filter({ hasText: /^200$/ }).waitFor();
   }
   assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).count(), 0);
   assert.equal(await page.locator('.usage-spin').count(), 0);

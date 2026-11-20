@@ -18,14 +18,14 @@ const pass = (label) => { checks++; console.log(`PASS ${checks}: ${label}`); };
 const file = (key) => page.locator(`.config-file[data-file-key="${key}"]`);
 const agent = async (name) => { await chooseAgent(page, { label: name }); await page.locator(".config-file").first().waitFor(); };
 const refresh = async () => {
-  const retry = page.getByRole("button", { name: "重试读取", exact: true });
+  const retry = page.getByRole("button", { name: "重试", exact: true });
   if (await retry.count()) await retry.click(); else {
     await page.getByRole("button", { name: "会话", exact: true }).click();
     await page.getByRole("button", { name: "配置", exact: true }).click();
   }
 };
 const beforeUnloadBlocked = () => page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
-const discard = () => page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).getByRole("button", { name: "放弃修改并继续", exact: true }).click();
+const discard = () => page.getByRole("dialog", { name: "放弃未保存的修改？", exact: true }).getByRole("button", { name: "放弃修改", exact: true }).click();
 const nativeExit = () => page.evaluate(() => window.__CONFIG_TEST__.emit("config-exit-requested"));
 
 try {
@@ -36,6 +36,8 @@ try {
   await page.locator(".config-status", { hasText: /^工作$/ }).waitFor();
   assert.equal(await page.locator(".config-file").count(), 3);
   assert.equal(await file(".models/default").getByRole("button", { name: "创建", exact: true }).count(), 1);
+  const heads = await page.locator(".config-file-head").evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+  assert.ok(heads.every((height) => height === heads[0]), `同级配置文件行应等高：${heads}`);
   assert.ok((await page.locator(".config-overview").textContent()).includes("work-model"));
   assert.equal(await page.locator('.config-overview strong[title="filesystem"]').textContent(), "1 个");
   assert.equal(await page.getByText("未显式设置", { exact: true }).count(), 0);
@@ -46,7 +48,7 @@ try {
 
   const backupHelp = page.getByRole("button", { name: "备份说明", exact: true });
   assert.equal(await page.getByRole("tooltip").count(), 0);
-  assert.ok(!(await page.locator(".config-panel").innerText()).includes("修改前自动备份"));
+  assert.ok(!(await page.locator(".config-panel").innerText()).includes("保存文件或应用方案前会自动备份"));
   await backupHelp.hover();
   await page.getByRole("tooltip").waitFor();
   assert.ok((await page.getByRole("tooltip").textContent()).includes("自动备份"));
@@ -98,7 +100,7 @@ try {
   assert.ok(await page.getByRole("button", { name: "应用", exact: true }).first().isDisabled());
   for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), () => page.getByRole("button", { name: "用量", exact: true }).click(), () => chooseAgent(page, { label: "Claude Code" })]) {
     await action();
-    await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
+    await page.getByRole("dialog", { name: "放弃未保存的修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   }
@@ -110,14 +112,14 @@ try {
   await file("mcp.json").getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingReads.length === 1);
   await page.evaluate(() => { const state = window.__CONFIG_TEST__; state.holdReads = false; state.pendingReads.splice(0).forEach((r) => r.resolve()); });
-  await page.getByRole("alert").filter({ hasText: "mcp.json 已保存，但无法重新读取状态。" }).waitFor();
+  await page.getByRole("alert").filter({ hasText: "mcp.json 已保存。请重试读取配置。" }).waitFor();
   assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   assert.ok(await page.getByRole("status").filter({ hasText: "1 个文件未保存" }).isVisible());
   assert.ok(await beforeUnloadBlocked(), "failed discard-refresh must still protect the surviving draft");
   assert.deepEqual(await page.evaluate(() => window.__CONFIG_TEST__.guard), { dirty: true, busy: false });
   for (const action of [() => page.getByRole("button", { name: "会话", exact: true }).click(), refresh, () => chooseAgent(page, { label: "Claude Code" }), nativeExit]) {
     await action();
-    await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
+    await page.getByRole("dialog", { name: "放弃未保存的修改？", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     assert.equal(await file("settings.json").locator("textarea").inputValue(), '{"unsaved":true}');
   }
@@ -201,25 +203,25 @@ try {
   assert.equal(await page.locator(".config-page-heading h1").textContent().then((s) => s.includes("Codex")), true);
   pass("slow configuration reads remain navigable and late responses stay agent-bound");
 
-  await agent("Qoder CLI");
+  await agent("Qoder");
   const personal = page.locator(".profile-card", { hasText: "个人" });
   await personal.getByRole("button", { name: "应用", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByText("移除", { exact: true }).waitFor();
+  await dialog.getByText("删除", { exact: true }).waitFor();
   assert.ok((await dialog.locator(".diff-line.add").allTextContents()).some((line) => line.includes("personal-model")));
   await page.evaluate(() => { window.__CONFIG_TEST__.configs.qoder[0].content = '{"external":"before-apply"}'; });
-  await dialog.getByRole("button", { name: "确认应用", exact: true }).click();
+  await dialog.getByRole("button", { name: "应用方案", exact: true }).click();
   await dialog.getByRole("alert").filter({ hasText: "外部修改" }).waitFor();
-  assert.ok(await dialog.getByRole("button", { name: "确认应用", exact: true }).isDisabled());
-  await dialog.getByRole("button", { name: "重新读取差异", exact: true }).click();
-  await dialog.getByRole("button", { name: "确认应用", exact: true }).click();
+  assert.ok(await dialog.getByRole("button", { name: "应用方案", exact: true }).isDisabled());
+  await dialog.getByRole("button", { name: "重新预览", exact: true }).click();
+  await dialog.getByRole("button", { name: "应用方案", exact: true }).click();
   await page.locator(".config-status", { hasText: /^个人$/ }).waitFor();
   assert.ok(await file("mcp.json").getByRole("button", { name: "创建", exact: true }).isEnabled());
   await page.locator(".history-toggle").click();
   const operationBackup = page.locator(".backup-row", { hasText: "应用配置「个人」" }).first();
   await operationBackup.getByRole("button", { name: "恢复", exact: true }).click();
-  await dialog.getByText("新增", { exact: true }).waitFor();
-  await dialog.getByRole("button", { name: "确认恢复", exact: true }).click();
+  await dialog.getByText("创建", { exact: true }).waitFor();
+  await dialog.getByRole("button", { name: "恢复备份", exact: true }).click();
   await file("mcp.json").getByRole("button", { name: "编辑", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.configs.qoder[0].content), '{"external":"before-apply"}');
   assert.ok(await page.locator(".backup-row", { hasText: "恢复备份" }).count());
@@ -227,7 +229,7 @@ try {
 
   await personal.getByRole("button", { name: "应用", exact: true }).click();
   await page.evaluate(() => { window.__CONFIG_TEST__.profiles.qoder.find((p) => p.name === "个人").files[0].content = '{"model":"changed-target"}'; });
-  await dialog.getByRole("button", { name: "确认应用", exact: true }).click();
+  await dialog.getByRole("button", { name: "应用方案", exact: true }).click();
   await dialog.getByRole("alert").filter({ hasText: "目标配置已变化" }).waitFor();
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.configs.qoder[0].content), '{"external":"before-apply"}');
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
@@ -267,7 +269,7 @@ try {
   await file("settings.json").locator("textarea").fill('{"model":"saved-before-read-failure"}');
   await page.evaluate(() => { window.__CONFIG_TEST__.failNextRead = true; });
   await file("settings.json").getByRole("button", { name: "保存", exact: true }).click();
-  await page.getByRole("alert").filter({ hasText: "已保存，但无法重新读取" }).waitFor();
+  await page.getByRole("alert").filter({ hasText: "已保存。请重试读取配置" }).waitFor();
   assert.ok(await file("settings.json").getByRole("button", { name: "编辑", exact: true }).isDisabled());
   await refresh();
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
@@ -288,7 +290,7 @@ try {
 
   await page.evaluate((content) => { window.__CONFIG_TEST__.configs.claude[0].content = content; }, configFixtures.claude[0].content);
   await agent("Claude Code");
-  await file("settings.json").locator(".collapsible-head").click();
+  await file("settings.json").locator(".config-file-toggle").click();
   for (const mode of ["view", "edit"]) {
     if (mode === "edit") await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
     const code = file("settings.json").locator(mode === "edit" ? "textarea" : "pre.config-json");
@@ -323,7 +325,7 @@ try {
   await file("settings.json").getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForFunction(() => window.__CONFIG_TEST__.pendingWrites.length === 1 && window.__CONFIG_TEST__.guard.busy);
   await nativeExit();
-  await page.locator(".toast.error", { hasText: "配置操作正在处理中" }).waitFor();
+  await page.locator(".toast.error", { hasText: "配置操作仍在进行" }).waitFor();
   assert.equal(await page.getByRole("dialog").count(), 0);
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 0);
   assert.ok(await beforeUnloadBlocked());
@@ -335,7 +337,7 @@ try {
   await file("settings.json").getByRole("button", { name: "编辑", exact: true }).click();
   await file("settings.json").locator("textarea").fill('{"discard":"native-exit"}');
   await nativeExit();
-  await page.getByRole("dialog", { name: "放弃未保存修改？", exact: true }).waitFor();
+  await page.getByRole("dialog", { name: "放弃未保存的修改？", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 1);
   await discard();
   assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 2);

@@ -5,6 +5,12 @@ const TAGS: &[(&str, &str)] = &[
     ("system-reminder", "系统提醒"),
     ("local-command-caveat", "本地命令说明"),
     ("local-command-stdout", "本地命令输出"),
+    ("local-command-stderr", "本地命令错误输出"),
+    ("bash-stdout", "终端输出"),
+    ("bash-stderr", "终端错误输出"),
+    ("task-notification", "任务通知"),
+    ("ide_opened_file", "编辑器文件"),
+    ("ide_selection", "编辑器选区"),
     ("command-stdout", "命令输出"),
     ("user-prompt-submit-hook", "钩子上下文"),
     ("hook_context", "钩子上下文"),
@@ -31,6 +37,11 @@ fn structured(text: &str) -> Option<(Vec<(&'static str, String)>, String)> {
                 return None;
             }
             command.push(body.trim().to_string());
+            rest = tail.trim_start();
+        } else if let Some((_, body, tail)) = block(rest, "bash-input") {
+            if !body.trim().is_empty() {
+                command.push(format!("! {}", body.trim()));
+            }
             rest = tail.trim_start();
         } else {
             let mut found = None;
@@ -97,7 +108,42 @@ fn context_label(v: &Value) -> Option<(&'static str, &'static str)> {
     }
 }
 
-pub(super) fn normalize(v: Value) -> Vec<Value> {
+pub(super) fn valid_model(value: &Value) -> Option<&str> {
+    value.as_str().map(str::trim).filter(|m| !m.is_empty() && *m != "<synthetic>")
+}
+
+pub(super) fn promote_queued_prompt(event: &mut Value) {
+    let attachment = &event["attachment"];
+    if event["type"] == "attachment"
+        && attachment["type"] == "queued_command"
+        && attachment["origin"]["kind"] == "human"
+        && attachment["commandMode"] == "prompt"
+        && super::super::context::has_user_content(&attachment["prompt"])
+    {
+        let attachment = event.as_object_mut().unwrap().remove("attachment").unwrap();
+        event["type"] = json!("user");
+        event["message"] = json!({"role":"user","content": attachment["prompt"]});
+    }
+}
+
+pub(super) fn normalize(mut v: Value) -> Vec<Value> {
+    if v["type"] == "assistant" && v["isApiErrorMessage"] == true {
+        let message = &v["message"]["content"];
+        let text = match message.as_array() {
+            Some(parts) => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
+            None => message.as_str().unwrap_or("API 请求失败").to_owned(),
+        };
+        v["type"] = json!("system");
+        v["content"] = json!(text);
+        v.as_object_mut().unwrap().remove("message");
+        return vec![v];
+    }
+    if v["type"] == "assistant" && valid_model(&v["message"]["model"]).is_none() {
+        if let Some(message) = v["message"].as_object_mut() {
+            message.remove("model");
+        }
+    }
+    let v = normalize_tools(v);
     if let Some((kind, label)) = context_label(&v) {
         let event = record(&v, kind, label, &v);
         // Mixed tool-result envelopes must keep their tool results accessible.
@@ -174,4 +220,30 @@ pub(super) fn normalize(v: Value) -> Vec<Value> {
         events.push(normal);
     }
     events
+}
+
+fn normalize_tools(mut event: Value) -> Value {
+    let Some(parts) = event
+        .pointer_mut("/message/content")
+        .and_then(Value::as_array_mut)
+    else {
+        return event;
+    };
+    for part in parts {
+        match part["type"].as_str() {
+            Some("server_tool_use" | "mcp_tool_use") => part["type"] = json!("tool_use"),
+            Some(kind) if kind.ends_with("_tool_result") && part["tool_use_id"].is_string() => {
+                let content = &part["content"];
+                let failed = part["is_error"] == true
+                    || content["error_code"].is_string()
+                    || content["return_code"]
+                        .as_i64()
+                        .is_some_and(|code| code != 0);
+                part["type"] = json!("tool_result");
+                part["is_error"] = json!(failed);
+            }
+            _ => {}
+        }
+    }
+    event
 }

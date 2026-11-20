@@ -3,10 +3,11 @@ export interface AgentInfo {
   displayName: string;
   installed: boolean;
   supportsFork: boolean;
-  supportsModelNames?: boolean;
-  supportsFastCatalog?: boolean;
+  supportsArchive: boolean;
+  supportsArchivedSessions: boolean;
+  resumeEntrypoint?: string;
   dataDir: string | null;
-  deletePolicy: "trash" | "permanent";
+  deletePolicy: "trash" | "permanent" | "readOnly";
 }
 
 export interface SessionMeta {
@@ -15,9 +16,8 @@ export interface SessionMeta {
   cwd: string | null;
   title: string | null;
   model: string | null;
-  /** 数据源确认的模型名称，原始标识仍保留在 model 中。 */
-  modelName?: string | null;
   version: string | null;
+  client?: string | null;
   gitBranch: string | null;
   entrypoint: string | null;
   firstTs: string | null;
@@ -26,11 +26,19 @@ export interface SessionMeta {
   assistantCount: number;
   realUserCount: number;
   assistantTextCount: number;
-  sizeBytes: number;
+  sizeBytes?: number;
   hasTranscript: boolean;
+  archived?: boolean;
   statsPending?: boolean;
+  /** 仅前端：统计仍在后台计算，消息数沿用同一会话上次确认的值；未知统计不会带此标记。 */
+  statsRetained?: boolean;
   /** 本次应用运行中实际打开正文失败的诊断；摘要刷新不能视为正文恢复。 */
   readError?: string;
+}
+
+export interface CatalogFilter {
+  includeEmpty: boolean;
+  includeArchived: boolean;
 }
 
 export interface SessionDeleteFailure {
@@ -65,6 +73,7 @@ export interface Project {
 }
 
 export interface Catalog {
+  revision?: number;
   projects: Project[];
   sessions: SessionMeta[];
   warnings: string[];
@@ -97,7 +106,6 @@ export interface SessionEvent {
   message?: {
     role?: string;
     model?: string;
-    modelName?: string;
     content: ContentBlock[] | string;
   };
 }
@@ -111,6 +119,11 @@ export interface ContentBlock {
   text?: string;
   thinking?: string;
   name?: string;
+  description?: string;
+  source?: unknown;
+  url?: string;
+  image_url?: string;
+  filename?: string;
   id?: string;
   input?: unknown;
   tool_use_id?: string;
@@ -201,126 +214,4 @@ export interface ConfigChangePreview {
 export interface ConfigActivity {
   dirty: boolean;
   busy: boolean;
-}
-
-export interface UsageTokens {
-  inputRecorded?: boolean;
-  outputRecorded?: boolean;
-  inputIncomplete?: boolean;
-  outputIncomplete?: boolean;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  reasoningTokens: number;
-  unclassifiedTokens: number;
-  totalTokens: number;
-  cacheReadRecorded?: boolean;
-  cacheWriteRecorded?: boolean;
-  reasoningRecorded?: boolean;
-}
-export interface CollectorStatus {
-  desired: boolean;
-  running: boolean;
-  authorization: "enabled" | "disabled" | "requiresApproval" | "unsupported" | "notBundled" | "signingRequired";
-  pid?: number;
-  version?: string;
-  error?: string;
-}
-export interface UsageRow extends UsageTokens {
-  date: string;
-  model: string;
-  modelName: string;
-  partial: boolean;
-}
-export interface UsageReport {
-  agent: string;
-  updatedAt: number;
-  rows: UsageRow[];
-  hasUsage: boolean;
-  partial: boolean;
-  fileCount: number;
-  measuredFileCount: number;
-  warnings: string[];
-  scanMs: number;
-  bytesRead: number;
-}
-export interface UsageRequestMetrics {
-  // 累计差额不能还原请求次数；此时 requestCount 只是可确认的下限。
-  requestCount: number;
-  requestCountIncomplete: boolean;
-  // 日志中的美元成本；null 表示未记录，不按模型价格估算。
-  costUsd: number | null;
-  costIncomplete: boolean;
-  cacheReadIncomplete: boolean;
-  cacheRateUnavailable: boolean;
-}
-export interface UsageSummaryRow extends UsageRow, UsageRequestMetrics { agent: string; bucketStart: number | null }
-export interface UsageSummary {
-  rows: UsageSummaryRow[];
-  health: Record<string, { partial: boolean; warnings: string[] }>;
-  // 与 rows 来自同一快照；空目录也必须完成同步后才能确认用量为 0。
-  syncedAgents: string[];
-  revision: string;
-}
-export interface UsageSummaryQuery { from?: number; to?: number; bounds: number[] }
-export interface UsageSync { updatedAt: number; checkedFiles: number; changedFiles: number; bytesRead: number }
-export interface UsageSyncProgress {
-  agent: string;
-  phase: "waiting" | "discovering" | "reading" | "indexing" | "complete";
-  checkedFiles: number;
-  totalFiles: number | null;
-}
-
-export interface RequestMetadata {
-  requestId: string | null;
-  provider: string | null;
-  project: string | null;
-  client: string | null;
-  kind: string | null;
-  effort: string | null;
-  tier: string | null;
-  version: string | null;
-  source: string | null;
-  stop: string | null;
-  httpStatus: number | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-  timing: "recorded" | "observed" | "estimated" | null;
-  latencyMs: number | null;
-  ttftMs: number | null;
-  ttftScope: "turn" | null;
-  scope: "request" | "usage_delta" | "error" | null;
-  costUsd: number | null;
-}
-export interface RequestEvent extends Omit<UsageTokens, "totalTokens"> {
-  id: string;
-  agent: string;
-  time: number;
-  session: string;
-  model: string;
-  modelName: string;
-  status: "success" | "failed" | "unknown";
-  partial: boolean;
-  request: RequestMetadata;
-  outputTps: number | null;
-}
-export interface EventQuery {
-  agent?: string;
-  model?: string;
-  status?: string;
-  from?: number;
-  to?: number;
-  page?: number;
-  limit?: number;
-  // 自动同步时定位当前可见请求；主动跳页只使用 page。
-  anchor?: string;
-}
-export interface EventPage {
-  events: RequestEvent[];
-  total: number;
-  page: number;
-  pageSize: number;
-  revision: string;
-  models: string[];
 }

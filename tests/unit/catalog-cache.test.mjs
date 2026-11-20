@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AgentCatalogCache } from "../../src/catalogCache.ts";
+import { AgentCatalogCache, DEFAULT_CATALOG_FILTER as active } from "../../src/catalogCache.ts";
+
+const generation = 1;
+const allActive = { ...active, includeEmpty: true };
+const withArchived = { ...active, includeArchived: true };
 
 const deferred = () => {
   let resolve, reject;
@@ -8,72 +12,109 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 const meta = (id, model = null) => ({ sessionId: id, projectDir: "real-dir", title: id,
-  model, modelName: null, lastTs: null });
+  model, lastTs: null });
 const catalog = (...sessions) => ({ sessions, warnings: [], projects: sessions.length ?
   [{ dirName: "real-dir", displayPath: "/tmp/real", sessionCount: sessions.length, lastActivity: null }] : [] });
 
 test("desktop rename and model selection update an open detail without replacing its body statistics", async () => {
   let row = {...meta("same", "mode-old"), title:"Continue"};
-  const oldNames = deferred();
-  const cache = new AgentCatalogCache(async () => catalog(row), async () => oldNames.promise);
-  await cache.load("qoder", false);
-  const detail = {...row, userCount:9, sizeBytes:123};
-  const pending = cache.enrich("qoder", false, true);
-  row = {...meta("same", "mode-new"), title:"Named desktop session", userCount:99};
-  await cache.load("qoder", false);
-  oldNames.resolve({"mode-old":"Historical name"});
-  await pending;
-  const current = cache.withCurrentMetadata("qoder", false, detail);
+  const cache = new AgentCatalogCache(async () => catalog(row));
+  await cache.load("qoder", active, generation);
+  const detail = { ...row, userCount: 9, sizeBytes: 123 };
+  row = { ...meta("same", "mode-new"), title: "Named desktop session", userCount: 99 };
+  await cache.load("qoder", active, generation);
+  const current = cache.withCurrentMetadata("qoder", active, detail);
   assert.equal(current.title,"Named desktop session");
   assert.equal(current.model,"mode-new");
-  assert.equal(current.modelName,null);
   assert.equal(current.userCount,9);
   assert.equal(current.sizeBytes,123);
   assert.equal(current.projectDir,detail.projectDir);
   const unrelated={...detail,projectDir:"another-source"};
-  assert.equal(cache.withCurrentMetadata("qoder",false,unrelated).title,"Continue");
+  assert.equal(cache.withCurrentMetadata("qoder", active,unrelated).title,"Continue");
+});
+
+test("a header-only preview keeps the last confirmed card details until background statistics settle", async () => {
+  const settled = { ...meta("live", "logged-model"), title: "Confirmed title", lastTs: "2026-10-01T00:00:00Z", sizeBytes: 100,
+    userCount: 3, assistantCount: 5, realUserCount: 3, assistantTextCount: 4 };
+  const preview = row => ({ ...row, title: null, model: null, userCount: 0, assistantCount: 0, realUserCount: 0,
+    assistantTextCount: 0, statsPending: true });
+  let rows = [settled];
+  const cache = new AgentCatalogCache(async () => catalog(...rows));
+  await cache.load("codex", active, generation);
+  await cache.load("claude", active, generation);
+
+  rows = [preview({ ...settled, lastTs: "2026-10-02T00:00:00Z", sizeBytes: 300 }), preview(meta("brand-new"))];
+  await cache.load("codex", active, generation);
+  let [live, fresh] = cache.peek("codex", active).sessions;
+  assert.deepEqual([live.title, live.model, live.realUserCount, live.assistantTextCount, live.userCount, live.statsPending, live.statsRetained],
+    ["Confirmed title", "logged-model", 3, 4, 3, true, true]);
+  assert.deepEqual([live.lastTs, live.sizeBytes], ["2026-10-02T00:00:00Z", 300], "new file time and size still arrive during the preview");
+  assert.equal(fresh.statsRetained, undefined, "a session never confirmed before stays unknown instead of becoming zero");
+  assert.equal(cache.withCurrentMetadata("codex", active, { ...settled, title: "Detail title" }).title, "Confirmed title");
+
+  rows = [{ ...preview(settled), title: "Renamed on desktop" }];
+  await cache.load("codex", active, generation);
+  live = cache.peek("codex", active).sessions[0];
+  assert.deepEqual([live.title, live.model, live.realUserCount], ["Renamed on desktop", "logged-model", 3], "a second preview chains the confirmed values and keeps a rename");
+
+  await cache.refine("codex", active, async () => catalog({ ...settled, title: "Renamed on desktop", realUserCount: 0, assistantTextCount: 0 }));
+  live = cache.peek("codex", active).sessions[0];
+  assert.deepEqual([live.realUserCount, live.statsPending, live.statsRetained], [0, undefined, undefined], "accurate zero replaces the retained count");
+
+  rows = [];
+  await cache.load("codex", active, generation);
+  assert.equal(cache.peek("codex", active).sessions.length, 0, "a deleted session disappears without waiting for statistics");
+  rows = [preview(settled)];
+  await cache.load("claude", active, generation);
+  assert.equal(cache.peek("claude", active).sessions[0].statsRetained, true);
+  await cache.load("codex", active, generation);
+  assert.equal(cache.peek("codex", active).sessions[0].statsRetained, undefined, "another Agent's cached row is never reused");
 });
 
 test("cached metadata never clears a body read failure; only a successful body retry does", async () => {
   const row = {...meta("same", "mode-id"), realUserCount:1};
   const refresh = deferred(); let pending = false;
-  const cache = new AgentCatalogCache(async () => pending ? refresh.promise : catalog(row), async () => ({"mode-id":"Readable"}));
-  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty);
+  const cache = new AgentCatalogCache(async () => pending ? refresh.promise : catalog(row));
+  for (const agent of ["qoder", "claude"]) for (const filter of [active, allActive]) await cache.load(agent, filter, generation);
   pending = true;
-  const load = cache.load("qoder", false);
+  const load = cache.load("qoder", active, generation);
   cache.setReadError("qoder", row, "stage: open\nos_code: 24");
   refresh.resolve(catalog(row)); await load;
-  await cache.enrich("qoder", true);
-  for (const empty of [false, true]) assert.match(cache.peek("qoder", empty).sessions[0].readError, /os_code: 24/);
-  assert.equal(cache.peek("claude", false).sessions[0].readError, undefined);
-  await cache.refine("qoder", false, async () => ({...catalog(), warnings:["Directory cannot be read"]}));
-  assert.equal(cache.peek("qoder", false).sessions[0].sessionId, "same");
-  assert.equal(cache.peek("qoder", false).projects[0].displayPath, "/tmp/real");
+  for (const filter of [active, allActive]) assert.match(cache.peek("qoder", filter).sessions[0].readError, /os_code: 24/);
+  assert.equal(cache.peek("claude", active).sessions[0].readError, undefined);
+  await cache.refine("qoder", active, async () => ({...catalog(), warnings:["Directory cannot be read"]}));
+  assert.equal(cache.peek("qoder", active).sessions[0].sessionId, "same");
+  assert.equal(cache.peek("qoder", active).projects[0].displayPath, "/tmp/real");
   cache.setReadError("qoder", row, null);
-  for (const empty of [false, true]) assert.equal(cache.peek("qoder", empty).sessions[0].readError, undefined);
+  for (const filter of [active, allActive]) assert.equal(cache.peek("qoder", filter).sessions[0].readError, undefined);
   cache.setReadError("qoder", row, "failed again");
   cache.remove("qoder", [row]);
-  await cache.refine("qoder", false, async () => ({...catalog(), warnings:["Directory unavailable"]}));
-  assert.equal(cache.peek("qoder", false).sessions.length, 0, "deleted failure must not revive the cached card");
+  await cache.refine("qoder", active, async () => ({...catalog(), warnings:["Directory unavailable"]}));
+  assert.equal(cache.peek("qoder", active).sessions.length, 0, "deleted failure must not revive the cached card");
 });
 
-test("switching back exposes the matching snapshot while a coalesced refresh is pending", async () => {
+test("a coalesced refresh retains the matching snapshot when its revision is unchanged", async () => {
   let calls = 0;
   const held = deferred();
-  const cache = new AgentCatalogCache(async (agent, empty) => {
-    calls++;
-    return calls === 1 ? catalog(meta(agent)) : held.promise;
-  }, async () => ({}));
-  await cache.load("codex", false);
-  const refresh = cache.load("codex", false);
-  assert.equal(cache.load("codex", false), refresh);
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "codex");
-  assert.equal(cache.peek("claude", false), undefined);
-  assert.equal(cache.peek("codex", true), undefined);
+  const cache = new AgentCatalogCache(async (agent, filter, requestGeneration, revision) => {
+    if (++calls === 1) return { ...catalog(meta(agent)), revision: 7 };
+    assert.equal(revision, 7);
+    return held.promise;
+  });
+  const snapshot = await cache.load("codex", active, generation);
+  let changes = 0;
+  const unsubscribe = cache.subscribe(() => { changes++; });
+  const refresh = cache.load("codex", active, generation);
+  assert.equal(cache.load("codex", active, generation), refresh);
+  assert.equal(cache.peek("codex", active), snapshot);
+  assert.equal(cache.peek("claude", active), undefined);
+  assert.equal(cache.peek("codex", allActive), undefined);
+  held.resolve(null);
+  assert.equal(await refresh, snapshot);
+  assert.equal(cache.peek("codex", active), snapshot);
+  assert.equal(changes, 0);
   assert.equal(calls, 2);
-  held.resolve(catalog(meta("new")));
-  await refresh;
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "new");
+  unsubscribe();
 });
 
 test("refresh failures preserve the previous list and allow a subsequent retry", async () => {
@@ -81,86 +122,58 @@ test("refresh failures preserve the previous list and allow a subsequent retry",
   const cache = new AgentCatalogCache(async () => {
     if (++calls === 2) throw Error("scan unavailable");
     return catalog(meta(String(calls)));
-  }, async () => ({}));
-  await cache.load("codex", false);
-  await assert.rejects(cache.load("codex", false), /scan unavailable/);
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "1");
-  await cache.load("codex", false);
-  assert.equal(cache.peek("codex", false).sessions[0].sessionId, "3");
+  });
+  await cache.load("codex", active, generation);
+  await assert.rejects(cache.load("codex", active, generation), /scan unavailable/);
+  assert.equal(cache.peek("codex", active).sessions[0].sessionId, "1");
+  await cache.load("codex", active, generation);
+  assert.equal(cache.peek("codex", active).sessions[0].sessionId, "3");
 });
 
-test("names resolve independently, merge into both filters and survive a raw metadata refresh", async () => {
-  const names = deferred(); let nameCalls = 0;
-  const cache = new AgentCatalogCache(async () => catalog(meta("same", "mode-id")),
-    async () => { nameCalls++; return names.promise; });
-  await cache.load("qoder", false);
-  await cache.load("qoder", true);
-  await cache.load("codex", false);
-  const first = cache.enrich("qoder", false);
-  const second = cache.enrich("qoder", true);
-  assert.equal(cache.peek("qoder", false).sessions.length, 1);
-  assert.equal(nameCalls, 1);
-  names.resolve({ "mode-id": "Qwen example" });
-  await Promise.all([first, second]);
-  assert.equal(cache.peek("qoder", true).sessions[0].modelName, "Qwen example");
-  assert.equal(cache.peek("codex", false).sessions[0].modelName, null);
-  await cache.load("qoder", false);
-  assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Qwen example");
-  assert.equal(cache.peek("qoder", false).sessions[0].model, "mode-id");
-});
-
-test("late scans and model lookups cannot revive deleted sessions or touch another Agent", async () => {
-  const scan = deferred(), names = deferred(); let hold = false;
+test("late scans cannot revive deleted sessions or touch another Agent", async () => {
+  const scan = deferred();
+  const count = deferred();
+  let hold = false;
   const row = meta("same", "mode-id");
-  const cache = new AgentCatalogCache(async () => hold ? scan.promise : catalog(row), async () => names.promise);
-  for (const agent of ["qoder", "claude"]) for (const empty of [false, true]) await cache.load(agent, empty);
-  const naming = cache.enrich("qoder", false);
+  const cache = new AgentCatalogCache(async () => hold ? scan.promise : catalog(row));
+  for (const agent of ["qoder", "claude"]) for (const filter of [active, allActive]) await cache.load(agent, filter, generation);
+  const refreshCount = () => cache.refreshCount("qoder", active, () => count.promise);
+  const staleCount = refreshCount();
+  assert.equal(refreshCount(), staleCount);
   hold = true;
-  const stale = cache.load("qoder", false);
+  const stale = cache.load("qoder", active, generation);
   cache.remove("qoder", [row]);
   scan.resolve(catalog(row));
-  names.resolve({ "mode-id": "Friendly name" });
-  await Promise.all([stale, naming]);
-  assert.equal(cache.peek("qoder", false).sessions.length, 0);
-  assert.equal(cache.peek("qoder", true).projects.length, 0);
-  assert.equal(cache.peek("claude", false).sessions.length, 1);
-});
-
-test("late name completion enriches the newest list instead of replacing it", async () => {
-  const names = deferred(); let rows = [meta("first", "mode-id")];
-  const cache = new AgentCatalogCache(async () => catalog(...rows), async () => names.promise);
-  await cache.load("qoder", false);
-  const naming = cache.enrich("qoder", false);
-  rows = [meta("second", "mode-id")];
-  await cache.load("qoder", false);
-  names.resolve({ "mode-id": "Readable name" });
-  await naming;
-  assert.deepEqual(cache.peek("qoder", false).sessions.map(s => s.sessionId), ["second"]);
-  assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Readable name");
-});
-
-test("capable sources refresh known names without treating model IDs as object properties", async () => {
-  let name = "Old name";
-  const cache = new AgentCatalogCache(async () => catalog(meta("a", "constructor")), async () => ({ constructor: name }));
-  await cache.load("qoder", false);
-  assert.equal(cache.peek("qoder", false).sessions[0].modelName, null);
-  await cache.enrich("qoder", false, true);
-  assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Old name");
-  name = "Updated name";
-  await cache.enrich("qoder", false, true);
-  assert.equal(cache.peek("qoder", false).sessions[0].modelName, "Updated name");
+  count.resolve(1);
+  await Promise.all([stale, staleCount]);
+  assert.equal(cache.peek("qoder", active).sessions.length, 0);
+  assert.equal(cache.peek("qoder", allActive).projects.length, 0);
+  assert.equal(cache.peek("claude", active).sessions.length, 1);
+  assert.equal(cache.count("qoder", active), 0);
 });
 
 test("background statistics cannot replace a newer refresh or revive deleted sessions", async () => {
-  let rows = [meta("first")];
-  const cache = new AgentCatalogCache(async () => catalog(...rows), async () => ({}));
-  await cache.load("codex", false);
-  const old = deferred(); const refine = cache.refine("codex", false, () => old.promise);
-  rows = [meta("new")]; await cache.load("codex", false);
+  let row = { ...meta("first"), realUserCount: 1 };
+  const cache = new AgentCatalogCache(async (_agent, filter) =>
+    row.archived && !filter.includeArchived ? catalog() : catalog(row));
+  await cache.load("codex", active, generation);
+  const old = deferred(); const refine = cache.refine("codex", active, () => old.promise);
+  row = { ...row, sessionId: "new" };
+  await cache.load("codex", active, generation);
   old.resolve(catalog(meta("first")));
   assert.equal(await refine, undefined);
-  const deleted = deferred(); const pending = cache.refine("codex", false, () => deleted.promise);
-  cache.remove("codex", rows); deleted.resolve(catalog(...rows));
+
+  await cache.load("codex", withArchived, generation);
+  const stale = deferred(); const pending = cache.refine("codex", active, () => stale.promise);
+  cache.setArchived("codex", row, true);
+  stale.resolve(catalog(row));
   assert.equal(await pending, undefined);
-  assert.equal(cache.peek("codex", false).sessions.length, 0);
+  assert.equal(cache.peek("codex", active).sessions.length, 0);
+  assert.equal(cache.peek("codex", withArchived).sessions[0].archived, true);
+
+  cache.setArchived("codex", { ...row, archived: true }, false);
+  assert.equal(cache.peek("codex", active).sessions[0].archived, false);
+  assert.equal(cache.peek("codex", active).projects[0].sessionCount, 1);
+  cache.remove("codex", [row]);
+  assert.equal(cache.peek("codex", withArchived).sessions.length, 0);
 });

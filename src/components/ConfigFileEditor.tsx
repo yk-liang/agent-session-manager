@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import Notice from "./Notice";
 import UiIcon from "./UiIcon";
 import type { ConfigValidation, WorkspaceFile } from "../types";
 import * as api from "../api";
@@ -24,7 +25,7 @@ export default function ConfigFileEditor({
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  // 编辑开始时冻结基线。其他文件保存触发的重新读取，不得替换这份草稿的版本。
+  // 保留编辑开始时的文件版本，避免重新读取后覆盖外部修改。
   const baseline = useRef({ content: file.content, revision: file.revision });
   const [validation, setValidation] = useState<ConfigValidation>(
     file.validation,
@@ -54,7 +55,7 @@ export default function ConfigFileEditor({
           if (gen === validationGen.current)
             setValidation({
               valid: false,
-              error: `暂时无法校验：${String(e)}`,
+              error: `无法校验：${String(e)}`,
             });
         })
         .finally(() => {
@@ -106,7 +107,6 @@ export default function ConfigFileEditor({
       setEditing(false);
       await onSaved(file.key, draft);
     } catch (e) {
-      // 拒绝覆盖时保留完整草稿，用户可复制后重新读取磁盘内容。
       setError(String(e));
     } finally {
       setSaving(false);
@@ -117,28 +117,29 @@ export default function ConfigFileEditor({
   const displayedValidation = editing ? validation : file.validation;
   return (
     <article
-      className={`config-file${dirty ? " is-dirty" : ""}`}
+      className={`config-file${dirty ? " is-dirty" : ""}${!file.present && !editing ? " is-absent" : ""}`}
       data-file-key={file.key}
     >
       <div className="config-file-head">
         <button
-          className="collapsible-head"
+          type="button"
+          className="config-file-toggle"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
           title={file.path}
         >
           <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
           <strong>{file.label}</strong>
-          {!file.present && (
-            <span className="config-badge muted">尚未创建</span>
+          {!file.present && !editing && (
+            <span className="status-tag">尚未创建</span>
           )}
-          {dirty && <span className="config-badge amber">未保存</span>}
-          <span className="config-line-count">
-            {file.present || editing ? `${lineCount} 行` : ""}
-          </span>
+          {dirty && <span className="status-tag" data-tone="warning">未保存</span>}
+          {(file.present || editing) && (
+            <span className="config-line-count">{lineCount} 行</span>
+          )}
         </button>
         {!editing && (
-          <button className="edit-btn" onClick={startEdit} disabled={disabled}>
+          <button type="button" className="config-file-action btn-sm" onClick={startEdit} disabled={disabled}>
             {file.present ? "编辑" : "创建"}
           </button>
         )}
@@ -198,7 +199,7 @@ export default function ConfigFileEditor({
                     gutterRef.current.scrollTop = e.currentTarget.scrollTop;
                 }}
               >
-                {text || "尚无配置内容"}
+                {text || "暂无内容"}
               </pre>
             )}
           </div>
@@ -224,10 +225,11 @@ export default function ConfigFileEditor({
               </span>
               {editing && (
                 <div className="config-edit-buttons">
-                  <button onClick={cancelEdit} disabled={saving}>
+                  <button type="button" onClick={cancelEdit} disabled={saving}>
                     取消编辑
                   </button>
                   <button
+                    type="button"
                     className="primary"
                     onClick={saveEdit}
                     disabled={
@@ -247,14 +249,10 @@ export default function ConfigFileEditor({
         </div>
       )}
       {error && (
-        <div className="config-notice error" role="alert">
-          {error}
-        </div>
+        <Notice tone="error">{error}</Notice>
       )}
       {!open && !file.validation.valid && (
-        <div className="config-notice error" role="alert">
-          {file.validation.error}
-        </div>
+        <Notice tone="error">{file.validation.error}</Notice>
       )}
     </article>
   );

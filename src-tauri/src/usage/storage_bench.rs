@@ -61,7 +61,7 @@ fn storage_comparison() {
     let mut syncs = Vec::new();
     for agent in AGENTS {
         let start = Instant::now();
-        let result = summary::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
+        let result = ingest::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
         syncs.push(json!({"agent":agent,"ms":elapsed_ms(start),"bytes_read":result.bytes_read,"changed_files":result.changed_files}));
     }
     drop(store);
@@ -69,7 +69,7 @@ fn storage_comparison() {
     let warm_ms = median(|| {
         for agent in AGENTS {
             let result =
-                summary::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
+                ingest::sync_at(agent, &[logs.join(agent)], &mut store, &|| false).unwrap();
             assert_eq!(result.bytes_read, 0, "warm sync reread source logs");
         }
     });
@@ -102,14 +102,9 @@ fn storage_comparison() {
         "SELECT id,data FROM usage_request_events ORDER BY id",
         Some(1),
     );
-    let compact: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_source_keys') WHERE name='source')", [], |r| r.get(0)).unwrap();
     let identity_hash = digest(
         db,
-        if compact {
-            "SELECT s.agent,s.path,k.key FROM usage_source_keys k JOIN usage_ledger_sources s ON s.id=k.source ORDER BY s.agent,s.path,k.key"
-        } else {
-            "SELECT agent,path,key FROM usage_source_keys ORDER BY agent,path,key"
-        },
+        "SELECT s.agent,s.path,k.key FROM usage_source_keys k JOIN usage_ledger_sources s ON s.id=k.source ORDER BY s.agent,s.path,k.key",
         None,
     );
     let request_count: i64 = db

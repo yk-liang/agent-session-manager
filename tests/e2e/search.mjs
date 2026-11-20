@@ -26,7 +26,7 @@ try {
       cccc:[{type:'user',uuid:'no-hit',message:{content:'只有标题匹配，正文不匹配。'}}],
       dddd:[{type:'user',uuid:'another-hit',message:{content:'目标针是另一个问题。'}},{type:'assistant',message:{content:'这是另一 Agent 的目标针正文。'}}],
     };
-    const agents=[{id:'qoder',displayName:'Qoder CLI',installed:true,supportsFork:true,dataDir:'/tmp/qoder',deletePolicy:'trash'},{id:'codex',displayName:'Codex',installed:true,supportsFork:false,dataDir:'/tmp/codex',deletePolicy:'trash'}];
+    const agents=[{id:'qoder',displayName:'Qoder',installed:true,supportsFork:true,dataDir:'/tmp/qoder',deletePolicy:'trash'},{id:'codex',displayName:'Codex',installed:true,supportsFork:false,dataDir:'/tmp/codex',deletePolicy:'trash'}];
     const records={qoder:[a,b,c],codex:[d]};
     const state={calls:[],hold:false,pending:[],fail:false,moveMessage:false};window.__SEARCH_TEST__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
@@ -60,7 +60,7 @@ try {
     }};
   });
   await page.goto(baseURL);
-  const search=page.getByRole('searchbox',{name:'搜索会话或对话内容',exact:true});
+  const search=page.getByRole('searchbox',{name:'搜索会话或正文',exact:true});
   await page.locator('.session-card').first().waitFor();
   await search.fill('目标针');
   await page.locator('.session-search-snippet').first().waitFor();
@@ -124,18 +124,18 @@ try {
   pass('switching Agent isolates results and clearing the search removes highlighting');
 
   await search.fill('不存在的词');
-  await page.getByText('没有匹配的会话',{exact:true}).waitFor();
+  await page.getByText('未找到匹配的会话',{exact:true}).waitFor();
   assert.equal(await page.locator('.session-card').count(),0);
   await search.fill('部分失败');
-  await page.getByRole('status').getByText('1 个会话未能搜索',{exact:true}).waitFor();
+  await page.getByRole('status').getByText('无法搜索 1 个会话',{exact:true}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.fail=true);
   await search.fill('失败查询');
-  await page.getByRole('button',{name:'重试搜索',exact:true}).waitFor();
+  await page.getByRole('button',{name:'重试',exact:true}).waitFor();
   await page.evaluate(()=>window.__SEARCH_TEST__.fail=false);
   const beforeRetry = await page.evaluate(()=>window.__SEARCH_TEST__.calls.length);
-  await page.getByRole('button',{name:'重试搜索',exact:true}).click();
+  await page.getByRole('button',{name:'重试',exact:true}).click();
   await page.waitForFunction(count=>window.__SEARCH_TEST__.calls.length>count,beforeRetry);
-  await page.getByRole('button',{name:'重试搜索',exact:true}).waitFor({state:'detached'});
+  await page.getByRole('button',{name:'重试',exact:true}).waitFor({state:'detached'});
   await search.fill('目标针');
   await page.locator('.session-search-snippet').waitFor();
   assert.deepEqual(errors,[]);
