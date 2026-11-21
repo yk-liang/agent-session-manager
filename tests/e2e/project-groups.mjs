@@ -21,7 +21,7 @@ try {
     const rows=[meta("a","dir-a","未归属甲","/Users/demo/Documents/Codex/2026-10-16/task-a"),
       meta("b","dir-b","未归属乙","/tmp/task-b"),meta("named","dir-a","同目录有项目会话","/Users/demo/Documents/Codex/2026-10-16/task-a"),
       meta("manual","manual","手选目录会话","/Users/demo/Documents/Codex/manual")];
-    const state={rows,ids:["a","b"],calls:[],deleted:[]};window.__GROUP_TEST__=state;
+    const state={rows,ids:["a","b"],calls:[],deleted:[],missingPaths:[rows[0].cwd,rows[1].cwd]};window.__GROUP_TEST__=state;
     window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
       if(command==="list_agents")return [{id:"codex",displayName:"Codex",installed:true,deletePolicy:"trash",supportsFork:false},
@@ -30,7 +30,8 @@ try {
         const sessions=args.agent==="codex"?state.rows:[meta("a","qoder-dir","另一 Agent 会话","/tmp/qoder")];
         const projects=[...new Set(sessions.map(s=>s.projectDir))].map(dir=>({dirName:dir,displayPath:sessions.find(s=>s.projectDir===dir).cwd,
           sessionCount:sessions.filter(s=>s.projectDir===dir).length,lastActivity:null}));
-        return {sessions,projects,warnings:[],...(args.agent==="codex"?{projectlessSessionIds:state.ids}: {})};
+        return {sessions,projects,warnings:[],...(args.agent==="codex"
+          ? {projectlessSessionIds:state.ids,missingProjectPaths:state.missingPaths} : {})};
       }
       if(command==="read_session"){
         const m=state.rows.find(s=>s.sessionId===args.sessionId&&s.projectDir===args.projectDir);
@@ -56,6 +57,18 @@ try {
   assert.ok((await page.getByRole("button",{name:/^全部会话/}).textContent()).includes("4 个会话"));
   assert.equal(await page.locator(".session-card .session-project-path").count(),2);
   assert.equal(await page.locator(".session-card",{hasText:"未归属乙"}).getAttribute("title"),"/tmp/task-b");
+  const missing = page.locator(".sidebar-project-list .project-item.missing");
+  assert.equal(await missing.count(), 1);
+  assert.equal(await missing.locator(".status-tag").textContent(), "不存在");
+  assert.equal(await group.getByText("不存在").count(), 0);
+  await missing.click();
+  assert.equal(await page.locator(".session-card").count(), 1);
+  await page.evaluate(() => {
+    window.__GROUP_TEST__.missingPaths = [];
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await missing.waitFor({ state: "detached" });
   pass("explicit projectless IDs form one group; source directories stay hidden on those cards only");
 
   await group.click();

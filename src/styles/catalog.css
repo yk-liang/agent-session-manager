@@ -51,6 +51,11 @@
 }
 
 .project-item.active .project-path { color: var(--accent); font-weight: 600; }
+.project-item.missing :is(.project-path, .project-meta) { color: var(--text-muted); }
+
+.project-heading { display: flex; align-items: center; gap: 6px; }
+.project-heading .project-path { flex: 1; min-width: 0; }
+.project-heading .status-tag { flex: none; }
 
 .project-meta,
 .session-card-sub {
