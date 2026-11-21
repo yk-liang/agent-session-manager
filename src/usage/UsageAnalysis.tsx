@@ -1,5 +1,6 @@
 import Segmented from "../components/Segmented";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useUiPreference } from "../useUiPreference";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { AgentInfo } from "../types";
 import type { UsageSummary, UsageSummaryRow } from "./types";
@@ -95,10 +96,7 @@ function StatCard({ metric, label, value, rawValue, meta, notes }: {
 export default function UsageAnalysis({
   agents, agent, period, now, summary, rows, incomplete, emptyText, canShowUsage,
 }: Props) {
-  const [trendMetric, setTrendMetric] = useState<TrendMetric>("tokens");
-  const [trendGroup, setTrendGroup] = useState<TrendGroup>("category");
-  const [dimension, setDimension] = useState<AnalysisDimension>("models");
-  const [shareMetric, setShareMetric] = useState<TrendMetric>("tokens");
+  const [{ trendMetric, trendGroup, dimension, shareMetric }, setAnalysis] = useUiPreference("usageAnalysis");
   const [expanded, setExpanded] = useState(false);
   const shareTip = useTooltip();
   const agentNames = useMemo(() => new Map(agents.map(item => [item.id, item.displayName])), [agents]);
@@ -250,12 +248,13 @@ export default function UsageAnalysis({
             <h2>{period === "today" ? "每小时趋势" : "每日趋势"}</h2>
           </div>
           <div className="usage-controls">
-            <Segmented compact label="趋势指标" options={TREND_METRIC_OPTIONS} value={trendMetric} onChange={setTrendMetric} />
+            <Segmented compact label="趋势指标" options={TREND_METRIC_OPTIONS} value={trendMetric}
+              onChange={trendMetric => setAnalysis(current => ({ ...current, trendMetric }))} />
             <Segmented<TrendGroup> compact
               label="趋势分组"
               options={agent === "all" ? [["category", "按类别"], ["models", "按模型"], ["agents", "按 Agent"]] : [["category", "按类别"], ["models", "按模型"]]}
               value={group}
-              onChange={setTrendGroup}
+              onChange={trendGroup => setAnalysis(current => ({ ...current, trendGroup }))}
             />
           </div>
         </div>
@@ -278,13 +277,13 @@ export default function UsageAnalysis({
                 .filter(([id]) => agent === "all" || id !== "agents")
                 .map(([id, text]): [AnalysisDimension, string] => [id, `按${text === "Agent" ? " Agent" : text}`])}
               value={groupBy}
-              onChange={id => { setDimension(id); setExpanded(false); }}
+              onChange={dimension => { setAnalysis(current => ({ ...current, dimension })); setExpanded(false); }}
             />
             <Segmented compact
               label="占比指标"
               options={SHARE_METRIC_OPTIONS}
               value={shareMetric}
-              onChange={setShareMetric}
+              onChange={shareMetric => setAnalysis(current => ({ ...current, shareMetric }))}
             />
           </div>
         </div>

@@ -116,7 +116,7 @@ export function installScreenshotFixture(fixture) {
       case 'read_session': return { meta: fixture.catalog.sessions.find(s => s.sessionId === args.sessionId), events: fixture.conversation };
       case 'get_config_workspace': return fixture.workspace;
       case 'usage_sync_status': return { sequence: 1, revision: 1, updatedAt: Date.now(), syncing: [], progress: null,
-        failedAgents: [], unavailable: false };
+        recollecting: [], failedAgents: [], unavailable: false };
       case 'read_usage_summary': {
         const { from, to, bounds } = args.query;
         const rows = fixture.events.filter(e => (from == null || e.time >= from) && (to == null || e.time < to)).map(e => ({

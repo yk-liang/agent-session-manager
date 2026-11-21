@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { ArrowDown } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { CheckboxField } from "./Checkbox";
@@ -9,7 +9,7 @@ import { useSessionOutline } from "./SessionOutline";
 import { useConversationScroll } from "../useConversationScroll";
 import { DetailState, EventView, RowKey } from "./SessionEvent";
 import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
-import { readMarkdownPreference, saveMarkdownPreference } from "../markdownPreference";
+import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
 import { formatLocalDateTime, sessionKey } from "../utils";
@@ -33,10 +33,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
   const { meta } = detail;
   const key = sessionKey(meta);
   const reportCopyError = useCallback((error: unknown) => toast(`复制失败：${String(error)}`, true), [toast]);
-  const [showTools, setShowTools] = useState(true);
-  const [showThinking, setShowThinking] = useState(true);
-  const [showContext, setShowContext] = useState(false);
-  const [renderMarkdown, setRenderMarkdown] = useState(readMarkdownPreference);
+  const [{ tool: showTools, thinking: showThinking, context: showContext, markdown: renderMarkdown }, setConversation] = useUiPreference("conversation");
 
   const content = sessionContent(detail.events);
   const { rows, toc, hasContext } = content;
@@ -73,8 +70,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
     const offset = virtual.scrollOffset ?? 0;
     const first = virtual.getVirtualItems().find((row) => row.end > offset);
     markdownAnchor.current = first ? visible[first.index] : null;
-    saveMarkdownPreference(enabled);
-    setRenderMarkdown(enabled);
+    setConversation(current => ({ ...current, markdown: enabled }));
   };
   useLayoutEffect(() => {
     const index = markdownAnchor.current;
@@ -126,9 +122,9 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           </div>
           {meta.hasTranscript && (
             <div className="view-toggles" role="group" aria-label="对话显示选项">
-              <CheckboxField label="工具调用" checked={showTools} onChange={setShowTools} />
-              <CheckboxField label="思考过程" checked={showThinking} onChange={setShowThinking} />
-              {hasContext && <CheckboxField label="上下文" checked={showContext} onChange={setShowContext} title="显示系统指令、环境信息和压缩摘要" />}
+              <CheckboxField label="工具调用" checked={showTools} onChange={tool => setConversation(current => ({ ...current, tool }))} />
+              <CheckboxField label="思考过程" checked={showThinking} onChange={thinking => setConversation(current => ({ ...current, thinking }))} />
+              {hasContext && <CheckboxField label="上下文" checked={showContext} onChange={context => setConversation(current => ({ ...current, context }))} title="显示系统指令、环境信息和压缩摘要" />}
               <CheckboxField label="Markdown" checked={renderMarkdown} onChange={changeMarkdown} />
             </div>
           )}

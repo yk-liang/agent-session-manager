@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { DEFAULT_WIDTHS, MIN_WIDTHS, fitPanelWidths, maxPanelWidth, readPanelWidths, resizePanel, savePanelWidths } from "../panelLayout";
+import { DEFAULT_WIDTHS, MIN_WIDTHS, fitPanelWidths, maxPanelWidth, resizePanel } from "../panelLayout";
 import type { Panel, PanelWidths } from "../panelLayout";
+import { useUiPreference } from "../useUiPreference";
 
 interface Props {
   sidebar: ReactNode;
@@ -22,18 +23,13 @@ interface Drag {
 export default function ResizableLayout({ sidebar, sessionList, children }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
-  const [preferred, setPreferred] = useState(readPanelWidths);
+  const [preferred, commit] = useUiPreference("panelWidths");
   const [preview, setPreview] = useState<PanelWidths | null>(null);
   const [width, setWidth] = useState(0);
   const [activePanel, setActivePanel] = useState<Panel | null>(null);
   const [keyboardPanel, setKeyboardPanel] = useState<Panel | null>(null);
   const hasSessions = sessionList !== undefined;
   const widths = fitPanelWidths(preview ?? preferred, width, hasSessions);
-
-  const commit = useCallback((next: PanelWidths) => {
-    setPreferred(next);
-    savePanelWidths(next);
-  }, []);
 
   const finishDrag = useCallback((save: boolean) => {
     const current = drag.current;

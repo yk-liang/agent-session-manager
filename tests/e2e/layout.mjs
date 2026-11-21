@@ -12,7 +12,7 @@ const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const artifacts = artifactDir;
 mkdirSync(artifacts, { recursive: true });
-const storageKey = "agent-session-manager.panel-widths.v1";
+const storageKey = "agent-session-manager.ui-preferences.v1";
 let checks = 0;
 const pass = (label) => console.log(`PASS ${++checks}: ${label}`);
 const sidebarDivider = page.getByRole("separator", { name: "调整侧栏宽度", exact: true });
@@ -175,7 +175,7 @@ try {
   await page.reload();
   await page.locator(".session-card").first().waitFor();
   await expectSizes(220, 320);
-  await page.evaluate((key) => localStorage.setItem(key, JSON.stringify({ sidebar: -20, sessions: "bad" })), storageKey);
+  await page.evaluate((key) => localStorage.setItem(key, JSON.stringify({ panelWidths: { sidebar: -20, sessions: "bad" } })), storageKey);
   await page.reload();
   await page.locator(".session-card").first().waitFor();
   await expectSizes(220, 320);

@@ -15,6 +15,8 @@ import { useRequestPage } from "./useRequestPage";
 import RequestTable from "./RequestTable";
 import RequestTimeline from "./RequestTimeline";
 import OrphanCleanupDialog from "./OrphanCleanupDialog";
+import { defaultRequestSelection, REQUEST_PAGE_SIZES, type RequestSelection } from "../uiPreferences";
+import { useUiPreference } from "../useUiPreference";
 
 interface Props {
   agents: AgentInfo[];
@@ -22,20 +24,11 @@ interface Props {
   now: Date;
   agent: string;
   revision: string;
-  selection: RequestSelection;
-  onSelectionChange: (selection: RequestSelection) => void;
   showToast: (message: string) => void;
   syncing?: boolean;
 }
 
-export interface RequestSelection {
-  model: string | null;
-  project: string | null;
-  status: RequestOutcome | null;
-}
-
-export const defaultRequestSelection: RequestSelection = { model: null, project: null, status: null };
-const pageSizeOptions = [50, 100, 200].map(size => ({ id: String(size), name: `${size} 条/页` }));
+const pageSizeOptions = REQUEST_PAGE_SIZES.map(size => ({ id: String(size), name: `${size} 条/页` }));
 const SEARCH_THRESHOLD = 8;
 const EMPTY_FILTERS: RequestFilters = { models: {}, projects: {}, results: {} };
 
@@ -59,9 +52,12 @@ function filterOptions(
   ];
 }
 
-export default function RequestEvents({ agents, period, now, agent, revision, selection, onSelectionChange, showToast, syncing = false }: Props) {
+export default function RequestEvents({ agents, period, now, agent, revision, showToast, syncing = false }: Props) {
+  const [requestFilters, setRequestFilters] = useUiPreference("requestFilters");
+  const selection = (Object.prototype.hasOwnProperty.call(requestFilters, agent) ? requestFilters[agent] : undefined) ?? defaultRequestSelection;
+  const onSelectionChange = (filters: RequestSelection) => setRequestFilters(current => ({ ...current, [agent]: filters }));
   const { model, project, status } = selection;
-  const [pageSize, setPageSize] = useState(50);
+  const [{ requestPageSize: pageSize }, setUsage] = useUiPreference("usage");
   const [copyError, setCopyError] = useState("");
   const [showCleanup, setShowCleanup] = useState(false);
   const finishCleanup = (removed: number) => {
@@ -132,7 +128,10 @@ export default function RequestEvents({ agents, period, now, agent, revision, se
         </span>
         {page && <nav className="request-pagination" aria-label="请求记录分页">
           <Dropdown compact label="每页请求数" value={String(pageSize)} options={pageSizeOptions}
-            disabled={navigating} onChange={id => setPageSize(Number(id))} />
+            disabled={navigating} onChange={id => {
+              const requestPageSize = REQUEST_PAGE_SIZES.find(size => String(size) === id);
+              if (requestPageSize !== undefined) setUsage(current => ({ ...current, requestPageSize }));
+            }} />
           <div className="request-page-controls">
             <button type="button" className="btn-icon btn-sm" aria-label="首页" title="首页" disabled={navigating || page.page <= 1} onClick={() => changePage(1)}><UiIcon icon={ChevronFirst} /></button>
             <button type="button" className="btn-icon btn-sm" aria-label="上一页" title="上一页" disabled={navigating || page.page <= 1} onClick={() => changePage(page.page - 1)}><UiIcon icon={ChevronLeft} /></button>

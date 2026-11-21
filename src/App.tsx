@@ -19,11 +19,13 @@ import { sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
-import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
+import { catalogFilterFor } from "./catalogCache";
+import { useUiPreference } from "./useUiPreference";
 import type { SessionReading } from "./sessionContent";
 import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
+const NO_AGENTS: AgentInfo[] = [];
 
 // 目录预览的文件时间与最终统计口径不同。
 const sessionContentStamp = (session: SessionMeta) => `${session.sizeBytes ?? ""}|${session.lastTs ?? ""}`;
@@ -41,16 +43,16 @@ type SessionOperation =
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("sessions");
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [usageAgent, setUsageAgent] = useState("all");
+  const [detectedAgents, setAgents] = useState<AgentInfo[] | null>(null);
+  const agents = detectedAgents ?? NO_AGENTS;
+  const [preferredAgents, setPreferredAgents] = useUiPreference("agents");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loadedSession, setLoadedSession] = useState<{ detail: SessionDetail; reading: SessionReading } | null>(null);
   const detail = loadedSession?.detail ?? null;
   const [readRequest, setReadRequest] = useState<{ session: SessionMeta; pending: boolean; error: string | null } | null>(null);
   const [searchTarget, setSearchTarget] = useState<ConversationSearchTarget | null>(null);
-  const [filter, setFilter] = useState(DEFAULT_CATALOG_FILTER);
+  const [filter, setFilter] = useUiPreference("sessionList");
   const [configRefreshKey, setConfigRefreshKey] = useState(0);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedSessionKeys, setCheckedSessionKeys] = useState<Set<string>>(new Set());
@@ -112,22 +114,22 @@ export default function App() {
   };
 
   useEffect(() => {
+    let active = true;
     api
       .listAgents()
-      .then((list) => {
-        setAgents(list);
-        setSelectedAgent((prev) => {
-          const current = prev ? list.find((a) => a.id === prev) : undefined;
-          if (current?.installed) return prev;
-          const first = list.find((a) => a.installed);
-          return first ? first.id : null;
-        });
-      })
-      .catch((e) => showToast(String(e), true));
+      .then(list => { if (active) setAgents(list); })
+      .catch((e) => {
+        if (!active) return;
+        setAgents(NO_AGENTS);
+        showToast(String(e), true);
+      });
+    return () => { active = false; };
   }, [showToast]);
 
   const availableAgents = agents.filter((agent) => agent.installed);
-  const currentAgent = availableAgents.find((agent) => agent.id === selectedAgent);
+  const currentAgent = availableAgents.find((agent) => agent.id === preferredAgents.local) ?? availableAgents[0];
+  const selectedAgent = currentAgent?.id ?? null;
+  const usageAgent = availableAgents.some(agent => agent.id === preferredAgents.usage) ? preferredAgents.usage : "all";
   const supportsArchivedSessions = currentAgent?.supportsArchivedSessions;
   const catalogFilter = useMemo(
     () => catalogFilterFor(filter, supportsArchivedSessions),
@@ -164,22 +166,18 @@ export default function App() {
     setSearch(next);
   };
 
-  const selectAgentNow = (id: string) => {
-    if (sessionActionsBusy || mutationRunning.current || id === selectedAgent) return;
-    clearBatchSelection();
-    setBatchMode(false);
-    closeSessionDetail();
-    setSelectedAgent(id);
-    setSelectedProject(null);
-  };
-
   const selectAgent = (id: string) => {
     if (sessionActionsBusy || mutationRunning.current || id === (tab === "usage" ? usageAgent : selectedAgent)) return;
     const available = availableAgents.some(agent => agent.id === id);
     if (!available && !(tab === "usage" && id === "all")) return;
     protectConfig(() => {
-      setUsageAgent(id);
-      if (available) selectAgentNow(id);
+      if (available && id !== selectedAgent) {
+        clearBatchSelection();
+        setBatchMode(false);
+        closeSessionDetail();
+        setSelectedProject(null);
+      }
+      setPreferredAgents(current => ({ local: available ? id : current.local, usage: id }));
     }, "切换 Agent");
   };
 
@@ -542,7 +540,8 @@ export default function App() {
             <div className="placeholder">选择 Agent 以查看配置</div>
           )}
         </main>
-      ) : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} showToast={showToast} />}
+      ) : detectedAgents === null ? <main className="main single"><div className="placeholder">正在读取 Agent…</div></main>
+        : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} showToast={showToast} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}后，未保存的配置将丢失。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

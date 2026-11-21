@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canRenderMarkdown, externalMarkdownLink, highlightMarkdown } from '../../src/markdown.ts';
-import { readMarkdownPreference, saveMarkdownPreference } from '../../src/markdownPreference.ts';
 
 test('real Markdown is recognized while plain text, raw JSON and tags retain their original form',()=>{
   for(const text of ['# 标题','标题\n===','**加粗**','*斜体*','`code`','- 第一项\n- 第二项','1. 第一项\n2. 第二项','> 引用','```js\nlet a=1\n```','| a | b |\n|---|---|\n|1|2|','~~删除~~','[1](https://example.com)']) assert.equal(canRenderMarkdown(text),true,text);
@@ -25,15 +24,4 @@ test('highlighting inserts text-safe Unicode marks into rendered nodes without c
   assert.equal(externalMarkdownLink('javascript:alert(1)'),false);
   assert.equal(externalMarkdownLink('file:///etc/passwd'),false);
   assert.equal(externalMarkdownLink('https://example.com'),true);
-});
-
-test('Markdown preference survives reload and storage failure cannot block the checkbox',()=>{
-  const old=globalThis.localStorage;const values=new Map();
-  try {
-    globalThis.localStorage={getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)};
-    assert.equal(readMarkdownPreference(),false);saveMarkdownPreference(true);assert.equal(readMarkdownPreference(),true);
-    saveMarkdownPreference(false);assert.equal(readMarkdownPreference(),false);
-    globalThis.localStorage={getItem:()=>{throw Error('blocked')},setItem:()=>{throw Error('blocked')}};
-    assert.equal(readMarkdownPreference(),false);assert.doesNotThrow(()=>saveMarkdownPreference(true));
-  } finally {if(old===undefined)delete globalThis.localStorage;else globalThis.localStorage=old;}
 });

@@ -4,6 +4,7 @@ import Segmented from "../../components/Segmented";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, RotateCw } from "lucide-react";
 import * as api from "../../api";
+import type { PriceStatusFilter } from "../../uiPreferences";
 import type { ModelPriceRow, ModelPricesResponse, ResolvedPrice } from "../types";
 import { CNY_PER_USD, formatCount, formatDateTime } from "../format";
 import { sourceName } from "../metrics";
@@ -14,8 +15,6 @@ import HelpTip from "../../components/HelpTip";
 import ModelPriceTable from "./ModelPriceTable";
 import PriceEditor, { customModelKey } from "./PriceEditor";
 import UiIcon from "../../components/UiIcon";
-
-export type PriceStatusFilter = "all" | "unpriced" | "custom" | "reference" | "builtin";
 
 interface Props {
   active: boolean;

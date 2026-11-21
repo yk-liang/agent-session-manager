@@ -4,29 +4,6 @@ export type PanelWidths = Record<Panel, number>;
 export const DEFAULT_WIDTHS: PanelWidths = { sidebar: 220, sessions: 320 };
 export const MIN_WIDTHS = { sidebar: 180, sessions: 260, detail: 360 };
 export const DIVIDER_WIDTH = 8;
-const STORAGE_KEY = "agent-session-manager.panel-widths.v1";
-
-export function readPanelWidths(): PanelWidths {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-    const valid = (panel: Panel) => typeof saved?.[panel] === "number"
-      && Number.isFinite(saved[panel]) && saved[panel] >= MIN_WIDTHS[panel];
-    return {
-      sidebar: valid("sidebar") ? saved.sidebar : DEFAULT_WIDTHS.sidebar,
-      sessions: valid("sessions") ? saved.sessions : DEFAULT_WIDTHS.sessions,
-    };
-  } catch {
-    return { ...DEFAULT_WIDTHS };
-  }
-}
-
-export function savePanelWidths(widths: PanelWidths) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(widths));
-  } catch {
-    // 存储不可用时仍允许本次调整，避免拖拽被浏览器存储权限打断。
-  }
-}
 
 export function fitPanelWidths(preferred: PanelWidths, width: number, hasSessions: boolean): PanelWidths {
   if (width === 0) return preferred;

@@ -1,20 +1,20 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, ListFilter, LoaderCircle, Tags } from "lucide-react";
 import { useDelayedBusy } from "../useDelayedBusy";
+import { useUiPreference } from "../useUiPreference";
+import type { PriceStatusFilter, UsageTab } from "../uiPreferences";
 import { requestRecordCounts } from "./metrics";
 import { summaryQuery, type UsagePeriod } from "./range";
 import type { AgentInfo } from "../types";
 import type { UsageSummary } from "./types";
-import ModelPrices, { type PriceStatusFilter } from "./pricing/ModelPrices";
-import RequestEvents, { defaultRequestSelection, type RequestSelection } from "./RequestEvents";
+import ModelPrices from "./pricing/ModelPrices";
+import RequestEvents from "./RequestEvents";
 import UiIcon from "../components/UiIcon";
 import Notice from "../components/Notice";
 import Segmented from "../components/Segmented";
 import UsageAnalysis from "./UsageAnalysis";
 import UsageSyncStatus, { formatSyncProgress } from "./UsageSyncStatus";
 import { useUsageDate, useUsageSummary, useUsageSync } from "./useUsageData";
-
-type UsageTab = "analysis" | "events" | "prices";
 
 const noSummaryRows: UsageSummary["rows"] = [];
 const periods: [UsagePeriod, string][] = [
@@ -40,8 +40,9 @@ export default function UsagePanel({
   onRequestCounts: (counts: ReadonlyMap<string, number | null>) => void;
   showToast: (message: string) => void;
 }) {
-  const [subTab, setSubTab] = useState<UsageTab>("analysis");
-  const [pricesVisited, setPricesVisited] = useState(false);
+  const [{ tab: subTab, period, priceStatus }, setUsage] = useUiPreference("usage");
+  const [pricesVisited, setPricesVisited] = useState(() => subTab === "prices");
+  const changePriceStatus = useCallback((priceStatus: PriceStatusFilter) => setUsage(current => ({ ...current, priceStatus })), [setUsage]);
   const pageRef = useRef<HTMLElement>(null);
   const tabScroll = useRef<Partial<Record<UsageTab, number>>>({});
   useLayoutEffect(() => {
@@ -51,12 +52,8 @@ export default function UsagePanel({
     if (tab === subTab) return;
     tabScroll.current[subTab] = pageRef.current?.scrollTop ?? 0;
     if (tab === "prices") setPricesVisited(true);
-    setSubTab(tab);
+    setUsage(current => ({ ...current, tab }));
   };
-  const [priceStatusFilter, setPriceStatusFilter] = useState<PriceStatusFilter>("all");
-  const [requestSelection, setRequestSelection] = useState({ agent, filters: defaultRequestSelection });
-  const selectRequests = (filters: RequestSelection) => setRequestSelection({ agent, filters });
-  const [period, setPeriod] = useState<UsagePeriod>("month");
   const now = useUsageDate();
   const { syncStatus, syncUnavailable, pricingRevision, onPricingChanged, checkUsage, recollectUsage } = useUsageSync();
   const syncRevision = syncStatus?.revision ?? 0;
@@ -111,7 +108,8 @@ export default function UsagePanel({
         <div className="usage-toolbar">
           <Segmented label="用量视图" tabs options={subTabs} value={subTab} onChange={switchTab} />
           <div className="usage-filters">
-            {subTab !== "prices" && <Segmented label="时间范围" options={periods} value={period} onChange={setPeriod} />}
+            {subTab !== "prices" && <Segmented label="时间范围" options={periods} value={period}
+              onChange={period => setUsage(current => ({ ...current, period }))} />}
             <UsageSyncStatus
               agents={agents}
               synced={synced}
@@ -162,8 +160,6 @@ export default function UsagePanel({
             now={now}
             agent={agent}
             revision={revision}
-            selection={requestSelection.agent === agent ? requestSelection.filters : defaultRequestSelection}
-            onSelectionChange={selectRequests}
             showToast={showToast}
             syncing={loadingHistory}
           />
@@ -173,8 +169,8 @@ export default function UsagePanel({
             active={subTab === "prices"}
             agent={agent}
             revision={revision}
-            statusFilter={priceStatusFilter}
-            onStatusFilterChange={setPriceStatusFilter}
+            statusFilter={priceStatus}
+            onStatusFilterChange={changePriceStatus}
             onPricingChanged={onPricingChanged}
           />
         )}
