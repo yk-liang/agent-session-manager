@@ -4,6 +4,23 @@ import { distributionSlices, costDisplay, eventCostDisplay, tokenDisplay, groupU
 import { buildTrendSeries, dailySeries, entityColors, usageSeries } from "../../src/usage/trend.ts";
 import { dateKey, firstDate, summaryQuery } from "../../src/usage/range.ts";
 import { formatRate, formatUsd } from '../../src/usage/format.ts';
+import { sortModelPrices } from "../../src/usage/pricing/order.ts";
+
+test('model prices order versions numerically, then variants, with aliases alongside their model', () => {
+  const ids = [
+    'gpt-5.6-luna', 'gpt-6.1-sol', 'gpt-6.10-terra', 'openai/gpt-6.1-terra', 'gpt-6.1-terra', 'gpt-5.6-sol',
+    'gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-terra-2026-10-02', 'gpt-6.1-terra-20261103', 'claude-3-5-sonnet',
+    'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-6', 'claude-sonnet-4.5',
+  ];
+  const rows = ids.map(model => ({ model }));
+  rows.splice(3, 0, { model: 'codex-auto-review', price: { modelId: 'gpt-5.6-luna', matchedAs: 'gpt-5.6-luna' } });
+  assert.deepEqual(sortModelPrices(rows).map(row => row.model), [
+    'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4.5', 'claude-haiku-4-5', 'claude-3-5-sonnet',
+    'gpt-6.10-terra', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-sol',
+    'gpt-6.1-terra', 'openai/gpt-6.1-terra', 'gpt-6.1-terra-20261103', 'gpt-6.1-terra-2026-10-02',
+    'gpt-5.6-sol', 'gpt-5.6-luna', 'codex-auto-review',
+  ]);
+});
 
 const row = (date, model, input, output, extra = 0) => ({
   date,

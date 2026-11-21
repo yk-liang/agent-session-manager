@@ -2,13 +2,17 @@ import type { Catalog, Project, SessionMeta } from "./types";
 import { compareTimestamps, sessionKey } from "./utils.ts";
 
 export const PROJECTLESS_GROUP = "group:projectless";
-export interface SessionGroup extends Project { projectless: boolean }
+export interface SessionGroup extends Project {
+  projectless: boolean;
+  missing: boolean;
+}
 
 function buildCatalogGroups(catalog: Catalog) {
   const projectlessIds = new Set(catalog.projectlessSessionIds);
   const hints = new Map(catalog.sessionGroupHints?.map(hint => [sessionKey(hint), hint.root]));
   const regroup = projectlessIds.size > 0 || hints.size > 0;
   const paths = new Map(catalog.projects.map(project => [project.dirName, project.displayPath]));
+  const missingPaths = new Set(catalog.missingProjectPaths);
   const byGroup = new Map<string, SessionMeta[]>();
   const projectlessKeys = new Set<string>();
   const groups = new Map<string, SessionGroup>();
@@ -27,7 +31,10 @@ function buildCatalogGroups(catalog: Catalog) {
     const group = groups.get(dirName);
     if (!group) {
       const displayPath = projectless ? "未归属项目" : root ?? paths.get(dirName) ?? session.cwd ?? session.projectDir;
-      groups.set(dirName, { dirName, displayPath, projectless, sessionCount: 1, lastActivity: session.lastTs });
+      groups.set(dirName, {
+        dirName, displayPath, projectless, missing: !projectless && missingPaths.has(displayPath),
+        sessionCount: 1, lastActivity: session.lastTs,
+      });
       continue;
     }
     group.sessionCount++;
@@ -37,7 +44,7 @@ function buildCatalogGroups(catalog: Catalog) {
   return {
     groups: regroup ? [...groups.values()].sort((a, b) => Number(b.projectless) - Number(a.projectless)
       || compareTimestamps(b.lastActivity, a.lastActivity))
-      : catalog.projects.map(project => ({ ...project, projectless: false })),
+      : catalog.projects.map(project => ({ ...project, projectless: false, missing: missingPaths.has(project.displayPath) })),
     byGroup, hints, projectlessKeys,
   };
 }

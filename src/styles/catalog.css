@@ -51,6 +51,11 @@
 }
 
 .project-item.active .project-path { color: var(--accent); font-weight: 600; }
+.project-item.missing :is(.project-path, .project-meta) { color: var(--text-muted); }
+
+.project-heading { display: flex; align-items: center; gap: 6px; }
+.project-heading .project-path { flex: 1; min-width: 0; }
+.project-heading .status-tag { flex: none; }
 
 .project-meta,
 .session-card-sub {
@@ -264,6 +269,7 @@
 /* 归档卡降低强调但保持可操作；角标在卡片右上角斜切，标题与悬停操作避开它。 */
 .session-card.archived:not(.active) { background: transparent; border-color: var(--border); }
 .session-card.archived:not(.active):hover { background: var(--bg-hover); }
+.session-card.selectable:has(input:checked) { background: var(--accent-soft); }
 .session-card.archived .session-card-title { margin-right: 22px; color: var(--text-dim); font-weight: 500; }
 .session-card.archived .session-card-sub { color: var(--text-muted); }
 

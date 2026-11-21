@@ -32,6 +32,7 @@ import volcengine from "@lobehub/icons-static-svg/icons/volcengine-color.svg";
 import xai from "@lobehub/icons-static-svg/icons/xai.svg";
 import zai from "@lobehub/icons-static-svg/icons/zai.svg";
 import zhipu from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
+import { bareModelId } from "../models";
 
 const mono = new Set([anthropic, grok, groq, moonshot, ollama, openai, opencode, xai, zai]);
 const providers = new Map(Object.entries({
@@ -52,8 +53,8 @@ const models = new Map(Object.entries({
   command: cohere, aya: cohere, sonar: perplexity,
 }));
 
-function modelSource(model: string) {
-  const id = model.slice(model.lastIndexOf("/") + 1).trim().toLowerCase();
+export function modelIconSource(model: string) {
+  const id = bareModelId(model).toLowerCase();
   if (/^o[1-9](?=[\d._:\s-]|$)/.test(id)) return openai;
   const family = /^[a-z]+(?=[\d._:\s-]|$)/.exec(id)?.[0];
   return family ? models.get(family) : undefined;
@@ -66,7 +67,7 @@ export default function BrandIcon({ src, className, monochrome }: { src?: string
 }
 
 export function ModelIcon({ id }: { id: string }) {
-  return <BrandIcon src={modelSource(id)} />;
+  return <BrandIcon src={modelIconSource(id)} />;
 }
 
 export function ProviderIcon({ provider }: { provider: string }) {

@@ -52,7 +52,7 @@ test("projectless groups use explicit IDs, keep real projects and preserve sourc
 test("missing projectless metadata preserves legacy and other agents' directory groups", () => {
   const projects=[{dirName:"legacy",displayPath:"/tmp/legacy",sessionCount:0,lastActivity:null}];
   const { groups } = catalogGroups({ projects, sessions: [] });
-  assert.deepEqual(groups,[{...projects[0],projectless:false}]);
+  assert.deepEqual(groups,[{...projects[0],projectless:false,missing:false}]);
   assert.deepEqual(projects,[{dirName:"legacy",displayPath:"/tmp/legacy",sessionCount:0,lastActivity:null}]);
 });
 
@@ -66,12 +66,15 @@ test("Qoder roots merge run directories while hints distinguish the same ID in d
   const before=JSON.stringify(sessions);
   const projects=sessions.map(s=>({dirName:s.projectDir,displayPath:s.cwd,sessionCount:1,lastActivity:null}));
   const sessionGroupHints = sessions.slice(0, 3).map((s, i) => ({ ...s, root: i < 2 ? "/work/real-project" : null }));
-  const { groups, byGroup } = catalogGroups({ projects, sessions, sessionGroupHints });
+  const { groups, byGroup } = catalogGroups({ projects, sessions, sessionGroupHints,
+    missingProjectPaths: ["/work/real-project", sessions[2].cwd] });
   assert.equal(groups.length,3);
   assert.equal(groups[0].displayPath,"未归属项目");
   assert.equal(groups[0].sessionCount,1);
+  assert.equal(groups[0].missing, false);
   const root=groups.find(g=>g.displayPath==="/work/real-project");
   assert.equal(root.sessionCount,2);
+  assert.equal(root.missing, true);
   assert.deepEqual(byGroup.get(root.dirName), sessions.slice(0, 2));
   assert.deepEqual(byGroup.get(PROJECTLESS_GROUP), [sessions[2]]);
   assert.equal(JSON.stringify(sessions),before);

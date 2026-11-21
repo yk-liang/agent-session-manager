@@ -79,6 +79,7 @@ export interface Catalog {
   warnings: string[];
   projectlessSessionIds?: string[];
   sessionGroupHints?: SessionGroupHint[];
+  missingProjectPaths?: string[];
 }
 
 export interface SessionGroupHint {

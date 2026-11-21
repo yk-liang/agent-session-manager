@@ -27,7 +27,6 @@ interface Props {
   toast: (message: string, error?: boolean) => void;
   checkedSessionKeys: Set<string>;
   onToggleBatch: () => void;
-  onToggleSession: (session: SessionMeta) => void;
   onToggleAll: () => void;
   onDeleteSelected: () => void;
   disabled: boolean;
@@ -64,7 +63,6 @@ export default function SessionList({
   toast,
   checkedSessionKeys,
   onToggleBatch,
-  onToggleSession,
   onToggleAll,
   onDeleteSelected,
   disabled,
@@ -182,10 +180,11 @@ export default function SessionList({
             const isEmpty = statsKnown && s.realUserCount === 0;
             const key = sessionKey(s);
             const hit = searchHits.get(key);
-            const checked = checkedSessionKeys.has(key);
             const title = s.title || "无标题";
             const hidePath = hiddenPathSessionKeys?.has(key) ?? false;
             const displayPath = displayRoots?.get(key) ?? s.cwd;
+            const cardTitle = hidePath ? s.cwd ?? undefined : undefined;
+            const cardClass = `session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}`;
             const content = (
               <>
                 <span className="session-card-title">{title}</span>
@@ -210,20 +209,17 @@ export default function SessionList({
               <div className="session-card-row" key={item.key} data-index={item.index}
                 ref={list.measureElement} style={{ top: item.start }}>
                 {batchMode ? (
-                  <label className={`session-card selectable${checked ? " active" : ""}${s.archived ? " archived" : ""}`} title={hidePath ? s.cwd ?? undefined : undefined}>
+                  <label className={`${cardClass} selectable`} title={cardTitle}>
                     <Checkbox
-                      checked={checked}
-                      onChange={() => onToggleSession(s)}
+                      checked={checkedSessionKeys.has(key)}
+                      onChange={() => onSelect(s)}
                       disabled={disabled || busy || searchPending}
                       aria-label={`选择会话：${title}（${s.projectDir}）`}
                     />
                     <div className="session-card-content">{content}</div>
                   </label>
                 ) : (
-                  <div
-                    title={hidePath ? s.cwd ?? undefined : undefined}
-                    className={`session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}`}
-                  >
+                  <div className={cardClass} title={cardTitle}>
                     <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
                       {content}
                     </button>

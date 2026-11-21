@@ -230,12 +230,12 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
     let claude = pricer.resolve("claude-sonnet-4-5", None, 0).unwrap();
     assert_eq!(claude.source, "models.dev");
     assert_eq!(claude.provider.as_deref(), Some("anthropic"));
-    assert_eq!(claude.rates.input, 3.0);
-    assert_eq!(claude.rates.output, 15.0);
-    assert_eq!(claude.rates.cache_read, Some(0.3));
-    assert_eq!(claude.rates.cache_write, Some(3.75));
+    assert_eq!(claude.rates.standard.base.tokens.input, 3.0);
+    assert_eq!(claude.rates.standard.base.tokens.output, 15.0);
+    assert_eq!(claude.rates.standard.base.tokens.cache_read, Some(0.3));
+    assert_eq!(claude.rates.standard.base.tokens.cache_write, Some(3.75));
     assert_eq!(
-        claude.rates.long_context.as_ref().unwrap().threshold,
+        claude.rates.standard.long_context.as_ref().unwrap().threshold,
         200_000
     );
 
@@ -244,38 +244,41 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
         .resolve("openrouter/anthropic/claude-sonnet-4-5", None, 0)
         .unwrap();
     assert_eq!(or.provider.as_deref(), Some("openrouter"));
-    assert_eq!(or.rates.input, 3.5);
+    assert_eq!(or.rates.standard.base.tokens.input, 3.5);
 
     // LiteLLM USD/Token 规范换算到 USD/1M tokens，无浮点精度噪声
     let ds = pricer.resolve("deepseek-chat", None, 0).unwrap();
     assert_eq!(ds.source, "litellm");
-    assert_eq!(ds.rates.input, 0.27);
-    assert_eq!(ds.rates.output, 1.1);
-    assert_eq!(ds.rates.cache_read, Some(0.07));
+    assert_eq!(ds.rates.standard.base.tokens.input, 0.27);
+    assert_eq!(ds.rates.standard.base.tokens.output, 1.1);
+    assert_eq!(ds.rates.standard.base.tokens.cache_read, Some(0.07));
 
     for model in ["deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "gateway/DeepSeek-V4.1-Flash-1017"] {
         let price = pricer.resolve(model, None, 0).unwrap();
         assert_eq!(price.matched_as.as_deref(), Some("deepseek-flash"));
-        assert_eq!(price.rates.input, 0.2);
+        assert_eq!(price.rates.standard.base.tokens.input, 0.2);
     }
 
     // google/ 与 LiteLLM gemini/ 规范为同一原厂，可安全匹配
     let gem = pricer.resolve("google/gemini-2.5-pro", None, 0).unwrap();
     assert_eq!(gem.source, "litellm");
-    assert_eq!(gem.rates.input, 1.25);
-    assert_eq!(gem.rates.output, 10.0);
-    assert_eq!(gem.rates.long_context.as_ref().unwrap().input, 2.5);
+    assert_eq!(gem.rates.standard.base.tokens.input, 1.25);
+    assert_eq!(gem.rates.standard.base.tokens.output, 10.0);
+    assert_eq!(gem.rates.standard.long_context.as_ref().unwrap().rates.tokens.input, 2.5);
 
     let fallback = pricer
         .resolve("custom-gw/anthropic/claude-sonnet-4-5-xhigh", None, 0)
         .unwrap();
     assert_eq!(fallback.provider.as_deref(), Some("anthropic"));
-    assert_eq!(fallback.rates.input, 3.0);
+    assert_eq!(fallback.rates.standard.base.tokens.input, 3.0);
     assert_eq!(
         pricer
             .resolve("deepseek/deepseek-chat", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         0.27
     );
@@ -286,14 +289,14 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
 
     let aliyun = pricer.resolve("aliyun/qwen-test-price", None, 0).unwrap();
     assert_eq!(aliyun.provider.as_deref(), Some("alibaba-cn"));
-    assert_eq!(aliyun.rates.input, 0.4);
+    assert_eq!(aliyun.rates.standard.base.tokens.input, 0.4);
 
     // 冲突、非文本模型、不同推理费率与缺输出价按未定价处理。
     assert!(pricer.resolve("conflict-model", None, 0).is_none());
     let free = pricer.resolve("claude-nominal-zero", None, 0).unwrap();
-    assert_eq!((free.rates.input, free.rates.output), (0.0, 0.0));
+    assert_eq!((free.rates.standard.base.tokens.input, free.rates.standard.base.tokens.output), (0.0, 0.0));
     let audio = pricer.resolve("claude-audio-special", None, 0).unwrap();
-    assert_eq!((audio.rates.input, audio.rates.output), (3.0, 15.0));
+    assert_eq!((audio.rates.standard.base.tokens.input, audio.rates.standard.base.tokens.output), (3.0, 15.0));
     assert!(pricer.resolve("text-embedding-3-large", None, 0).is_none());
     assert!(pricer.resolve("char-billed-model", None, 0).is_none());
     assert!(pricer.resolve("reasoning-diff-model", None, 0).is_none());
@@ -301,12 +304,12 @@ fn normalizes_units_and_prevents_cross_provider_or_invalid_matches() {
 
     // 多提供商一致时可匹配
     let agreed = pricer.resolve("agreed-model", None, 0).unwrap();
-    assert_eq!(agreed.rates.input, 1.5);
+    assert_eq!(agreed.rates.standard.base.tokens.input, 1.5);
 
     // 已知变体后缀兜底
     let high = pricer.resolve("claude-sonnet-4-5-high", None, 0).unwrap();
     assert_eq!(high.matched_as.as_deref(), Some("claude-sonnet-4-5"));
-    assert_eq!(high.rates.input, 3.0);
+    assert_eq!(high.rates.standard.base.tokens.input, 3.0);
 
     // 仅允许固定公开 URL
     assert!(fetch_public_catalog("https://example.com/prices.json").is_err());
@@ -326,12 +329,14 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
             output: 70.0,
             cache_read: Some(1.4),
             cache_write: None,
-            long_context: Some(LongContextRates {
+            long_context: Some(CustomLongContextRates {
                 threshold: 200_000,
-                input: 28.0,
-                output: 140.0,
-                cache_read: Some(2.8),
-                cache_write: None,
+                rates: TokenRates {
+                    input: 28.0,
+                    output: 140.0,
+                    cache_read: Some(2.8),
+                    cache_write: None,
+                },
             }),
         })
         .unwrap();
@@ -346,15 +351,22 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
         Some(1.4)
     );
     assert_eq!(resolved.original_rates.as_ref().unwrap().cache_write, None);
-    assert!((resolved.rates.input - 2.0).abs() < 1e-9);
-    assert!((resolved.rates.output - 10.0).abs() < 1e-9);
-    assert!((resolved.rates.cache_read.unwrap() - 0.2).abs() < 1e-9);
+    assert!((resolved.rates.standard.base.tokens.input - 2.0).abs() < 1e-9);
+    assert!((resolved.rates.standard.base.tokens.output - 10.0).abs() < 1e-9);
+    assert!((resolved.rates.standard.base.tokens.cache_read.unwrap() - 0.2).abs() < 1e-9);
     assert_eq!(
         resolved.overrides_reference.as_ref().unwrap().source,
         "models.dev"
     );
 
-    // 重载后保留币种与原始金额
+    let custom_file = dir.path().join("data/custom-prices.json");
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&custom_file).unwrap()).unwrap();
+    assert_eq!(saved["version"], 1);
+    assert_eq!(
+        saved["prices"]["claude-sonnet-4-5"]["longContext"],
+        json!({ "threshold": 200_000, "input": 28.0, "output": 140.0, "cacheRead": 2.8 })
+    );
+
     let reloaded = Pricer::open(
         Some(dir.path().join("data")),
         Some(dir.path().join("cache")),
@@ -372,10 +384,11 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
             .long_context
             .as_ref()
             .unwrap()
+            .rates
             .input,
         28.0
     );
-    assert_eq!(again.rates.long_context.as_ref().unwrap().input, 4.0);
+    assert_eq!(again.rates.standard.long_context.as_ref().unwrap().rates.tokens.input, 4.0);
     let event = |input_tokens| {
         make_event(
             "claude",
@@ -415,13 +428,13 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
         })
         .unwrap();
     let free = reloaded.resolve("local/qwen3", None, 0).unwrap();
-    assert_eq!(free.rates.input, 0.0);
+    assert_eq!(free.rates.standard.base.tokens.input, 0.0);
 
     // 删除自定义覆盖后恢复为原公开参考价
     reloaded.delete_custom_price("claude-sonnet-4-5").unwrap();
     let reverted = reloaded.resolve("claude-sonnet-4-5", None, 0).unwrap();
     assert_eq!(reverted.source, "models.dev");
-    assert_eq!(reverted.rates.input, 3.0);
+    assert_eq!(reverted.rates.standard.base.tokens.input, 3.0);
 
     // 非法输入被拒绝
     assert!(reloaded
@@ -448,7 +461,6 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
         .is_err());
 
     // 自定义文件损坏时保留原文件，不静默清空或盲目覆盖
-    let custom_file = dir.path().join("data/custom-prices.json");
     fs::write(&custom_file, b"{corrupt-json").unwrap();
     let broken = Pricer::open(
         Some(dir.path().join("data")),
@@ -472,13 +484,13 @@ fn custom_cny_usd_persistence_override_revert_and_corruption_safety() {
 #[test]
 fn free_model_ids_use_builtin_zero_rates_until_customized() {
     let pricer = Pricer::open(None, None);
-    for model in ["local/demo-free", "openrouter/demo:free"] {
+    for model in ["local/demo-free", "openrouter/demo:free", "unknown"] {
         let price = pricer.resolve(model, Some("gateway"), 0).unwrap();
         assert_eq!(price.source, BUILTIN_SOURCE);
-        assert_eq!(price.rates.input, 0.0);
-        assert_eq!(price.rates.output, 0.0);
-        assert_eq!(price.rates.cache_read, Some(0.0));
-        assert_eq!(price.rates.cache_write, Some(0.0));
+        assert_eq!(price.rates.standard.base.tokens.input, 0.0);
+        assert_eq!(price.rates.standard.base.tokens.output, 0.0);
+        assert_eq!(price.rates.standard.base.tokens.cache_read, Some(0.0));
+        assert_eq!(price.rates.standard.base.tokens.cache_write, Some(0.0));
         let mut event = make_event("opencode", model, Tokens::default());
         event.details = RecordedFields::default();
         event.request.tier = Some("flex".into());
@@ -710,6 +722,9 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             .resolve("deepseek-chat", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         0.27
     );
@@ -744,6 +759,9 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             .resolve("claude-sonnet-4-5", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         4.0
     );
@@ -752,6 +770,9 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             .resolve("deepseek-chat", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         0.27
     );
@@ -769,6 +790,9 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             .resolve("claude-sonnet-4-5", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         4.0
     );
@@ -777,6 +801,9 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             .resolve("deepseek-chat", None, 0)
             .unwrap()
             .rates
+            .standard
+            .base
+            .tokens
             .input,
         0.27
     );
@@ -793,7 +820,7 @@ fn partial_refresh_failure_offline_stale_cache_and_concurrent_reads_keep_last_va
             b.wait();
             while !d.load(Ordering::Relaxed) {
                 let price = p.resolve("claude-sonnet-4-5", None, 0).unwrap();
-                assert!(price.rates.input == 4.0 || price.rates.input == 3.0);
+                assert!(price.rates.standard.base.tokens.input == 4.0 || price.rates.standard.base.tokens.input == 3.0);
             }
         }));
     }
@@ -991,7 +1018,7 @@ fn litellm_supports_272k_threshold_and_rejects_unparseable_special_tiers() {
 
     let standard = pricer.resolve("openai/weird-tier-model", None, 0).unwrap();
     assert!(standard.rates.service_tiers.is_empty());
-    assert!(standard.rates.long_context.is_none());
+    assert!(standard.rates.standard.long_context.is_none());
     assert!(pricer.resolve("openai/multi-tier-model", None, 0).is_none());
     assert!(pricer
         .resolve("openai/tiered-array-model", None, 0)
@@ -1046,7 +1073,13 @@ fn models_dev_gpt_56_sol_context_tier_survives_unusual_sibling_tiers() {
         "openai/gpt-5.6-sol": {
             "litellm_provider": "openai", "mode": "chat",
             "input_cost_per_token": 4e-6, "output_cost_per_token": 2e-5,
-            "input_cost_per_token_priority": 7.2e-6, "output_cost_per_token_priority": 3.6e-5
+            "cache_creation_input_token_cost_above_12hr": 1e-5,
+            "input_cost_per_token_above_272k_tokens": 8e-6,
+            "output_cost_per_token_above_272k_tokens": 3e-5,
+            "cache_creation_input_token_cost_above_12hr_above_272k_tokens": 2e-5,
+            "cache_creation_input_token_cost_above_12hr_above_300k_tokens": 3e-5,
+            "input_cost_per_token_priority": 7.2e-6, "output_cost_per_token_priority": 3.6e-5,
+            "cache_creation_input_token_cost_above_12hr_priority": 1.8e-5
         }
     }).to_string();
     let pricer = Pricer::open(None, None);
@@ -1063,9 +1096,12 @@ fn models_dev_gpt_56_sol_context_tier_survives_unusual_sibling_tiers() {
         .expect("gateway can use the first-party reference price");
     assert_eq!(price.source, "models.dev");
     assert_eq!(price.provider.as_deref(), Some("openai"));
-    let long = price.rates.long_context.as_ref().unwrap();
+    let long = price.rates.standard.long_context.as_ref().unwrap();
     assert_eq!(long.threshold, 272_000);
-    assert!(approx_f64(long.input, 8.0) && approx_f64(long.output, 30.0));
+    assert!(approx_f64(long.rates.tokens.input, 8.0) && approx_f64(long.rates.tokens.output, 30.0));
+    assert_eq!(price.rates.standard.base.cache_write_12h, Some(10.0));
+    assert_eq!(long.rates.cache_write_12h, Some(20.0));
+    assert_eq!(price.rates.service_tiers["priority"].base.cache_write_12h, Some(18.0));
 
     let mut event = gpt_56_sol_event(None, sol_tokens(100_000, 60_000, 10_000, 5_000));
     event.request.provider = Some("private-gateway".into());
@@ -1113,6 +1149,13 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
             "input_cost_per_token_flex": 2e-6,
             "output_cost_per_token_flex": 1e-5,
             "cache_read_input_token_cost_flex": 2e-7,
+            "input_cost_per_token_above_272k_tokens_flex": 4e-6,
+            "output_cost_per_token_above_272k_tokens_flex": 1.5e-5,
+            "cache_creation_input_token_cost_above_12hr_flex": 5e-6,
+            "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex": 1e-5,
+            "input_cost_per_token_ultrafast": 2.4e-5,
+            "output_cost_per_token_ultrafast": 1.2e-4,
+            "cache_creation_input_token_cost_above_12hr_ultrafast": 6e-5,
             "input_cost_per_token_batches": 2e-6
         },
         "claude-sonnet-9": {
@@ -1122,7 +1165,14 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
             "output_cost_per_token": 1.5e-5,
             "cache_read_input_token_cost": 3e-7,
             "cache_creation_input_token_cost": 3.75e-6,
-            "cache_creation_input_token_cost_above_1hr": 6e-6
+            "cache_creation_input_token_cost_above_1hr": 6e-6,
+            "input_cost_per_token_batches": 1.5e-6,
+            "output_cost_per_token_batches": 7.5e-6,
+            "cache_creation_input_token_cost_batches": 1.875e-6,
+            "input_cost_per_token_above_200k_tokens_batches": 3e-6,
+            "output_cost_per_token_above_200k_tokens_batches": 1.125e-5,
+            "cache_creation_input_token_cost_above_200k_tokens_batches": 3.75e-6,
+            "cache_creation_input_token_cost_above_1hr_above_200k_tokens_batches": 6.5e-6
         }
     }))
     .unwrap();
@@ -1140,16 +1190,16 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
         .expect("standard price kept");
     assert_eq!(price.source, "litellm");
     assert!(
-        approx_opt_f64(price.rates.cache_write, Some(5.0)),
+        approx_opt_f64(price.rates.standard.base.tokens.cache_write, Some(5.0)),
         "12h write rate must not replace the standard rate"
     );
-    assert!(price.rates.cache_write_1h.is_none());
+    assert!(price.rates.standard.base.cache_write_1h.is_none());
     assert_eq!(
         serde_json::to_value(&price.rates).unwrap()["cacheWrite12h"],
         json!(8.0)
     );
     assert_eq!(
-        price.rates.long_context.as_ref().unwrap().threshold,
+        price.rates.standard.long_context.as_ref().unwrap().threshold,
         272_000
     );
     // batch 只有输入价，无法计价，只丢弃该档位。
@@ -1158,6 +1208,10 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
             && price.rates.service_tiers.contains_key("flex")
     );
     assert!(!price.rates.service_tiers.contains_key("batch"));
+    let flex_rates = &price.rates.service_tiers["flex"];
+    assert_eq!(flex_rates.base.cache_write_12h, Some(5.0));
+    assert_eq!(flex_rates.long_context.as_ref().unwrap().rates.cache_write_12h, Some(10.0));
+    assert_eq!(price.rates.service_tiers["ultrafast"].base.cache_write_12h, Some(60.0));
 
     let tokens = sol_tokens(100_000, 60_000, 10_000, 5_000);
     let standard = snapshot
@@ -1215,6 +1269,14 @@ fn litellm_variants_keep_standard_price_and_apply_only_to_matching_tokens() {
             .abs()
             < 1e-9
     );
+    let claude_prices = snapshot.resolve("claude-sonnet-9", Some("anthropic"), 0).unwrap();
+    let claude_batch = &claude_prices.rates.service_tiers["batch"];
+    assert_eq!(claude_batch.base.cache_write_1h, Some(3.0));
+    assert_eq!(claude_batch.long_context.as_ref().unwrap().rates.cache_write_1h, Some(6.5));
+    claude.request.tier = Some("batch".into());
+    assert_eq!(snapshot.price_event(&claude).unwrap().cache_write_1h_rate, Some(3.0));
+    claude.tokens.input_tokens = 250_000;
+    assert_eq!(snapshot.price_event(&claude).unwrap().cache_write_1h_rate, Some(6.5));
     let mut gateway = gpt_56_sol_event(None, sol_tokens(100_000, 0, 10_000, 10));
     gateway.agent = "claude".into();
     gateway.tokens.cache_write_1h_tokens = 1_000;
@@ -1268,9 +1330,9 @@ fn duplicate_listings_differing_only_in_variants_keep_standard_price() {
     let price = pricer
         .resolve("gpt-5.6-sol", None, 0)
         .expect("standard price kept");
-    assert!(approx_f64(price.rates.input, 4.0));
+    assert!(approx_f64(price.rates.standard.base.tokens.input, 4.0));
     assert!(price.rates.service_tiers.is_empty());
-    assert!(price.rates.cache_write_12h.is_none());
+    assert!(price.rates.standard.base.cache_write_12h.is_none());
     // 没有一致的 priority 价时，Codex 回落到已公开的 ×2 规则。
     let mut event = gpt_56_sol_event(Some("priority"), sol_tokens(1_000_000, 0, 0, 0));
     event.request.provider = None;
@@ -1357,31 +1419,15 @@ fn model_prices_list_respects_agent_scope_and_separates_differing_providers() {
 
     let db = &mut store.ledger().unwrap().db;
     let all = pricer.list_model_prices_from_db(db, None).unwrap();
-    assert_eq!(
-        all.models.len(),
-        2,
-        "differing providers must not share one price row"
-    );
-    let openai_row = all
-        .models
-        .iter()
-        .find(|r| r.provider.as_deref() == Some("openai"))
-        .unwrap();
-    let ollama_row = all
-        .models
-        .iter()
-        .find(|r| r.provider.as_deref() == Some("ollama"))
-        .unwrap();
-    assert_eq!(openai_row.requests, 2);
-    assert_eq!(openai_row.total_tokens, 330);
+    let [openai_row, ollama_row] = all.models.as_slice() else {
+        panic!("differing providers must have separate price rows");
+    };
+    assert_eq!(openai_row.provider.as_deref(), Some("openai"));
     assert!(openai_row.price.is_some());
-    assert_eq!(ollama_row.requests, 1);
-    assert_eq!(ollama_row.total_tokens, 550);
+    assert_eq!(ollama_row.provider.as_deref(), Some("ollama"));
     assert!(ollama_row.price.is_none());
 
-    // 按 Agent 筛选时次数与 Token 严格匹配所选 Agent。
     let codex_only = pricer.list_model_prices_from_db(db, Some("codex")).unwrap();
     assert_eq!(codex_only.models.len(), 1);
-    assert_eq!(codex_only.models[0].requests, 2);
-    assert_eq!(codex_only.models[0].total_tokens, 330);
+    assert_eq!(codex_only.models[0].provider.as_deref(), Some("openai"));
 }

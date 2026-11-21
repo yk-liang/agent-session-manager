@@ -95,12 +95,15 @@ export default function Sidebar({
           <button
             type="button"
             key={p.dirName}
-            className={`project-item ${selected === p.dirName ? "active" : ""}`}
+            className={`project-item${selected === p.dirName ? " active" : ""}${p.missing ? " missing" : ""}`}
             disabled={disabled}
             onClick={() => onSelect(p.dirName)}
             title={p.projectless ? undefined : p.displayPath}
           >
-            <ProjectPath path={shortPath(p.displayPath) || p.dirName} active={selected === p.dirName} />
+            <div className="project-heading">
+              <ProjectPath path={shortPath(p.displayPath) || p.dirName} active={selected === p.dirName} />
+              {p.missing && <span className="status-tag">不存在</span>}
+            </div>
             <div className="project-meta">
               <span>{p.sessionCount} 个会话</span>
               <time dateTime={p.lastActivity ?? undefined}>{relativeTime(p.lastActivity)}</time>

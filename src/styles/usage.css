@@ -440,7 +440,7 @@
 .usage-models tfoot th, .usage-models tfoot td { font-weight: 600; padding-top: 14px; }
 .usage-failed-count { color: var(--danger); }
 .usage-models tbody th { max-width: 0; overflow: hidden; }
-:is(.usage-models, .prices-model-cell) .model-label { display: block; }
+.usage-models .model-label { display: block; }
 
 .usage-dim-agent, .usage-dim-provider {
   display: inline-flex;
@@ -758,52 +758,59 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 8px 12px;
+  margin-bottom: 12px;
 }
 
-.prices-title { display: flex; align-items: center; gap: 8px; }
+.prices-title { display: flex; align-items: center; gap: 6px; flex: none; }
 .prices-title h2 { margin: 0; }
 
-.prices-actions {
+.prices-toolbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-inline-start: auto;
   gap: 8px;
 }
 
-.prices-catalog-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  padding: 10px 12px;
-  margin-bottom: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  font-size: var(--text-meta);
-  color: var(--text-dim);
+.prices-toolbar .segmented > button { padding-inline: 8px; gap: 4px; }
+.prices-toolbar > button { flex: none; white-space: nowrap; }
+.prices-filter-count { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.prices-search { width: clamp(170px, 20vw, 260px); min-width: 140px; }
+
+.prices-title .help-popover { width: min(320px, calc(100vw - 16px)); }
+.prices-catalog-info {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
   font-variant-numeric: tabular-nums;
 }
 
-.prices-sources {
+.prices-source-chip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 12px;
+}
+
+.prices-source-label {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px 16px;
-}
-
-.prices-source-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 0 6px;
 }
 
 .prices-source-chip strong { color: var(--text); font-weight: 500; }
+.prices-source-time { color: var(--text-dim); font-size: 11px; text-align: right; white-space: nowrap; }
+
+.prices-fx-note {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
 
 .prices-dot {
   width: 6px;
@@ -815,22 +822,9 @@
 
 .prices-dot.ok { background: var(--success); }
 .prices-dot.warn { background: var(--warning); }
+.prices-stale, .prices-src-err { grid-column: 2; text-align: right; }
 .prices-stale { font-style: normal; color: var(--warning); }
 .prices-src-err { font-style: normal; color: var(--danger); }
-.prices-fx-note { color: var(--text-dim); white-space: nowrap; }
-
-.prices-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px 14px;
-  margin-bottom: 14px;
-}
-
-.prices-filter-count { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.prices-search { width: clamp(210px, 28vw, 320px); }
-
 .prices-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -840,11 +834,10 @@
 
 .prices-table {
   width: 100%;
-  min-width: 980px;
-  table-layout: fixed;
   border-collapse: collapse;
   font-size: var(--text-body);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .prices-table th {
@@ -852,50 +845,55 @@
   font-size: var(--text-meta);
   font-weight: 500;
   color: var(--text-dim);
-  padding: 10px;
+  padding: 8px;
   border-bottom: 1px solid var(--border);
-  white-space: nowrap;
 }
 
-.prices-table td { padding: 11px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.prices-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .prices-table tbody tr:last-child td { border-bottom: 0; }
 .prices-table tbody tr:hover { background: var(--accent-soft); }
-.prices-table .numeric { text-align: right; white-space: nowrap; }
-.prices-table .actions-col { text-align: right; white-space: nowrap; }
-.prices-model-cell { overflow: hidden; }
+.prices-table .numeric, .prices-table .actions-col { text-align: right; }
+.prices-table .actions-col { width: 1%; }
+.prices-model-cell .model-label { max-width: clamp(150px, 20vw, 300px); }
 
 .prices-table td small {
-  display: block;
-  margin-top: 2px;
   font-size: var(--text-meta);
   color: var(--text-dim);
+}
+
+.price-rate-cell, .price-inline, .price-cache-rates, .prices-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.price-cache-rates { gap: 10px; }
+.prices-table .price-variants-col { padding-inline-start: 18px; }
+.price-variants-action { display: inline-flex; align-items: center; gap: 2px; }
+.price-variants-action > button { padding-inline: 4px; }
+.price-source-cell { display: flex; max-width: clamp(190px, 24vw, 340px); }
+.price-source-cell > :is(.price-source-id, small) {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
+.price-source-id { color: var(--text-dim); font-size: var(--text-meta); }
 
-.price-rate-cell { display: inline-flex; flex-direction: column; align-items: flex-end; }
-
-.price-rules {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 4px 12px;
-  margin: 0;
+.price-variants-modal { width: min(640px, 90vw); }
+.price-variants-subtitle {
+  margin-inline-start: 6px;
+  color: var(--text-dim);
+  font-size: var(--text-body);
+  font-weight: 400;
+}
+.price-variants-table-wrap { overflow-x: auto; }
+.price-variants-table caption {
+  padding-bottom: 6px;
+  text-align: left;
   font-size: var(--text-meta);
+  color: var(--text-dim);
 }
-.price-rules dt { color: var(--text-dim); }
-.price-rules dd { margin: 0; }
-
-.price-source-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 0;
-}
-
-.price-source-cell small { max-width: 100%; }
-.prices-row-actions { display: inline-flex; align-items: center; gap: 10px; }
+.price-variants-table td { padding: 9px 8px; }
 
 .prices-footer {
   margin-top: 12px;
@@ -1001,6 +999,11 @@
 @media (max-width: 1050px) {
   .usage-page { padding: 16px 20px 22px; }
   .usage-toolbar { margin-bottom: 14px; }
+}
+
+@media (max-width: 860px) {
+  .prices-heading, .prices-toolbar { flex-wrap: wrap; }
+  .prices-toolbar { margin-inline-start: 0; justify-content: flex-start; }
 }
 
 @media (max-width: 700px) {

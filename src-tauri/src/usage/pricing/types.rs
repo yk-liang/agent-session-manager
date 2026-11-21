@@ -27,11 +27,9 @@ impl Currency {
     }
 }
 
-/// 规范化后的计价费率，统一为 美元 / 百万 Token。
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LongContextRates {
-    pub threshold: u64,
+pub struct TokenRates {
     pub input: f64,
     pub output: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,131 +38,167 @@ pub struct LongContextRates {
     pub cache_write: Option<f64>,
 }
 
-impl LongContextRates {
-    pub fn approx_eq(&self, other: &Self) -> bool {
-        self.threshold == other.threshold
-            && approx_f64(self.input, other.input)
-            && approx_f64(self.output, other.output)
-            && approx_opt_f64(self.cache_read, other.cache_read)
-            && approx_opt_f64(self.cache_write, other.cache_write)
+impl TokenRates {
+    fn in_usd(self, currency: Currency) -> Self {
+        let usd = |amount| currency.to_usd(amount);
+        Self {
+            input: usd(self.input),
+            output: usd(self.output),
+            cache_read: self.cache_read.map(usd),
+            cache_write: self.cache_write.map(usd),
+        }
     }
-}
 
-/// 单个服务档位的文本 Token 价格。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TierRates {
-    pub input: f64,
-    pub output: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_read: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextRates>,
-}
-
-impl TierRates {
-    pub(super) fn validate(&self) -> bool {
-        let opt = |v: Option<f64>| v.is_none_or(valid_nonneg_rate);
+    fn validate(&self) -> bool {
         valid_nonneg_rate(self.input)
             && valid_nonneg_rate(self.output)
-            && opt(self.cache_read)
-            && opt(self.cache_write)
-            && self.long_context.as_ref().is_none_or(|long| {
-                long.threshold > 0
-                    && valid_nonneg_rate(long.input)
-                    && valid_nonneg_rate(long.output)
-                    && opt(long.cache_read)
-                    && opt(long.cache_write)
-            })
+            && self.cache_read.is_none_or(valid_nonneg_rate)
+            && self.cache_write.is_none_or(valid_nonneg_rate)
     }
 
-    pub fn approx_eq(&self, other: &Self) -> bool {
+    fn approx_eq(&self, other: &Self) -> bool {
         approx_f64(self.input, other.input)
             && approx_f64(self.output, other.output)
             && approx_opt_f64(self.cache_read, other.cache_read)
             && approx_opt_f64(self.cache_write, other.cache_write)
-            && match (&self.long_context, &other.long_context) {
-                (Some(a), Some(b)) => a.approx_eq(b),
-                (None, None) => true,
-                _ => false,
-            }
     }
 }
 
-/// 标准档及可选的服务档位、长上下文和缓存写入 TTL 价格，单位为美元 / 百万 Token。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Rates {
-    pub input: f64,
-    pub output: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_read: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextRates>,
+pub struct QuoteRates {
+    #[serde(flatten)]
+    pub tokens: TokenRates,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<f64>,
-    /// 目录参考价，供价格表展示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_12h: Option<f64>,
-    /// 键为 "priority" / "flex" / "batch"。
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub service_tiers: BTreeMap<String, TierRates>,
 }
 
-impl Rates {
-    pub fn standard(&self) -> TierRates {
-        TierRates {
-            input: self.input,
-            output: self.output,
-            cache_read: self.cache_read,
-            cache_write: self.cache_write,
-            long_context: self.long_context.clone(),
-        }
+impl QuoteRates {
+    fn validate(&self) -> bool {
+        self.tokens.validate()
+            && self.cache_write_1h.is_none_or(valid_nonneg_rate)
+            && self.cache_write_12h.is_none_or(valid_nonneg_rate)
     }
 
-    pub fn validate_reference(&self) -> Result<(), String> {
-        if !self.standard().validate() {
-            return Err("参考价缺少有效的标准文本费率".into());
-        }
-        if self.cache_write_1h.is_some_and(|v| !valid_nonneg_rate(v))
-            || self.cache_write_12h.is_some_and(|v| !valid_nonneg_rate(v))
-            || !self.service_tiers.values().all(TierRates::validate)
-        {
-            return Err("参考价特殊档位费率无效".into());
-        }
-        Ok(())
-    }
-
-    /// 标准档一致即视为同一价格；特殊档位不影响标准价是否可用。
-    pub fn standard_eq(&self, other: &Self) -> bool {
-        self.standard().approx_eq(&other.standard())
-    }
-
-    pub fn approx_eq(&self, other: &Self) -> bool {
-        self.standard_eq(other)
-            && approx_opt_f64(self.cache_write_1h, other.cache_write_1h)
+    fn ttl_eq(&self, other: &Self) -> bool {
+        approx_opt_f64(self.cache_write_1h, other.cache_write_1h)
             && approx_opt_f64(self.cache_write_12h, other.cache_write_12h)
-            && self.service_tiers.len() == other.service_tiers.len()
-            && self
-                .service_tiers
-                .iter()
-                .all(|(k, v)| other.service_tiers.get(k).is_some_and(|o| v.approx_eq(o)))
     }
 
-    /// 多个来源标准价一致时合并：只保留所有来源都给出且相同的特殊费率。
-    pub fn keep_common_variants(&mut self, other: &Self) {
+    pub(super) fn fill_missing_ttls(&mut self, other: Self) {
+        self.cache_write_1h = self.cache_write_1h.or(other.cache_write_1h);
+        self.cache_write_12h = self.cache_write_12h.or(other.cache_write_12h);
+    }
+
+    fn keep_common_ttls(&mut self, other: Self) {
         if !approx_opt_f64(self.cache_write_1h, other.cache_write_1h) {
             self.cache_write_1h = None;
         }
         if !approx_opt_f64(self.cache_write_12h, other.cache_write_12h) {
             self.cache_write_12h = None;
         }
-        self.service_tiers
-            .retain(|k, v| other.service_tiers.get(k).is_some_and(|o| v.approx_eq(o)));
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextRates<R> {
+    pub threshold: u64,
+    #[serde(flatten)]
+    pub rates: R,
+}
+
+pub type LongContextRates = ContextRates<QuoteRates>;
+pub type CustomLongContextRates = ContextRates<TokenRates>;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierRates {
+    #[serde(flatten)]
+    pub base: QuoteRates,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_context: Option<LongContextRates>,
+}
+
+impl TierRates {
+    pub(super) fn validate(&self) -> bool {
+        self.base.validate()
+            && self.long_context.as_ref().is_none_or(|long| long.threshold > 0 && long.rates.validate())
+    }
+
+    fn base_eq(&self, other: &Self) -> bool {
+        self.base.tokens.approx_eq(&other.base.tokens)
+            && match (&self.long_context, &other.long_context) {
+                (Some(a), Some(b)) => a.threshold == b.threshold && a.rates.tokens.approx_eq(&b.rates.tokens),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn approx_eq(&self, other: &Self) -> bool {
+        self.base_eq(other)
+            && self.base.ttl_eq(&other.base)
+            && self.long_context.as_ref().zip(other.long_context.as_ref())
+                .is_none_or(|(a, b)| a.rates.ttl_eq(&b.rates))
+    }
+
+    fn keep_common_ttls(&mut self, other: &Self) {
+        self.base.keep_common_ttls(other.base);
+        if let (Some(long), Some(other)) = (&mut self.long_context, &other.long_context) {
+            long.rates.keep_common_ttls(other.rates);
+        }
+    }
+
+    pub(super) fn quotes(&mut self) -> impl Iterator<Item = &mut QuoteRates> {
+        std::iter::once(&mut self.base).chain(self.long_context.iter_mut().map(|long| &mut long.rates))
+    }
+}
+
+/// 标准档和服务档位的单价，单位为美元 / 百万 Token。
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rates {
+    #[serde(flatten)]
+    pub standard: TierRates,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_tiers: BTreeMap<String, TierRates>,
+}
+
+impl Rates {
+    pub fn validate_reference(&self) -> Result<(), String> {
+        if !self.standard.validate() {
+            return Err("参考价缺少有效的标准文本费率".into());
+        }
+        if !self.service_tiers.values().all(TierRates::validate) {
+            return Err("参考价特殊档位费率无效".into());
+        }
+        Ok(())
+    }
+
+    pub fn standard_eq(&self, other: &Self) -> bool {
+        self.standard.base_eq(&other.standard)
+    }
+
+    pub fn approx_eq(&self, other: &Self) -> bool {
+        self.standard.approx_eq(&other.standard)
+            && self.service_tiers.len() == other.service_tiers.len()
+            && self.service_tiers.iter().all(|(name, tier)| {
+                other.service_tiers.get(name).is_some_and(|other| tier.approx_eq(other))
+            })
+    }
+
+    /// 同名报价存在多个匹配时，额外费率只有各来源一致才采用。
+    pub fn keep_common_variants(&mut self, other: &Self) {
+        self.standard.keep_common_ttls(&other.standard);
+        self.service_tiers.retain(|name, tier| {
+            let Some(other) = other.service_tiers.get(name).filter(|other| tier.base_eq(other)) else {
+                return false;
+            };
+            tier.keep_common_ttls(other);
+            true
+        });
     }
 }
 
@@ -208,7 +242,7 @@ pub struct CustomPriceInput {
     #[serde(default)]
     pub cache_write: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextRates>,
+    pub long_context: Option<CustomLongContextRates>,
 }
 
 /// 持久化保存的自定义价，保留用户选定币种与原始金额。
@@ -224,7 +258,7 @@ pub struct CustomPriceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextRates>,
+    pub long_context: Option<CustomLongContextRates>,
     pub updated_at: i64,
 }
 
@@ -252,16 +286,16 @@ impl CustomPriceRecord {
         if let Some(value) = input.cache_write {
             check(value, "缓存写入")?;
         }
-        if let Some(rates) = &input.long_context {
-            if rates.threshold == 0 || rates.threshold > 9_007_199_254_740_991 {
+        if let Some(long) = &input.long_context {
+            if long.threshold == 0 || long.threshold > 9_007_199_254_740_991 {
                 return Err("请输入有效的长上下文阈值".into());
             }
-            check(rates.input, "长上下文输入")?;
-            check(rates.output, "长上下文输出")?;
-            if let Some(value) = rates.cache_read {
+            check(long.rates.input, "长上下文输入")?;
+            check(long.rates.output, "长上下文输出")?;
+            if let Some(value) = long.rates.cache_read {
                 check(value, "长上下文缓存读取")?;
             }
-            if let Some(value) = rates.cache_write {
+            if let Some(value) = long.rates.cache_write {
                 check(value, "长上下文缓存写入")?;
             }
         }
@@ -279,17 +313,24 @@ impl CustomPriceRecord {
 
     pub fn to_usd_rates(&self) -> Rates {
         Rates {
-            input: self.currency.to_usd(self.input),
-            output: self.currency.to_usd(self.output),
-            cache_read: self.cache_read.map(|v| self.currency.to_usd(v)),
-            cache_write: self.cache_write.map(|v| self.currency.to_usd(v)),
-            long_context: self.long_context.as_ref().map(|rates| LongContextRates {
-                threshold: rates.threshold,
-                input: self.currency.to_usd(rates.input),
-                output: self.currency.to_usd(rates.output),
-                cache_read: rates.cache_read.map(|value| self.currency.to_usd(value)),
-                cache_write: rates.cache_write.map(|value| self.currency.to_usd(value)),
-            }),
+            standard: TierRates {
+                base: QuoteRates {
+                    tokens: TokenRates {
+                        input: self.input,
+                        output: self.output,
+                        cache_read: self.cache_read,
+                        cache_write: self.cache_write,
+                    }.in_usd(self.currency),
+                    ..Default::default()
+                },
+                long_context: self.long_context.as_ref().map(|long| LongContextRates {
+                    threshold: long.threshold,
+                    rates: QuoteRates {
+                        tokens: long.rates.in_usd(self.currency),
+                        ..Default::default()
+                    },
+                }),
+            },
             ..Default::default()
         }
     }
@@ -315,7 +356,7 @@ pub struct CustomRatesView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextRates>,
+    pub long_context: Option<CustomLongContextRates>,
 }
 
 #[derive(Clone, Debug)]
@@ -437,12 +478,7 @@ pub struct ModelPriceRow {
     /// 单一提供商的用量行。合并多个来源的用量时留空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    pub agents: Vec<String>,
-    pub providers: Vec<String>,
-    pub requests: u64,
-    pub total_tokens: u64,
     pub price: Option<ResolvedPrice>,
-    pub custom_only: bool,
 }
 
 /// 统计和请求分页共用的计费数据视图。
