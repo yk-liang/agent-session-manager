@@ -4,7 +4,7 @@ import { X } from "lucide-react";
 import UiIcon from "./UiIcon";
 
 interface Props {
-  title: string;
+  title: ReactNode;
   className?: string;
   closeLabel?: string;
   busy?: boolean;

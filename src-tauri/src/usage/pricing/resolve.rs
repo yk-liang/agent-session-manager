@@ -6,20 +6,16 @@ use super::{
 use crate::usage::events::RequestEvent;
 use chrono::NaiveDate;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     sync::Arc,
 };
 
 pub(in crate::usage) const BUILTIN_SOURCE: &str = "builtin";
 pub(in crate::usage) const NO_USAGE_SOURCE: &str = "no_usage";
+const ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER: f64 = 2.0;
 
 fn is_free_model(model: &str) -> bool {
-    let model = model.trim();
-    model
-        .get(model.len().saturating_sub(5)..)
-        .is_some_and(|suffix| {
-            suffix.eq_ignore_ascii_case("-free") || suffix.eq_ignore_ascii_case(":free")
-        })
+    model == "unknown" || model.ends_with("-free") || model.ends_with(":free")
 }
 
 #[derive(Clone)]
@@ -53,7 +49,7 @@ impl PricingSnapshot {
         at_ms: i64,
     ) -> Option<ResolvedPrice> {
         let key = model_key(model);
-        if key.is_empty() || key == "unknown" {
+        if key.is_empty() {
             return None;
         }
         let (prefix, _) = catalog::split_provider_prefix(&key);
@@ -76,8 +72,17 @@ impl PricingSnapshot {
                     source: BUILTIN_SOURCE.into(),
                     currency: Currency::Usd,
                     rates: Rates {
-                        cache_read: Some(0.0),
-                        cache_write: Some(0.0),
+                        standard: TierRates {
+                            base: QuoteRates {
+                                tokens: TokenRates {
+                                    cache_read: Some(0.0),
+                                    cache_write: Some(0.0),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
                         ..Default::default()
                     },
                     ..Default::default()
@@ -182,10 +187,11 @@ impl PricingSnapshot {
             (_, tier) => service_tier(tier),
         };
         if let Some(price) = &price {
-            let rates = &price.rates;
-            if tier.is_none() && rates.long_context.is_none()
+            let standard = &price.rates.standard;
+            let rates = &standard.base.tokens;
+            if tier.is_none() && standard.long_context.is_none()
                 && rates.input == 0.0 && rates.output == 0.0
-                && [rates.cache_read, rates.cache_write, rates.cache_write_1h]
+                && [rates.cache_read, rates.cache_write, standard.base.cache_write_1h]
                     .into_iter().flatten().all(|rate| rate == 0.0)
             {
                 return Ok(EventCost {
@@ -223,35 +229,23 @@ impl PricingSnapshot {
 
         let price = price.ok_or(PricingIssue::Unpriced)?;
 
-        let base_long = price.rates.long_context.as_ref();
-        let above_base = base_long.is_some_and(|long| tokens.input_tokens > long.threshold);
+        let standard = &price.rates.standard;
+        let above_base = standard.long_context.as_ref().is_some_and(|long| tokens.input_tokens > long.threshold);
         let (rates, multiplier) = match tier {
-            None => (price.rates.standard(), 1.0),
+            None => (standard, 1.0),
             Some(name) => match price.rates.service_tiers.get(name) {
-                Some(rates) if !above_base || rates.long_context.is_some() => (rates.clone(), 1.0),
+                Some(rates) if !above_base || rates.long_context.is_some() => (rates, 1.0),
                 _ if name == "priority" && event.agent == "codex" => (
-                    price.rates.standard(),
+                    standard,
                     codex_priority_multiplier(&price).ok_or(PricingIssue::UnsupportedTier)?,
                 ),
                 _ => return Err(PricingIssue::UnsupportedTier),
             },
         };
-        let (input, output, read, write, long_context) = match &rates.long_context {
-            Some(long) if tokens.input_tokens > long.threshold => (
-                long.input,
-                long.output,
-                long.cache_read,
-                long.cache_write,
-                true,
-            ),
-            _ => (
-                rates.input,
-                rates.output,
-                rates.cache_read,
-                rates.cache_write,
-                false,
-            ),
-        };
+        let long = rates.long_context.as_ref().filter(|long| tokens.input_tokens > long.threshold);
+        let quote = long.map_or(&rates.base, |long| &long.rates);
+        let TokenRates { input, output, cache_read: read, cache_write: write } = quote.tokens;
+        let long_context = long.is_some();
         let input_rate = input * multiplier;
         let output_rate = output * multiplier;
         let cache_read_rate = read.unwrap_or(input) * multiplier;
@@ -261,14 +255,10 @@ impl PricingSnapshot {
         let write_1h = tokens.cache_write_1h_tokens.min(tokens.cache_write_tokens);
         let cache_write_1h_rate = if write_1h == 0 {
             None
-        } else if let Some(rate) = price
-            .rates
-            .cache_write_1h
-            .filter(|_| tier.is_none() && !long_context)
-        {
-            Some(rate)
+        } else if let Some(rate) = quote.cache_write_1h {
+            Some(rate * multiplier)
         } else if event.agent == "claude" || is_anthropic(event.model, event.provider, &price) {
-            Some(input_rate * 2.0)
+            Some(input_rate * ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER)
         } else {
             return Err(PricingIssue::UnsupportedComponent);
         };
@@ -376,15 +366,11 @@ impl PricingSnapshot {
                                 catalog.match_model(&format!("{provider}/{model_id}"), None)
                             })
                         {
-                            rates.cache_write_1h = rates.cache_write_1h.or(other.cache_write_1h);
-                            rates.cache_write_12h = rates.cache_write_12h.or(other.cache_write_12h);
-                            for (tier, rate) in other.service_tiers {
-                                if !rates.service_tiers.contains_key(&tier) {
-                                    tiers.insert(tier.clone());
-                                    rates.service_tiers.insert(tier, rate);
-                                }
-                            }
+                            tiers = supplement_reference_rates(&mut rates, other);
                         }
+                    }
+                    if catalog::normalize_provider(&provider) == "anthropic" {
+                        complete_anthropic_cache_write_rates(&mut rates);
                     }
                     let matched_as = (model != key || first_party_fallback && model != bare)
                         .then(|| bare.to_owned());
@@ -402,6 +388,45 @@ impl PricingSnapshot {
             }
         }
         ReferenceMatch::Absent
+    }
+}
+
+fn supplement_reference_rates(rates: &mut Rates, supplement: Rates) -> BTreeSet<String> {
+    rates.standard.base.fill_missing_ttls(supplement.standard.base);
+    if let (Some(long), Some(other)) = (&mut rates.standard.long_context, supplement.standard.long_context) {
+        if long.threshold == other.threshold && approx_f64(long.rates.tokens.input, other.rates.tokens.input) {
+            long.rates.fill_missing_ttls(other.rates);
+        }
+    }
+    let mut tiers = BTreeSet::new();
+    for (tier, rate) in supplement.service_tiers {
+        if let Entry::Vacant(entry) = rates.service_tiers.entry(tier) {
+            tiers.insert(entry.key().clone());
+            entry.insert(rate);
+        }
+    }
+    tiers
+}
+
+/// Anthropic 的缓存写入倍率以当前档位的输入价为基准，包含 Batch 折扣和长上下文溢价。
+fn complete_anthropic_cache_write_rates(rates: &mut Rates) {
+    fn fill(quote: &mut QuoteRates) {
+        let input = quote.tokens.input;
+        let write_1h = input * ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER;
+        if quote.cache_write_1h.is_none() && input > 0.0
+            && approx_opt_f64(quote.tokens.cache_write, Some(input * 1.25))
+            && valid_nonneg_rate(write_1h) {
+            quote.cache_write_1h = Some(write_1h);
+        }
+    }
+
+    let base = &mut rates.standard.base;
+    fill(base);
+    if approx_opt_f64(base.cache_write_1h, Some(base.tokens.input * ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER)) {
+        if let Some(long) = &mut rates.standard.long_context {
+            fill(&mut long.rates);
+        }
+        rates.service_tiers.values_mut().flat_map(TierRates::quotes).for_each(fill);
     }
 }
 

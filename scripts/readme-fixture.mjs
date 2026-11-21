@@ -161,9 +161,9 @@ export function installScreenshotFixture(fixture) {
       }
       case 'get_model_prices': return {
         models: [
-          { model: 'gpt-5-codex', agents: ['codex'], providers: ['openai'], requests: 60, totalTokens: 3200000, customOnly: false, price: fixture.prices['gpt-5-codex'] },
-          { model: 'claude-sonnet-4-5', agents: ['claude', 'pi'], providers: ['anthropic'], requests: 60, totalTokens: 3100000, customOnly: false, price: fixture.prices['claude-sonnet-4-5'] },
-          { model: 'qwen3-coder', agents: ['opencode', 'qoder'], providers: ['example'], requests: 60, totalTokens: 3000000, customOnly: false, price: fixture.prices['qwen3-coder'] },
+          { model: 'gpt-5-codex', price: fixture.prices['gpt-5-codex'] },
+          { model: 'claude-sonnet-4-5', price: fixture.prices['claude-sonnet-4-5'] },
+          { model: 'qwen3-coder', price: fixture.prices['qwen3-coder'] },
         ],
         catalog: {
           revision: 1,

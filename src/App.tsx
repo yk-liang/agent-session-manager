@@ -228,9 +228,17 @@ export default function App() {
     if (!next.includeArchived && (selectedDetail?.meta ?? readRequest?.session)?.archived) closeSessionDetail();
   };
 
-  const openSession = (s: SessionMeta) => {
-    if (!selectedAgent || sessionActionsBusy || batchMode || mutationRunning.current) return;
-    void loadSession(selectedAgent, s);
+  const openSession = (session: SessionMeta, toggleSelection = false) => {
+    if (!selectedAgent || sessionActionsBusy || mutationRunning.current || (toggleSelection && batchBusy)) return;
+    if (toggleSelection) {
+      const key = sessionKey(session);
+      setCheckedSessionKeys(current => {
+        const next = new Set(current);
+        if (!next.delete(key)) next.add(key);
+        return next;
+      });
+    }
+    void loadSession(selectedAgent, session);
   };
 
   // 若打开会话时目录统计尚未完成，首次完成时只建立基线。
@@ -306,20 +314,8 @@ export default function App() {
 
   const toggleBatch = () => {
     if (sessionActionsBusy || batchBusy || mutationRunning.current) return;
-    closeSessionDetail();
     setBatchMode(!batchMode);
     clearBatchSelection();
-  };
-
-  const toggleSession = (session: SessionMeta) => {
-    if (sessionActionsBusy || batchBusy) return;
-    const key = sessionKey(session);
-    setCheckedSessionKeys((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
   };
 
   const toggleAll = () => {
@@ -460,7 +456,7 @@ export default function App() {
             selectedSessionKey={selectedSessionKey}
             search={search}
             onSearch={changeSearch}
-            onSelect={openSession}
+            onSelect={session => openSession(session, batchMode)}
             filter={catalogFilter}
             onFilterChange={changeFilter}
             batchMode={batchMode}
@@ -470,7 +466,6 @@ export default function App() {
             toast={showToast}
             checkedSessionKeys={checkedSessionKeys}
             onToggleBatch={toggleBatch}
-            onToggleSession={toggleSession}
             onToggleAll={toggleAll}
             onDeleteSelected={requestBatchDelete}
             disabled={sessionActionsBusy}

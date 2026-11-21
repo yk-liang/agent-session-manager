@@ -2,7 +2,7 @@
 //! 逐个模型宽松解析：单个模型或档位的结构变化只影响该模型，不会让整个提供商消失。
 use super::{
     catalog::{bare_model_key, inferred_creator, normalize_provider, SourceCatalog},
-    types::{approx_f64, LongContextRates, Rates, ReferenceListing},
+    types::{approx_f64, LongContextRates, QuoteRates, Rates, ReferenceListing, TierRates, TokenRates},
 };
 use serde_json::Value;
 
@@ -22,32 +22,25 @@ fn has_text_rates(rates: &Value) -> bool {
         })
 }
 
-fn long_context(rates: &Value, threshold: u64) -> Option<LongContextRates> {
-    if threshold == 0 || !has_text_rates(rates) {
+fn quote(rates: &Value) -> Option<QuoteRates> {
+    if !has_text_rates(rates) {
         return None;
     }
-    Some(LongContextRates {
-        threshold,
-        input: num(rates, "input")?,
-        output: num(rates, "output")?,
-        cache_read: num(rates, "cache_read"),
-        cache_write: num(rates, "cache_write"),
+    Some(QuoteRates {
+        tokens: TokenRates {
+            input: num(rates, "input")?,
+            output: num(rates, "output")?,
+            cache_read: num(rates, "cache_read"),
+            cache_write: num(rates, "cache_write"),
+        },
+        ..Default::default()
     })
 }
 
 /// 只把 `type: "context"` 档位当作长上下文价；其他档位描述的是不同计价的 Token，
 /// 不参与标准价，也不会使标准价失效。多个上下文档位无法用单阈值表达，按未定价处理。
 pub(super) fn parse_rates(cost: &Value) -> Option<Rates> {
-    if !cost.is_object() || !has_text_rates(cost) {
-        return None;
-    }
-    let mut rates = Rates {
-        input: num(cost, "input")?,
-        output: num(cost, "output")?,
-        cache_read: num(cost, "cache_read"),
-        cache_write: num(cost, "cache_write"),
-        ..Default::default()
-    };
+    let base = quote(cost)?;
     let context_tiers: Vec<&Value> = cost
         .get("tiers")
         .and_then(Value::as_array)
@@ -55,20 +48,20 @@ pub(super) fn parse_rates(cost: &Value) -> Option<Rates> {
         .flatten()
         .filter(|tier| tier["tier"]["type"].as_str() == Some("context"))
         .collect();
-    match context_tiers.as_slice() {
-        [] => {
-            if let Some(over) = cost.get("context_over_200k").filter(|v| v.is_object()) {
-                rates.long_context = Some(long_context(over, 200_000)?);
-            }
-        }
+    let long_context = match context_tiers.as_slice() {
+        [] => match cost.get("context_over_200k").filter(|v| v.is_object()) {
+            Some(over) => Some(LongContextRates { threshold: 200_000, rates: quote(over)? }),
+            None => None,
+        },
         [tier] => {
             let size = tier["tier"]["size"]
                 .as_f64()
                 .filter(|s| s.fract() == 0.0 && *s > 0.0)?;
-            rates.long_context = Some(long_context(tier, size as u64)?);
+            Some(LongContextRates { threshold: size as u64, rates: quote(tier)? })
         }
         _ => return None,
-    }
+    };
+    let rates = Rates { standard: TierRates { base, long_context }, ..Default::default() };
     rates.validate_reference().ok()?;
     Some(rates)
 }

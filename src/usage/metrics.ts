@@ -341,7 +341,7 @@ export function eventCostDisplay(event: RequestEvent): Display & { note: string 
   }
   const shown = display(cost.totalUsd, { kind: "usd" });
   if (cost.source === "no_usage") return { ...shown, title: "失败请求未记录 Token 用量", note: "无 Token 用量" };
-  if (cost.source === "builtin") return { ...shown, title: "免费模型（内置价格）", note: sourceName(cost.source) };
+  if (cost.source === "builtin") return { ...shown, title: "内置零价", note: sourceName(cost.source) };
   const notes = costNotes(cost);
   return {
     ...shown,
