@@ -1097,7 +1097,7 @@ fn usage_excludes_a_legacy_open_code_mirror_when_native_claude_usage_is_availabl
         .list_model_prices_from_db(&store.ledger().unwrap().db, None)
         .unwrap();
     assert_eq!(prices.models.len(), 1);
-    assert_eq!(prices.models[0].agents, ["claude"]);
+    assert_eq!(prices.models[0].model, result.events[0].model);
 }
 
 #[test]

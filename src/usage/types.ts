@@ -111,36 +111,34 @@ export interface RequestMetadata {
 }
 export type PricingCurrency = "USD" | "CNY";
 
-export interface LongContextRates {
-  threshold: number;
+export interface TokenRates {
   input: number;
   output: number;
   cacheRead?: number | null;
   cacheWrite?: number | null;
 }
 
-export interface TierRates {
-  input: number;
-  output: number;
-  cacheRead?: number | null;
-  cacheWrite?: number | null;
+export interface QuoteRates extends TokenRates {
+  /** 1 小时缓存写入单价；只用于日志明确记录为 1 小时 TTL 的写入。 */
+  cacheWrite1h?: number | null;
+  cacheWrite12h?: number | null;
+}
+
+export interface LongContextRates extends QuoteRates {
+  threshold: number;
+}
+
+export interface TierRates extends QuoteRates {
   longContext?: LongContextRates | null;
 }
 
 export interface PriceRates extends TierRates {
-  /** 1 小时缓存写入单价；只用于日志明确记录为 1 小时 TTL 的写入。 */
-  cacheWrite1h?: number | null;
-  cacheWrite12h?: number | null;
-  /** priority / flex / batch 档位单价；只用于记录为该档位的请求。 */
+  /** 服务档位单价；只用于记录为该档位的请求。 */
   serviceTiers?: Record<string, TierRates>;
 }
 
-export interface CustomRatesView {
-  input: number;
-  output: number;
-  cacheRead?: number | null;
-  cacheWrite?: number | null;
-  longContext?: LongContextRates | null;
+export interface CustomRatesView extends TokenRates {
+  longContext?: (TokenRates & { threshold: number }) | null;
 }
 
 export interface ReferenceSummary {
@@ -213,12 +211,7 @@ export interface PricingCatalogStatus {
 export interface ModelPriceRow {
   model: string;
   provider?: string | null;
-  agents: string[];
-  providers: string[];
-  requests: number;
-  totalTokens: number;
   price: ResolvedPrice | null;
-  customOnly: boolean;
 }
 
 export interface ModelPricesResponse {

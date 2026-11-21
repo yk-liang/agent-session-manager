@@ -4,7 +4,8 @@ use super::{
         bare_model_key, inferred_creator, normalize_provider, split_provider_prefix, SourceCatalog,
     },
     types::{
-        approx_f64, per_token_to_per_million, LongContextRates, Rates, ReferenceListing, TierRates,
+        approx_f64, per_token_to_per_million, LongContextRates, QuoteRates, Rates, ReferenceListing,
+        TierRates, TokenRates,
     },
 };
 use serde_json::{Map, Value};
@@ -46,6 +47,8 @@ enum Field {
     Output,
     CacheRead,
     CacheWrite,
+    CacheWrite1h,
+    CacheWrite12h,
 }
 
 #[derive(Default)]
@@ -54,15 +57,32 @@ struct Fields {
     output: Option<f64>,
     cache_read: Option<f64>,
     cache_write: Option<f64>,
+    cache_write_1h: Option<f64>,
+    cache_write_12h: Option<f64>,
 }
 
 impl Fields {
+    fn quote(self) -> Option<QuoteRates> {
+        Some(QuoteRates {
+            tokens: TokenRates {
+                input: self.input?,
+                output: self.output?,
+                cache_read: self.cache_read,
+                cache_write: self.cache_write,
+            },
+            cache_write_1h: self.cache_write_1h,
+            cache_write_12h: self.cache_write_12h,
+        })
+    }
+
     fn set(&mut self, field: Field, rate: f64) {
         *match field {
             Field::Input => &mut self.input,
             Field::Output => &mut self.output,
             Field::CacheRead => &mut self.cache_read,
             Field::CacheWrite => &mut self.cache_write,
+            Field::CacheWrite1h => &mut self.cache_write_1h,
+            Field::CacheWrite12h => &mut self.cache_write_12h,
         } = Some(rate);
     }
 }
@@ -75,42 +95,43 @@ struct TierFields {
 }
 
 impl TierFields {
-    /// 只能表达单一阈值；多阈值或长上下文缺输入/输出时返回 None。
     fn rates(self) -> Option<TierRates> {
-        let long_context = match self.above.len() {
-            0 => None,
-            1 => {
-                let (threshold, tier) = self.above.into_iter().next()?;
+        // 只有缓存写入 TTL 的条目不足以定义新的上下文档位。
+        let mut above = self.above.into_iter().filter(|(_, rates)| {
+            [rates.input, rates.output, rates.cache_read, rates.cache_write].into_iter().any(|rate| rate.is_some())
+        });
+        let long_context = match above.next() {
+            None => None,
+            Some((threshold, tier)) => {
+                if above.next().is_some() {
+                    return None;
+                }
                 Some(LongContextRates {
                     threshold,
-                    input: tier.input?,
-                    output: tier.output?,
-                    cache_read: tier.cache_read,
-                    cache_write: tier.cache_write,
+                    rates: tier.quote()?,
                 })
             }
-            _ => return None,
         };
         Some(TierRates {
-            input: self.base.input?,
-            output: self.base.output?,
-            cache_read: self.base.cache_read,
-            cache_write: self.base.cache_write,
+            base: self.base.quote()?,
             long_context,
         })
     }
 }
 
-const FIELD_PREFIXES: [(&str, Field); 4] = [
+const FIELD_PREFIXES: [(&str, Field); 6] = [
     ("input_cost_per_token", Field::Input),
     ("output_cost_per_token", Field::Output),
     ("cache_read_input_token_cost", Field::CacheRead),
+    ("cache_creation_input_token_cost_above_1hr", Field::CacheWrite1h),
+    ("cache_creation_input_token_cost_above_12hr", Field::CacheWrite12h),
     ("cache_creation_input_token_cost", Field::CacheWrite),
 ];
-const SERVICE_SUFFIXES: [(&str, &str); 3] = [
+const SERVICE_SUFFIXES: [(&str, &str); 4] = [
     ("_priority", "priority"),
     ("_flex", "flex"),
     ("_batches", "batch"),
+    ("_ultrafast", "ultrafast"),
 ];
 
 fn tier_rates(map: &Map<String, Value>, service_suffix: &str) -> Option<TierRates> {
@@ -133,7 +154,12 @@ fn tier_rates(map: &Map<String, Value>, service_suffix: &str) -> Option<TierRate
         if value.is_null() && suffix.is_empty() {
             continue;
         }
-        fields.set(field, per_token_to_per_million(value.as_f64()?)?);
+        let rate = match value.as_f64().and_then(per_token_to_per_million) {
+            Some(rate) => rate,
+            None if matches!(field, Field::CacheWrite1h | Field::CacheWrite12h) => continue,
+            None => return None,
+        };
+        fields.set(field, rate);
     }
     let reasoning_key = format!("output_cost_per_reasoning_token{service_suffix}");
     if let Some(reasoning) = map.get(&reasoning_key).filter(|value| !value.is_null()) {
@@ -153,22 +179,12 @@ fn parse_rates(map: &Map<String, Value>) -> Option<Rates> {
     {
         return None;
     }
-    let standard = tier_rates(map, "")?;
-    let rates = Rates {
-        input: standard.input,
-        output: standard.output,
-        cache_read: standard.cache_read,
-        cache_write: standard.cache_write,
-        long_context: standard.long_context,
-        cache_write_1h: opt_f64(map, "cache_creation_input_token_cost_above_1hr")
-            .and_then(per_token_to_per_million),
-        cache_write_12h: opt_f64(map, "cache_creation_input_token_cost_above_12hr")
-            .and_then(per_token_to_per_million),
+    Some(Rates {
+        standard: tier_rates(map, "")?,
         service_tiers: SERVICE_SUFFIXES.into_iter()
             .filter_map(|(suffix, name)| Some((name.to_owned(), tier_rates(map, suffix)?)))
             .collect(),
-    };
-    Some(rates)
+    })
 }
 
 pub fn parse(raw: &[u8]) -> Result<SourceCatalog, String> {

@@ -1,13 +1,14 @@
 import { useEffect, useId, useState, type FormEvent } from "react";
-import * as api from "../api";
-import type { CustomRatesView, ModelPriceRow, PricingCurrency, ReferenceSearchItem, ResolvedPrice } from "./types";
-import { formatRate } from "./format";
-import { sourceName } from "./metrics";
-import { CheckboxField } from "../components/Checkbox";
-import Modal from "../components/Modal";
-import Notice from "../components/Notice";
-import SearchField from "../components/SearchField";
-import Segmented from "../components/Segmented";
+import * as api from "../../api";
+import { bareModelId, qualifiedModelId } from "../../models";
+import type { CustomRatesView, ModelPriceRow, PricingCurrency, ReferenceSearchItem, ResolvedPrice } from "../types";
+import { formatRate } from "../format";
+import { sourceName } from "../metrics";
+import { CheckboxField } from "../../components/Checkbox";
+import Modal from "../../components/Modal";
+import Notice from "../../components/Notice";
+import SearchField from "../../components/SearchField";
+import Segmented from "../../components/Segmented";
 
 const RATE_FIELDS = [
   ["input", "输入"],
@@ -69,8 +70,6 @@ function PriceRateFields({ currency, draft, disabled, prefix = "", onChange }: {
 }
 
 interface EditorState {
-  mode: "add" | "edit";
-  model: string;
   currency: PricingCurrency;
   rates: RateDraft;
   longContext: { threshold: string; rates: RateDraft } | null;
@@ -80,19 +79,14 @@ export function hasEditableCustomPrice(price: ResolvedPrice | null): boolean {
   return price?.source === "custom" && !price.matchedAs;
 }
 
-export function targetModelKey(row: ModelPriceRow) {
-  return row.provider && !row.model.includes("/") ? `${row.provider}/${row.model}` : row.model;
+export function customModelKey({ model, provider, price }: ModelPriceRow) {
+  if (hasEditableCustomPrice(price) && price?.modelId) return price.modelId;
+  return qualifiedModelId(model, provider);
 }
 
-function initialDraft(row: ModelPriceRow | null): EditorState {
-  if (!row) return { mode: "add", model: "", currency: "USD", rates: rateDraft(), longContext: null };
-
-  const price = row.price;
-  const custom = hasEditableCustomPrice(price);
+function initialDraft(price: ResolvedPrice | null, custom: boolean): EditorState {
   const rates = (custom ? price?.originalRates : null) ?? price?.rates;
   return {
-    mode: "edit",
-    model: custom && price?.modelId ? price.modelId : targetModelKey(row),
     currency: custom && price ? price.currency : "USD",
     rates: rateDraft(rates),
     longContext: rates?.longContext ? {
@@ -102,16 +96,18 @@ function initialDraft(row: ModelPriceRow | null): EditorState {
 }
 
 export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
-  row: ModelPriceRow | null;
+  row: ModelPriceRow;
   exchangeRate: number;
   onCancel: () => void;
   onSaved: (revision: number) => void;
 }) {
   const referenceId = useId();
-  const [editor, setEditor] = useState(() => initialDraft(row));
+  const custom = hasEditableCustomPrice(row.price);
+  const model = customModelKey(row).trim();
+  const [editor, setEditor] = useState(() => initialDraft(row.price, custom));
   const [saving, setSaving] = useState(false);
   const [editorError, setEditorError] = useState("");
-  const [referenceQuery, setReferenceQuery] = useState("");
+  const [referenceQuery, setReferenceQuery] = useState(() => bareModelId(model));
   const [referenceResults, setReferenceResults] = useState<{ query: string; items: ReferenceSearchItem[]; error?: boolean }>();
   const keyword = referenceQuery.trim();
   const search = keyword && referenceResults?.query === keyword ? referenceResults : null;
@@ -139,7 +135,6 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
     try {
       setEditor({
         ...editor,
-        model: editor.mode === "add" && !editor.model.trim() ? item.modelId : editor.model,
         rates: rateDraft(item.rates, scale),
         longContext: long ? { threshold: String(long.threshold), rates: rateDraft(long, scale) } : null,
       });
@@ -177,7 +172,6 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
     if (saving) return;
-    const model = editor.model.trim();
     if (!model) {
       setEditorError("请输入模型 ID");
       return;
@@ -205,7 +199,7 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
   };
 
   return (
-    <Modal title={editor.mode === "add" ? "添加自定义价格" : "编辑自定义价格"}
+    <Modal title={custom ? "编辑自定义价格" : "设置自定义价格"}
       className="price-editor-modal" busy={saving} onClose={onCancel}>
       <form className="price-editor-form" onSubmit={handleSave} noValidate>
         <label className="price-field">
@@ -213,11 +207,8 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
           <input
             type="text"
             className="control-input"
-            value={editor.model}
-            disabled={editor.mode === "edit" || saving}
-            placeholder="例如 claude-sonnet-4-5"
-            autoFocus={editor.mode === "add"}
-            onChange={e => setEditor({ ...editor, model: e.target.value })}
+            value={model}
+            disabled
           />
         </label>
 
@@ -225,7 +216,7 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
           <div className="price-field">
             <label htmlFor={referenceId}>参考价</label>
             <SearchField id={referenceId} value={referenceQuery} onChange={setReferenceQuery}
-              placeholder="搜索模型或提供商" aria-label="搜索参考价" autoFocus={editor.mode === "edit"} disabled={saving} />
+              placeholder="搜索模型或提供商" aria-label="搜索参考价" autoFocus disabled={saving} />
           </div>
           {search && search.items.length === 0 && (
             <p className="hint" role="status">{search.error ? "无法读取参考价。" : "未找到匹配的参考价。"}</p>
@@ -242,9 +233,7 @@ export default function PriceEditor({ row, exchangeRate, onCancel, onSaved }: {
                 >
                   <span className="price-ref-name">
                     <span className="status-tag" data-tone="success">{sourceName(item.source)}</span>
-                    <code>
-                      {item.provider}/{item.modelId}
-                    </code>
+                    <code>{qualifiedModelId(item.modelId, item.provider)}</code>
                   </span>
                   <span className="price-ref-rates">
                     {formatRate(item.rates.input, "USD")} / {formatRate(item.rates.output, "USD")}

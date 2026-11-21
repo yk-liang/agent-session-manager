@@ -44,7 +44,7 @@ try {
   const callbacks = new Map(), listeners = new Map(); let nextId = 1;
   const emit = (event, payload) => { for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload }); };
   const resolvePrice = model => {
-   if (model === 'local/demo:free') return { source: 'builtin', currency: 'USD', rates: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+   if (model === 'local/demo:free' || model === 'unknown') return { source: 'builtin', currency: 'USD', rates: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
    const custom = state.customPrices[model];
    if (custom) {
     const scale = custom.currency === 'CNY' ? 1 / 7 : 1;
@@ -53,11 +53,18 @@ try {
     return { source: 'custom', currency: custom.currency, originalRates: { input: custom.input, output: custom.output, cacheRead: custom.cacheRead, cacheWrite: custom.cacheWrite, longContext: long }, rates, overridesReference: model === 'gpt-fixture' ? { source: 'models.dev', provider: 'openai', modelId: 'gpt-fixture', rates: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: null } } : null };
    }
    if (model === 'gpt-fixture') return { source: 'models.dev', provider: 'openai', modelId: 'gpt-fixture', currency: 'USD', rates: {
-    input: 2, output: 8, cacheRead: 0.2, cacheWrite: null,
-    longContext: { threshold: 272000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
-    serviceTiers: { batch: { input: 2, output: 10 }, flex: { input: 2, output: 10 } },
-    cacheWrite1h: 12, cacheWrite12h: 20,
+    input: 2, output: 8, cacheRead: 0.2, cacheWrite: 5,
+    longContext: { threshold: 272000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10, cacheWrite12h: 20 },
+    serviceTiers: Object.fromEntries([['batch', 2], ['flex', 2], ['priority', 8]].map(([tier, input]) => [
+     tier, { input, output: input * 5, cacheRead: input / 10, cacheWrite: input * 1.25, cacheWrite12h: input * 2.5,
+      longContext: { threshold: 272000, input: input * 2, output: input * 7.5, cacheRead: input / 5, cacheWrite: input * 2.5, cacheWrite12h: input * 5 } },
+    ])),
+    cacheWrite12h: 10,
    } };
+   if (model === 'gpt-ttl-fixture') return { source: 'litellm', provider: 'openai', modelId: model, currency: 'USD',
+    rates: { input: 4, output: 20, cacheWrite: 5, cacheWrite12h: 10 } };
+   if (model === 'claude-ttl-fixture') return { source: 'litellm', provider: 'anthropic', modelId: `anthropic/${model}`, currency: 'USD',
+    rates: { input: 4, output: 20, cacheWrite: 5, cacheWrite1h: 8 } };
    return null;
   };
   const priceEvent = e => {
@@ -117,16 +124,18 @@ try {
     const byModel = new Map();
     for (const e of fixture.events.events) {
      if (args.agent && e.agent !== args.agent) continue;
-     const row = byModel.get(e.model) ?? { model: e.model, agents: [], providers: [], requests: 0, totalTokens: 0, customOnly: false };
-     if (!row.agents.includes(e.agent)) row.agents.push(e.agent);
-     row.requests++; row.totalTokens += e.inputTokens + e.outputTokens;
-     byModel.set(e.model, row);
+     byModel.set(e.model, { model: e.model });
     }
     for (const model of Object.keys(state.customPrices)) {
-     if (!byModel.has(model)) byModel.set(model, { model, agents: [], providers: [], requests: 0, totalTokens: 0, customOnly: true });
+     if (!byModel.has(model)) byModel.set(model, { model });
     }
     if (!args.agent || args.agent === 'opencode') {
-     byModel.set('local/demo:free', { model: 'local/demo:free', agents: ['opencode'], providers: ['local'], requests: 1, totalTokens: 100, customOnly: false });
+     byModel.set('local/demo:free', { model: 'local/demo:free' });
+    }
+    if (!args.agent) {
+     for (const model of ['claude-ttl-fixture', 'gpt-ttl-fixture', 'unknown']) {
+      byModel.set(model, { model, provider: 'private-provider' });
+     }
     }
     return {
      models: [...byModel.values()].map(r => ({ ...r, price: resolvePrice(r.model) })),
@@ -479,14 +488,46 @@ try {
  const syncBeforePrices = await page.evaluate(() => window.__USAGE__.collector.scans.length);
  await page.getByRole('button', { name: '近 7 天', exact: true }).click(); await waitTotal('1100');
  await page.getByRole('tab', { name: '模型价格', exact: true }).click();
- const pricesTable = page.locator('.prices-table');
+ const pricesTable = page.getByRole('region', { name: '模型价格表' }).getByRole('table');
  await pricesTable.waitFor();
- const extraRules = pricesTable.getByRole('row').filter({ hasText: 'gpt-fixture' }).locator('.price-rules');
- await pricesTable.getByRole('columnheader', { name: '额外规则', exact: true }).waitFor();
- assert.deepEqual(await extraRules.locator('dt').allTextContents(), ['>272K', 'batch', 'flex', 'cache_write_1h', 'cache_write_12h']);
- assert.deepEqual(await extraRules.locator('dd').allTextContents(), [
-  '$8 / $30 / $0.8 / $10', '$2 / $10 / - / -', '$2 / $10 / - / -', '- / - / - / $12', '- / - / - / $20',
+ assert.equal(await page.locator('.prices-heading').getByRole('button', { name: '添加自定义价格', exact: true }).count(), 0);
+ assert.deepEqual(await pricesTable.getByRole('columnheader').allTextContents(),
+  ['模型', '输入 / 1M', '输出 / 1M', '缓存读取 / 1M', '缓存写入 / 1M', '价格变体', '报价来源', '操作']);
+ const gptRow = pricesTable.getByRole('row').filter({ has: page.getByText('gpt-fixture', { exact: true }) });
+ const variantButton = gptRow.getByRole('button', { name: '价格变体' });
+ await gptRow.getByText('7 条', { exact: true }).waitFor();
+ assert.deepEqual(await gptRow.locator('.price-source-cell > *').allTextContents(), ['Models.dev', 'openai/gpt-fixture']);
+ await variantButton.press('Enter');
+ const variantDialog = page.getByRole('dialog', { name: /价格变体$/ });
+ assert.equal(await variantDialog.getByRole('heading').textContent(), 'gpt-fixture 价格变体');
+ assert.deepEqual(await variantDialog.getByRole('columnheader').allTextContents(), ['Tier', '上下文', '输入', '输出', '缓存读取', '缓存写入']);
+ const variantCells = () => variantDialog.locator('tbody tr').evaluateAll(rows => rows.map(row => [...row.cells].map(cell => cell.textContent)));
+ assert.deepEqual(await variantCells(), [
+  ['默认', '≤272K', '$2', '$8', '$0.2', '30m$512h$10'],
+  ['默认', '>272K', '$8', '$30', '$0.8', '30m$1012h$20'],
+  ['Batch', '≤272K', '$2', '$10', '$0.2', '30m$2.512h$5'], ['Batch', '>272K', '$4', '$15', '$0.4', '30m$512h$10'],
+  ['Flex', '≤272K', '$2', '$10', '$0.2', '30m$2.512h$5'], ['Flex', '>272K', '$4', '$15', '$0.4', '30m$512h$10'],
+  ['Priority', '≤272K', '$8', '$40', '$0.8', '30m$1012h$20'], ['Priority', '>272K', '$16', '$60', '$1.6', '30m$2012h$40'],
  ]);
+ assert.deepEqual(await variantDialog.locator('tbody tr').last().locator('.price-cache-rates .status-tag').allTextContents(), ['30m', '12h']);
+ assert.deepEqual(await variantDialog.locator('tbody tr').last().locator('.price-cache-rates .price-rate-cell').allTextContents(), ['$20', '$40']);
+ await page.keyboard.press('Escape');
+ await variantDialog.waitFor({ state: 'hidden' });
+ assert.ok(await variantButton.evaluate(button => document.activeElement === button));
+ for (const [model, ttls, rates] of [
+  ['gpt-ttl-fixture', ['30m', '12h'], ['$5', '$10']],
+  ['claude-ttl-fixture', ['5m', '1h'], ['$5', '$8']],
+ ]) {
+  const ttlRow = pricesTable.getByRole('row').filter({ has: page.getByText(model, { exact: true }) });
+  assert.deepEqual(await ttlRow.locator('.price-cache-rates .status-tag').allTextContents(), ttls);
+  assert.deepEqual(await ttlRow.locator('.price-cache-rates .price-rate-cell').allTextContents(), rates);
+  assert.equal(await ttlRow.getByRole('button', { name: '价格变体' }).count(), 0);
+  assert.equal(await ttlRow.locator('.prices-model-cell').textContent(), model);
+ }
+ assert.equal(await pricesTable.getByText('anthropic/claude-ttl-fixture', { exact: true }).count(), 1);
+ const priceModels = await pricesTable.locator('.prices-model-cell').allTextContents();
+ assert.equal(priceModels.indexOf('gpt-ttl-fixture'), priceModels.indexOf('gpt-fixture') + 1);
+ assert.equal(priceModels.indexOf('claude-ttl-fixture'), priceModels.indexOf('claude-fixture') + 1);
  const priceReads = () => page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'get_model_prices').length);
  const initialReads = await priceReads();
  const tableNode = await pricesTable.elementHandle();
@@ -499,26 +540,53 @@ try {
  await tableNode.dispose();
  const pricingHelp = page.getByRole('button', { name: '定价规则说明' });
  await pricingHelp.hover();
- await page.getByRole('tooltip').getByText('报价依次采用自定义价格、内置价格、Models.dev 参考价和 LiteLLM 参考价。', { exact: true }).waitFor();
+ const pricingTooltip = page.getByRole('tooltip');
+ await pricingTooltip.getByText('报价依次采用自定义价格、内置价格、Models.dev 参考价和 LiteLLM 参考价。', { exact: true }).waitFor();
+ await pricingTooltip.getByText('Models.dev', { exact: true }).waitFor();
+ await pricingTooltip.getByText('LiteLLM', { exact: true }).waitFor();
+ await pricingTooltip.getByText('汇率 1 USD = 7 CNY', { exact: true }).waitFor();
+ assert.ok(await pricingTooltip.locator('.prices-catalog-info').evaluate(info => {
+  const rows = [...info.querySelectorAll('.prices-source-chip')];
+  return rows.length === 2 && rows.every(row => {
+   const time = row.querySelector('time');
+   const label = row.querySelector('.prices-source-label');
+   return time.dateTime && !row.textContent.includes('·')
+    && getComputedStyle(time).color !== getComputedStyle(label).color
+    && getComputedStyle(time).textAlign === 'right'
+    && Math.abs(time.getBoundingClientRect().right - row.getBoundingClientRect().right) < 1;
+  }) && getComputedStyle(info.querySelector('.prices-fx-note')).borderTopWidth === '1px';
+ }), 'the tooltip aligns subdued timestamps to the right and separates the exchange rate');
  await page.keyboard.press('Escape');
  const freePriceRow = pricesTable.getByRole('row').filter({ hasText: 'local/demo:free' });
  assert.equal(await freePriceRow.locator('.status-tag').textContent(), '内置');
  assert.equal(await freePriceRow.getByText('$0', { exact: true }).count(), 4);
+ const unknownRow = pricesTable.getByRole('row').filter({ has: page.getByText('unknown', { exact: true }) });
+ assert.equal(await unknownRow.locator('.status-tag').textContent(), '内置');
+ assert.equal(await unknownRow.getByText('$0', { exact: true }).count(), 4);
  await freePriceRow.getByRole('button', { name: '设置价格', exact: true }).click();
  assert.equal(await page.getByLabel('输入单价', { exact: true }).inputValue(), '0');
+ assert.equal(await page.getByLabel('模型 ID', { exact: true }).inputValue(), 'local/demo:free');
+ assert.equal(await page.getByRole('searchbox', { name: '搜索参考价', exact: true }).inputValue(), 'demo:free');
  await page.getByRole('button', { name: '取消', exact: true }).click();
  await pricesTable.locator('tbody td.numeric > span').first().dblclick({ position: { x: 3, y: 6 } });
  assert.ok(await page.evaluate(() => getSelection().toString()), 'model price cells are selectable');
  await page.evaluate(() => getSelection().removeAllRanges());
- assert.ok((await page.locator('.prices-catalog-bar').textContent()).includes('Models.dev'));
- assert.ok((await page.locator('.prices-catalog-bar').textContent()).includes('LiteLLM'));
  const claudeRow = page.locator('.prices-table tbody tr', { hasText: 'claude-fixture' });
  await claudeRow.getByRole('button', { name: '设置价格', exact: true }).click();
+ const priceEditor = page.getByRole('dialog', { name: '设置自定义价格' });
+ const modelId = priceEditor.getByLabel('模型 ID', { exact: true });
+ assert.equal(await modelId.inputValue(), 'claude-fixture');
+ assert.ok(await modelId.isDisabled());
+ const refSearchInput = priceEditor.getByRole('searchbox', { name: '搜索参考价', exact: true });
+ assert.equal(await refSearchInput.inputValue(), 'claude-fixture');
+ await priceEditor.getByRole('group', { name: '参考价匹配结果', exact: true }).waitFor();
+ const referenceSearches = () => page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'search_reference_prices').map(c => c.args.query));
+ const initialReferenceSearches = await referenceSearches();
+ assert.equal(initialReferenceSearches.at(-1), 'claude-fixture');
  // 参考价搜索：修改币种/金额不重发检索，清空关键词后忽略晚到结果。
  await page.evaluate(() => { window.__USAGE__.holdRefSearch = true; });
- const refSearchInput = page.getByRole('searchbox', { name: '搜索参考价', exact: true });
  await refSearchInput.fill('gpt');
- await page.waitForFunction(() => window.__USAGE__.calls.filter(c => c.cmd === 'search_reference_prices').length === 1);
+ await page.waitForFunction(() => window.__USAGE__.calls.some(c => c.cmd === 'search_reference_prices' && c.args.query === 'gpt'));
  await page.getByLabel('输入单价', { exact: true }).fill('1000');
  await page.getByLabel('输出单价', { exact: true }).fill('2000');
  await page.getByRole('checkbox', { name: '长上下文价格' }).check();
@@ -532,7 +600,7 @@ try {
  assert.equal(await page.getByLabel('长上下文输出单价', { exact: true }).inputValue(), '28000');
  assert.equal(await page.getByLabel('输入阈值（Token）').inputValue(), '200000');
  await page.waitForTimeout(250);
- assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'search_reference_prices').length), 1, 'editing currency/rates must not re-fire reference search');
+ assert.deepEqual(await referenceSearches(), [...initialReferenceSearches, 'gpt'], 'editing currency/rates must not re-fire reference search');
  await refSearchInput.fill('');
  await page.evaluate(() => { window.__USAGE__.holdRefSearch = false; window.__USAGE__.refSearchResolvers.splice(0).forEach(r => r()); });
  await page.waitForTimeout(50);
@@ -547,8 +615,9 @@ try {
  assert.equal(await page.evaluate(() => window.__USAGE__.calls.filter(c => c.cmd === 'get_model_prices').length) - pricesBeforeSave, 1, 'custom price save must trigger exactly one model prices reload');
  assert.ok((await claudeRow.textContent()).includes('¥7,000'));
  assert.ok((await claudeRow.textContent()).includes('$1,000'));
- assert.equal(await claudeRow.locator('.price-rules dt').textContent(), '>200K');
- assert.equal(await claudeRow.locator('.price-rules dd').textContent(), '¥14,000 / ¥28,000 / - / -');
+ await claudeRow.getByRole('button', { name: '价格变体' }).click();
+ assert.deepEqual(await variantCells(), [['默认', '>200K', '¥14,000($2,000)', '¥28,000($4,000)', '—', '—']]);
+ await variantDialog.getByRole('button', { name: '关闭', exact: true }).click();
  await claudeRow.getByRole('button', { name: '编辑', exact: true }).click();
  assert.equal(await page.getByLabel('长上下文输入单价', { exact: true }).inputValue(), '14000');
  await page.getByRole('button', { name: '取消', exact: true }).click();
@@ -559,6 +628,14 @@ try {
  // 960px 最小宽度下模型价格页无横向溢出
  await page.setViewportSize({ width: 960, height: 900 });
  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+ assert.ok(await page.locator('.prices-heading').evaluate(heading => {
+  const controls = heading.querySelectorAll('h2, .segmented, .prices-search, .prices-toolbar > button');
+  const centers = Array.from(controls, control => {
+   const box = control.getBoundingClientRect();
+   return box.top + box.height / 2;
+  });
+  return Math.max(...centers) - Math.min(...centers) < 2;
+ }), 'pricing header stays in one line at the app’s minimum width');
  await page.setViewportSize({ width: 1280, height: 900 });
  // 切回统计分析，自定义价已立即生效于历史记录
  await page.getByRole('tab', { name: '统计分析', exact: true }).click();

@@ -5,7 +5,7 @@ import { requestRecordCounts } from "./metrics";
 import { summaryQuery, type UsagePeriod } from "./range";
 import type { AgentInfo } from "../types";
 import type { UsageSummary } from "./types";
-import ModelPrices, { type PriceStatusFilter } from "./ModelPrices";
+import ModelPrices, { type PriceStatusFilter } from "./pricing/ModelPrices";
 import RequestEvents, { defaultRequestSelection, type RequestSelection } from "./RequestEvents";
 import UiIcon from "../components/UiIcon";
 import Notice from "../components/Notice";
@@ -171,7 +171,6 @@ export default function UsagePanel({
         {pricesVisited && (
           <ModelPrices
             active={subTab === "prices"}
-            agents={agents}
             agent={agent}
             revision={revision}
             statusFilter={priceStatusFilter}
