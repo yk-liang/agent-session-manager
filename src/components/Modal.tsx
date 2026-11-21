@@ -8,7 +8,7 @@ interface Props {
   className?: string;
   closeLabel?: string;
   busy?: boolean;
-  onClose: () => void;
+  onClose?: () => void;
   children: ReactNode;
 }
 
@@ -16,7 +16,7 @@ export default function Modal({ title, className, closeLabel = "关闭", busy = 
   const titleId = useId();
   const dialog = useRef<HTMLDivElement>(null);
   const opener = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
-  const dismiss = useEffectEvent(() => { if (!busy) onClose(); });
+  const dismiss = useEffectEvent(() => { if (!busy) onClose?.(); });
 
   useLayoutEffect(() => {
     const element = dialog.current;
@@ -35,9 +35,14 @@ export default function Modal({ title, className, closeLabel = "关闭", busy = 
   }, []);
 
   return createPortal(
-    <div className="modal-overlay" onClick={event => {
-      if (event.target === event.currentTarget && !busy) onClose();
-    }}>
+    <div className="modal-overlay"
+      onMouseDown={event => {
+        // 点到不可关闭的遮罩时，保留弹窗的键盘焦点。
+        if (event.target === event.currentTarget && !onClose) event.preventDefault();
+      }}
+      onClick={event => {
+        if (event.target === event.currentTarget && !busy) onClose?.();
+      }}>
       <div ref={dialog} className={className ? `modal ${className}` : "modal"} role="dialog"
         aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={event => {
           if (event.key !== "Tab" || event.defaultPrevented) return;
@@ -52,9 +57,9 @@ export default function Modal({ title, className, closeLabel = "关闭", busy = 
         }}>
         <header className="modal-header">
           <h2 className="modal-title" id={titleId}>{title}</h2>
-          <button type="button" className="btn-icon btn-ghost" aria-label={closeLabel} disabled={busy} onClick={onClose}>
+          {onClose && <button type="button" className="btn-icon btn-ghost" aria-label={closeLabel} disabled={busy} onClick={onClose}>
             <UiIcon icon={X} />
-          </button>
+          </button>}
         </header>
         {children}
       </div>

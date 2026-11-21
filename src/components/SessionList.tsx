@@ -35,7 +35,6 @@ interface Props {
   loadError: string | null;
   warnings: string[];
   onRetryLoad: () => void;
-  progress: { completed: number; total: number } | null;
   failures: SessionDeleteFailure[];
   searchHits: Map<string, ConversationSearchHit>;
   searchPending: boolean;
@@ -71,7 +70,6 @@ export default function SessionList({
   loadError,
   warnings,
   onRetryLoad,
-  progress,
   failures,
   searchHits,
   searchPending,
@@ -145,7 +143,7 @@ export default function SessionList({
       {batchMode && (
         <div className="batch-toolbar">
           <div className="batch-status" role="status">
-            {progress ? `正在删除会话（${progress.completed} / ${progress.total}）` : `已选中 ${selectedCount} 个会话`}
+            已选中 {selectedCount} 个会话
           </div>
           <div className="batch-actions">
             <button type="button" onClick={onToggleAll} disabled={disabled || busy || searchPending || sessions.length === 0}>

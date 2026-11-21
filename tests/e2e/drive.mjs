@@ -177,6 +177,8 @@ const initScript = `
   window.__DELETE_FAILURES__ = {};
   window.__HOLD_DELETES__ = false;
   window.__PENDING_DELETES__ = [];
+  window.__BATCH_GUARD_START__ = null;
+  window.__HOLD_BATCH_GUARD__ = false;
   window.__FAIL_NEXT_CATALOG__ = false;
   const mock = ${JSON.stringify(mock)};
   const configByAgent = {
@@ -192,6 +194,12 @@ const initScript = `
       if (cmd === "plugin:clipboard-manager|write_text") { window.__COPIED_TEXT__ = args.text; return null; }
       if (cmd === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
       if (cmd === "cancel_conversation_search") return null;
+      if (cmd === "set_batch_delete_guard") {
+        if (args.active && window.__HOLD_BATCH_GUARD__) {
+          await new Promise((resolve, reject) => { window.__BATCH_GUARD_START__ = { resolve, reject }; });
+        }
+        return null;
+      }
       if (cmd === "read_session") {
         // 模拟慢请求，制造跨 agent 竞态窗口
         await new Promise((r) => setTimeout(r, 1200));
@@ -272,7 +280,7 @@ const browser =
     ? await webkit.launch({ headless: true })
     : await chromium.launch({ channel: "chrome", headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-await page.addInitScript(initScript + "\n(" + configMockBootstrap.toString() + ")(" + JSON.stringify(configFixtures) + ");");
+await page.addInitScript(initScript + "\n(" + configMockBootstrap.toString() + ")(" + JSON.stringify({ fixtures: configFixtures, native: true }) + ");");
 const pageErrors = [];
 page.on("console", (m) => {
   console.log("[console]", m.type(), m.text());
@@ -593,6 +601,19 @@ assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDe
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
 const scansBeforeBatch = await page.evaluate(() => window.__CATALOG_CALLS__);
+await page.evaluate(() => { window.__HOLD_BATCH_GUARD__ = true; });
+await page.locator(".modal-actions .danger").click();
+await page.waitForFunction(() => window.__BATCH_GUARD_START__);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+await page.evaluate(() => {
+  window.__BATCH_GUARD_START__.reject(new Error("mock guard failure"));
+  window.__BATCH_GUARD_START__ = null;
+});
+await page.getByRole("status").filter({ hasText: "无法启用批量删除保护" }).waitFor();
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+assert.equal(await page.locator(".session-card input:checked").count(), 3);
+await page.getByRole("button", { name: "删除所选", exact: true }).click();
+const guardedBatchStart = await page.evaluate(() => window.__INVOKE_LOG__.length);
 await page.evaluate(() => {
   window.__DELETE_FAILURES__[JSON.stringify(["qoder", "project-a", "will-fail"])] = "mock permission denied";
   window.__HOLD_DELETES__ = true;
@@ -600,32 +621,69 @@ await page.evaluate(() => {
   confirm.click();
   confirm.click();
 });
+await page.waitForFunction(() => window.__BATCH_GUARD_START__);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true }))), false);
+await page.evaluate(() => {
+  window.__CONFIG_TEST__.emit("config-exit-requested");
+  window.__HOLD_BATCH_GUARD__ = false;
+  window.__BATCH_GUARD_START__.resolve();
+  window.__BATCH_GUARD_START__ = null;
+});
+assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 0);
 await page.waitForFunction(() => window.__PENDING_DELETES__.length === 1);
 assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), batchStart + 1);
-assert.ok((await page.locator(".batch-status").textContent()).includes("0 / 3"));
-assert.ok(await page.getByRole("button", { name: "完成", exact: true }).isDisabled());
+const progressDialog = page.getByRole("dialog", { name: "正在删除会话" });
+const deletionBar = progressDialog.getByRole("progressbar", { name: "批量删除进度" });
+await deletionBar.waitFor({ timeout: 3000 });
+assert.equal(await deletionBar.getAttribute("value"), "0");
+assert.equal(await deletionBar.getAttribute("max"), "3");
+const dialogBounds = await progressDialog.boundingBox();
+const viewport = page.viewportSize();
+assert.ok(Math.abs(dialogBounds.x + dialogBounds.width / 2 - viewport.width / 2) <= 1);
+assert.ok(Math.abs(dialogBounds.y + dialogBounds.height / 2 - viewport.height / 2) <= 1);
+await page.keyboard.press("Escape");
+await page.mouse.click(8, 8);
+await page.keyboard.press("Tab");
+assert.ok(await progressDialog.isVisible());
+assert.equal(await progressDialog.getByRole("button").count(), 0);
+assert.equal(await page.locator(".topbar-actions button").evaluate(button => {
+  button.focus();
+  return document.activeElement === button;
+}), false, "background controls cannot receive focus while the dialog is open");
+assert.ok(await progressDialog.evaluate(dialog => dialog.contains(document.activeElement)));
+assert.ok(await page.locator(".session-list-options button").isDisabled());
 assert.ok(await page.locator('.search-box input[type="search"]').isDisabled());
-assert.ok(await page.getByRole("checkbox", { name: "显示空会话", exact: true }).isDisabled());
-assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).count(), 0);
+assert.ok(await page.locator(".session-list-filters input").first().isDisabled());
 assert.ok(await page.locator(".tabs button", { hasText: "配置" }).isDisabled());
-assert.ok(await page.getByRole("combobox", { name: "当前 Agent" }).isDisabled());
+const agentDuringDelete = page.locator('[aria-label="当前 Agent"]');
+assert.ok(await agentDuringDelete.isDisabled());
 assert.ok(await page.locator(".sidebar-projects-header button").isDisabled());
 assert.ok(await page.locator(".session-card input").first().isDisabled());
-await page.getByRole("combobox", { name: "当前 Agent" }).evaluate(button => {
+await agentDuringDelete.evaluate(button => {
   button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
 });
 assert.equal(await page.getByRole("listbox", { name: "Agent", exact: true }).count(), 0);
-assert.equal(await page.getByRole("combobox", { name: "当前 Agent" }).getAttribute("value"), "qoder");
+assert.equal(await agentDuringDelete.getAttribute("value"), "qoder");
 await page.evaluate(() => window.__PENDING_DELETES__.shift()());
 await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 2 && window.__PENDING_DELETES__.length === 1, batchStart);
-assert.ok((await page.locator(".batch-status").textContent()).includes("1 / 3"));
+assert.equal(await deletionBar.getAttribute("value"), "1");
+await page.evaluate(() => window.__PENDING_DELETES__.shift()());
+await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 3 && window.__PENDING_DELETES__.length === 1, batchStart);
+assert.equal(await deletionBar.getAttribute("value"), "2", "failed attempts count toward progress");
 await page.evaluate(() => {
   window.__FAIL_NEXT_CATALOG__ = true;
   window.__HOLD_DELETES__ = false;
   window.__PENDING_DELETES__.shift()();
 });
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
+await progressDialog.waitFor({ state: "detached" });
+const guardedOperations = await page.evaluate((before) => window.__INVOKE_LOG__.slice(before)
+  .filter(x => x.cmd === "set_batch_delete_guard" || x.cmd === "delete_session")
+  .map(x => x.cmd === "delete_session" ? x.cmd : x.args.active), guardedBatchStart);
+assert.deepEqual(guardedOperations, [true, "delete_session", "delete_session", "delete_session", false]);
+assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true }))), true);
 await page.getByRole("alert", { name: "无法读取会话列表", exact: true })
   .locator(".read-error-summary", { hasText: "mock catalog refresh failure" }).waitFor();
 assert.equal(await page.locator(".session-card").count(), 2);
@@ -648,7 +706,7 @@ assert.ok((await page.locator(".session-card").textContent()).includes("保留�
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), batchStart + 4);
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
-console.log("STEP13b sequential project-qualified deletion, duplicate-submit protection, partial failure and retry: OK");
+console.log("STEP13b modal batch deletion progress, duplicate-submit protection, partial failure and retry: OK");
 
 await page.getByRole("button", { name: "完成", exact: true }).click();
 await page.getByRole("button", { name: "批量管理", exact: true }).click();

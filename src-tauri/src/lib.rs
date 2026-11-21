@@ -11,12 +11,27 @@ use agents::profiles::workspace::{ChangeKind, ChangePreview, Validation, Workspa
 use agents::profiles::{CurrentConfig, ProfileSummary};
 use agents::{AgentInfo, CatalogFilter, SessionDetail};
 use session_catalog::{SessionCatalogs, Snapshot};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
 /// 位 0 表示有未保存的草稿，位 1 表示正在修改配置。
 #[derive(Default)]
 struct ConfigEditGuard(AtomicU8);
+
+/// 从第一条删除前持续到整批结束；配置编辑的状态更新不会覆盖它。
+#[derive(Default)]
+struct BatchDeleteGuard(AtomicBool);
+
+fn exit_blocked(app: &tauri::AppHandle) -> bool {
+    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
+        return true;
+    }
+    if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
+        let _ = app.emit("config-exit-requested", ());
+        return true;
+    }
+    false
+}
 
 #[cfg(target_os = "macos")]
 fn install_guarded_quit(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -59,10 +74,18 @@ fn set_config_guard(state: tauri::State<'_, ConfigEditGuard>, dirty: bool, busy:
 }
 
 #[tauri::command]
+fn set_batch_delete_guard(state: tauri::State<'_, BatchDeleteGuard>, active: bool) {
+    state.0.store(active, Ordering::SeqCst);
+}
+
+#[tauri::command]
 fn confirm_config_exit(
     app: tauri::AppHandle,
     state: tauri::State<'_, ConfigEditGuard>,
 ) -> Result<(), String> {
+    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
+        return Err("批量删除仍在进行，请稍后退出。".into());
+    }
     if state.0.load(Ordering::SeqCst) & 2 != 0 {
         return Err("配置操作仍在进行，请稍后退出。".into());
     }
@@ -523,6 +546,7 @@ mod command_tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(ConfigEditGuard::default())
+        .manage(BatchDeleteGuard::default())
         .manage(session_watch::SessionWatcher::default())
         .manage(std::sync::Arc::new(SessionCatalogs::default()))
         .setup(|app| {
@@ -551,12 +575,8 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "asm-guarded-quit" {
-                if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
-                    let _ = app.emit("config-exit-requested", ());
-                } else {
-                    app.exit(0);
-                }
+            if event.id().as_ref() == "asm-guarded-quit" && !exit_blocked(app) {
+                app.exit(0);
             }
         })
         .on_window_event(|window, event| {
@@ -566,9 +586,8 @@ pub fn run() {
                 let _ = window.emit("session-window-focus", focused);
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
+                if exit_blocked(window.app_handle()) {
                     api.prevent_close();
-                    let _ = window.emit("config-exit-requested", ());
                 }
             }
         })
@@ -612,6 +631,7 @@ pub fn run() {
             preview_config_change,
             apply_config_change,
             set_config_guard,
+            set_batch_delete_guard,
             confirm_config_exit,
             delete_profile,
             update_config_file
@@ -622,11 +642,10 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<usage::collector::Desktop>().stop();
             }
-            // 外部退出请求也需要检查配置草稿。
+            // 外部退出请求也要遵守与窗口和菜单相同的保护。
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
+                if exit_blocked(app) {
                     api.prevent_exit();
-                    let _ = app.emit("config-exit-requested", ());
                 }
             }
         });

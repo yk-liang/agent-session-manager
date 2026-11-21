@@ -100,6 +100,31 @@
 .batch-actions { display: flex; justify-content: space-between; gap: 8px; }
 .batch-hint { color: var(--text-dim); font-size: 11px; margin-top: 8px; }
 
+.batch-delete-progress { width: 360px; }
+.batch-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.batch-delete-progress progress {
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  appearance: none;
+  border: 0;
+  border-radius: 99px;
+  overflow: hidden;
+  background: var(--border);
+}
+.batch-delete-progress progress::-webkit-progress-bar { background: var(--border); }
+.batch-delete-progress progress::-webkit-progress-value { background: var(--accent); border-radius: inherit; }
+.batch-delete-progress p { color: var(--text-dim); font-size: var(--text-meta); }
+
 .batch-failures {
   color: var(--danger);
   font-size: 12px;

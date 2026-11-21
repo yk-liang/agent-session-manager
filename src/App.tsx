@@ -8,6 +8,7 @@ import AgentSwitcher from "./components/AgentSwitcher";
 import SessionList from "./components/SessionList";
 import SessionDetailView from "./components/SessionDetail";
 import SessionDeleteDialog, { type SessionDeletion, type SessionDeleteTarget } from "./components/SessionDeleteDialog";
+import BatchDeleteProgress from "./components/BatchDeleteProgress";
 import ConfigPanel from "./components/ConfigPanel";
 import UsagePanel from "./usage/UsagePanel";
 import ConfirmDialog from "./components/ConfirmDialog";
@@ -56,6 +57,8 @@ export default function App() {
   const [operation, setOperation] = useState<SessionOperation | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
   const mutationRunning = useRef(false);
+  const batchDeleting = useRef(false);
+  const batchDeleteProgress = operation?.kind === "delete" ? operation.progress : null;
   const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -86,10 +89,13 @@ export default function App() {
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (configActivityRef.current.dirty || configActivityRef.current.busy) { event.preventDefault(); event.returnValue = ""; }
+      if (batchDeleting.current || configActivityRef.current.dirty || configActivityRef.current.busy) {
+        event.preventDefault(); event.returnValue = "";
+      }
     };
     window.addEventListener("beforeunload", beforeUnload);
     const unlisten = isTauri() ? listen("config-exit-requested", () => {
+      if (batchDeleting.current) return;
       const activity = configActivityRef.current;
       if (activity.busy) { showToast("配置操作仍在进行，请稍后退出。", true); return; }
       const exit = () => { void api.confirmConfigExit().catch((e) => showToast(String(e), true)); };
@@ -365,12 +371,19 @@ export default function App() {
     const { agent, sessions: targets, mode } = operation.request;
     const batch = mode === "batch";
     const total = targets.length;
+    const nativeBatch = batch && isTauri();
     mutationRunning.current = true;
+    batchDeleting.current = batch;
     setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
-    if (batch) setBatchFailures([]);
     const succeeded: SessionMeta[] = [];
     const failures: SessionDeleteFailure[] = [];
     try {
+      if (nativeBatch) {
+        // 未收到原生退出保护的确认前不执行任何删除。
+        try { await api.setBatchDeleteGuard(true); }
+        catch (error) { showToast(`无法启用批量删除保护：${String(error)}`, true); return; }
+      }
+      if (batch) setBatchFailures([]);
       for (const session of targets) {
         try {
           await api.deleteSession(agent.id, session.projectDir, session.sessionId);
@@ -400,13 +413,16 @@ export default function App() {
       }
       if (batch || succeeded.length) refreshCatalog();
     } finally {
+      if (nativeBatch) await api.setBatchDeleteGuard(false)
+        .catch(error => showToast(`无法解除批量删除保护：${String(error)}`, true));
+      batchDeleting.current = false;
       setOperation(null);
       mutationRunning.current = false;
     }
   };
 
   return (
-    <div className="app">
+    <div className="app" inert={batchDeleteProgress !== null}>
       <header className="topbar">
         <AgentSwitcher agents={availableAgents} value={tab === "usage" ? usageAgent : selectedAgent} allowAll={tab === "usage"}
           counts={tab === "usage" ? requestCounts : tab === "sessions" ? sessionCounts.counts : undefined}
@@ -474,7 +490,6 @@ export default function App() {
             loadError={catalogError}
             warnings={catalogWarnings}
             onRetryLoad={refreshCatalog}
-            progress={operation?.kind === "delete" ? operation.progress : null}
             failures={batchFailures}
             searchHits={contentSearch.hits}
             searchPending={contentSearch.pending}
@@ -539,6 +554,7 @@ export default function App() {
         onConfirm={confirmDeletion}
         onCancel={() => setOperation(current => current?.kind === "confirmDelete" ? null : current)}
       />}
+      {batchDeleteProgress && <BatchDeleteProgress {...batchDeleteProgress} />}
       <div className={toast ? toast.error ? "toast error" : "toast" : undefined}
         role="status" aria-live="polite" aria-atomic="true">
         {toast?.msg}
