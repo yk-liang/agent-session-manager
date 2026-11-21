@@ -264,6 +264,7 @@
 /* 归档卡降低强调但保持可操作；角标在卡片右上角斜切，标题与悬停操作避开它。 */
 .session-card.archived:not(.active) { background: transparent; border-color: var(--border); }
 .session-card.archived:not(.active):hover { background: var(--bg-hover); }
+.session-card.selectable:has(input:checked) { background: var(--accent-soft); }
 .session-card.archived .session-card-title { margin-right: 22px; color: var(--text-dim); font-weight: 500; }
 .session-card.archived .session-card-sub { color: var(--text-muted); }
 

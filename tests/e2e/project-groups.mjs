@@ -90,6 +90,17 @@ try {
   pass("membership refresh restores directory grouping and clears a vanished virtual selection");
 
   await page.getByRole("button",{name:"批量管理",exact:true}).click();
+  const first = page.locator(".session-card", { hasText: "未归属甲" });
+  const second = page.locator(".session-card", { hasText: "未归属乙" });
+  await first.locator(".session-card-title").click();
+  await page.getByText("普通回答", { exact: true }).waitFor();
+  assert.ok(await first.locator("input").isChecked());
+  await second.locator("input").check();
+  await page.getByText("正文中的归组针，仅属于乙。", { exact: true }).waitFor();
+  await first.locator(".session-card-title").click();
+  await page.getByText("普通回答", { exact: true }).waitFor();
+  assert.ok(!(await first.locator("input").isChecked()));
+  assert.ok(await second.locator("input").isChecked());
   await page.getByRole("button",{name:"全选结果",exact:true}).click();
   await page.getByRole("button",{name:"删除所选",exact:true}).click();
   await page.getByRole("dialog").getByRole("button",{name:"移入废纸篓（2）",exact:true}).click();
