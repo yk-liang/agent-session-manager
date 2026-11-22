@@ -1,15 +1,17 @@
 import { useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
+import CopyButton from "./CopyButton";
 import UiIcon from "./UiIcon";
 import type { SessionMeta } from "../types";
 import ModelLabel from "./ModelLabel";
 import useDismiss from "./useDismiss";
 import { formatClient } from "../utils";
 
-export default function SessionInfo({ meta, agentName, models = [] }: {
+export default function SessionInfo({ meta, agentName, models = [], onCopyError }: {
   meta: SessionMeta;
   agentName: string;
   models?: string[];
+  onCopyError: (error: unknown) => void;
 }) {
   const currentModel = meta.model || models[0];
   const otherModels = models.filter((model) => model !== currentModel);
@@ -54,7 +56,10 @@ export default function SessionInfo({ meta, agentName, models = [] }: {
             {meta.cwd && (
               <div>
                 <dt>工作目录</dt>
-                <dd>{meta.cwd}</dd>
+                <dd className="session-info-copy">
+                  <span>{meta.cwd}</span>
+                  <CopyButton className="btn-icon btn-ghost" value={meta.cwd} label="复制工作目录" onError={onCopyError} />
+                </dd>
               </div>
             )}
             <div>

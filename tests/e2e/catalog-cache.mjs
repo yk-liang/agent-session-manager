@@ -146,7 +146,10 @@ try {
   const readsBeforeShortcuts = await page.evaluate(() => window.__CACHE_TEST__.calls.filter(call => call.command === "read_session").length);
   const targetCard = cards.filter({ hasText: /^Qoder question/ });
   const shortcuts = targetCard.getByRole("group", { name: "会话快捷操作" });
+  const cardTime = targetCard.locator(".session-card-time");
+  assert.ok(await cardTime.isVisible());
   await targetCard.hover();
+  assert.equal(await cardTime.isVisible(), false);
   const copy = shortcuts.getByRole("button", { name: "复制恢复命令（Qoder question）" });
   await copy.hover();
   assert.ok(await copy.locator(".session-action-tooltip", { hasText: "复制恢复命令" }).isVisible());

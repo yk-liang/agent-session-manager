@@ -11,7 +11,10 @@ try {
   await page.clock.install({ time: new Date('2026-10-28T12:00:00Z') });
   await page.clock.pauseAt(new Date('2026-10-28T12:00:01Z'));
   await addUsageInitScript(page, (_, createCollector) => {
-    const rows = ['first', 'second'].map(sessionId => ({ sessionId, title: `${sessionId} session`, projectDir: 'project', cwd: '/tmp/project',
+    const rows = [
+      { sessionId: 'first', cwd: '/tmp/project' },
+      { sessionId: 'second', cwd: '/private/tmp/workspace/very-long-directory-name-for-overflow-check' },
+    ].map(({ sessionId, cwd }) => ({ sessionId, title: `${sessionId} session`, projectDir: 'project', cwd,
       model: null, firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1, sizeBytes: 100, hasTranscript: true }));
     const state = window.__FEEDBACK__ = { rows, catalogs: 0, holdCatalog: false, failCatalog: false, releaseCatalog: null, copyMode: 'success', copied: [], releaseCopy: null, holdSync: false, releaseSync: null, total: 0, listeners: {}, listenerId: 0, watch: { generation: 0, agent: null } };
     state.emit = (event, payload) => {
@@ -56,15 +59,44 @@ try {
     }) };
   });
   await page.goto(baseURL);
+  const secondCard = page.locator('.session-card', { hasText: 'second session' });
+  const secondPath = secondCard.locator('.session-project-path');
+  const secondPathIcon = secondPath.locator('.session-path-copy-icon');
+  await secondCard.locator('.session-card-title').hover();
+  assert.equal(await secondPathIcon.isVisible(), false, 'hovering the card must not show the path copy icon');
+  const pathColor = await secondPath.evaluate(el => getComputedStyle(el).color);
+  await secondPath.hover();
+  assert.equal(await secondPath.locator('.lucide-copy').isVisible(), true);
+  assert.equal(await secondPath.evaluate(el => getComputedStyle(el).color), pathColor, 'hovering the path tag should not highlight its text');
+  const bounds = await secondCard.evaluate(card => ({
+    cardRight: card.getBoundingClientRect().right,
+    pathRight: card.querySelector('.session-project-path').getBoundingClientRect().right,
+  }));
+  assert.ok(bounds.pathRight <= bounds.cardRight - 10, `hovering a long path tag must not overflow the card: ${JSON.stringify(bounds)}`);
+  await secondPath.click();
+  await page.mouse.move(0, 0);
+  await secondPath.locator('.lucide-check').waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__FEEDBACK__.copied), ['/private/tmp/workspace/very-long-directory-name-for-overflow-check']);
+  assert.equal(await page.locator('.detail-title').count(), 0, 'copying a card path should not open the session');
+  await page.clock.runFor(2100);
+  await secondPathIcon.waitFor({ state: 'hidden' });
   await page.locator('.session-card', { hasText: 'first session' }).click();
   await page.evaluate(() => window.__FEEDBACK__.emit('session-window-focus', true));
+  await page.getByRole('button', { name: '更多信息', exact: true }).click();
+  const copyCwd = page.getByRole('button', { name: '复制工作目录', exact: true });
+  await copyCwd.click();
+  await copyCwd.locator('.lucide-check').waitFor();
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), '/tmp/project');
+  await page.clock.runFor(2100);
+  await copyCwd.locator('.lucide-copy').waitFor();
+  await page.keyboard.press('Escape');
   const copy = page.locator('.session-id');
   const size = async () => copy.evaluate(el => ({ width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height }));
   const originalSize = await size();
   await copy.click();
   await copy.locator('.lucide-check').waitFor();
   assert.deepEqual(await size(), originalSize, 'success must not change the button dimensions');
-  assert.deepEqual(await page.evaluate(() => window.__FEEDBACK__.copied), ['first']);
+  assert.equal(await page.evaluate(() => window.__FEEDBACK__.copied.at(-1)), 'first');
   assert.equal(await page.locator('.toast').count(), 0, 'small copy buttons should not produce success toasts');
   await page.clock.runFor(1500);
   assert.equal(await copy.getAttribute('data-copied'), 'true');

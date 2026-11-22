@@ -107,6 +107,9 @@
 .session-info-popover dl > div + div { margin-top: 10px; }
 .session-info-popover dt { color: var(--text-dim); }
 .session-info-popover dd { color: var(--text); overflow-wrap: anywhere; user-select: text; }
+.session-info-copy { display: flex; align-items: flex-start; gap: 6px; }
+.session-info-copy > span { min-width: 0; }
+.session-info-copy .copy-button { margin: -3px -4px -3px 0; }
 .session-info-popover .model-label { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .session-model-history dd { display: flex; flex-direction: column; gap: 5px; }
 

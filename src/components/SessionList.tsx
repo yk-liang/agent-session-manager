@@ -9,6 +9,7 @@ import HighlightedText from "./HighlightedText";
 import SearchField from "./SearchField";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
+import CopyButton from "./CopyButton";
 import { Checkbox, CheckboxField } from "./Checkbox";
 
 interface Props {
@@ -181,28 +182,42 @@ export default function SessionList({
             const title = s.title || "无标题";
             const hidePath = hiddenPathSessionKeys?.has(key) ?? false;
             const displayPath = displayRoots?.get(key) ?? s.cwd;
+            const copyPath = s.cwd ?? displayPath;
             const cardTitle = hidePath ? s.cwd ?? undefined : undefined;
             const cardClass = `session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}`;
-            const content = (
+            const body = (
               <>
-                <span className="session-card-title">{title}</span>
+                <span className="session-card-header">
+                  <span className="session-card-title">{title}</span>
+                  <time className="session-card-time" dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>
+                    {relativeTime(s.lastTs)}
+                  </time>
+                </span>
                 {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
+                  {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
+                  {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
+                  <ModelLabel model={s.model} badge />
                   <span className="session-card-stats">
                     {statsKnown && <span>{s.realUserCount + s.assistantTextCount} 条消息</span>}
                     {s.sizeBytes != null && <span className="session-card-size">{formatSize(s.sizeBytes)}</span>}
                   </span>
-                  <time dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
-                </span>
-                <span className="session-card-badges">
-                  {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
-                  {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
-                  <ModelLabel model={s.model} badge />
-                  {showPaths && !hidePath && displayPath && <span className="status-tag session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
                 </span>
                 {s.archived && <span className="archived-ribbon"><span>已归档</span></span>}
               </>
             );
+            const pathButton = showPaths && !hidePath && displayPath && copyPath ? (
+              <CopyButton
+                className="status-tag session-project-path"
+                value={copyPath}
+                label={`复制路径：${copyPath}`}
+                title={copyPath}
+                iconClassName="session-path-copy-icon"
+                onError={error => toast(`复制路径失败：${String(error)}`, true)}
+              >
+                <span className="session-project-path-text">{shortPath(displayPath)}</span>
+              </CopyButton>
+            ) : null;
             return (
               <div className="session-card-row" key={item.key} data-index={item.index}
                 ref={list.measureElement} style={{ top: item.start }}>
@@ -214,15 +229,19 @@ export default function SessionList({
                       disabled={disabled || busy || searchPending}
                       aria-label={`选择会话：${title}（${s.projectDir}）`}
                     />
-                    <div className="session-card-content">{content}</div>
+                    <div className="session-card-content">
+                      {body}
+                      {pathButton}
+                    </div>
                   </label>
                 ) : (
                   <div className={cardClass} title={cardTitle}>
                     <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
-                      {content}
+                      {body}
                     </button>
                     {agent && <SessionActions agent={agent} session={s} onRequestDelete={onRequestDelete}
                       onToggleArchive={onToggleArchive} toast={toast} compact disabled={disabled} />}
+                    {pathButton}
                   </div>
                 )}
               </div>

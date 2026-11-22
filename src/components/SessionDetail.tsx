@@ -112,7 +112,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           </time>}
           <div className="detail-meta-actions">
             {outline.trigger}
-            <SessionInfo key={`info:${key}`} meta={meta} agentName={agent.displayName} models={models} />
+            <SessionInfo key={`info:${key}`} meta={meta} agentName={agent.displayName} models={models} onCopyError={reportCopyError} />
           </div>
         </div>
         <div className="detail-toolbar">
