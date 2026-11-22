@@ -57,9 +57,17 @@ try {
   assert.ok((await page.getByRole("button",{name:/^全部会话/}).textContent()).includes("4 个会话"));
   assert.equal(await page.locator(".session-card .session-project-path").count(),2);
   assert.equal(await page.locator(".session-card",{hasText:"未归属乙"}).getAttribute("title"),"/tmp/task-b");
+  const missingPath = "/Users/demo/Documents/Codex/2026-10-16/task-a";
+  const all = page.locator(".sidebar-projects-header .project-item");
+  assert.equal(await all.locator(".project-icon.lucide-folders").count(), 1);
+  assert.equal(await group.locator(".project-icon.lucide-folders").count(), 1);
+  const manual = page.locator('.sidebar-project-list .project-item[title="/Users/demo/Documents/Codex/manual"]');
+  assert.equal(await manual.locator(".project-icon.lucide-folder").count(), 1);
   const missing = page.locator(".sidebar-project-list .project-item.missing");
   assert.equal(await missing.count(), 1);
-  assert.equal(await missing.locator(".status-tag").textContent(), "不存在");
+  assert.equal(await missing.locator(".project-icon.lucide-folder-x").count(), 1);
+  assert.equal(await missing.locator(".status-tag").count(), 0);
+  assert.equal(await missing.getAttribute("title"), `${missingPath}（目录不存在）`);
   assert.equal(await group.getByText("不存在").count(), 0);
   await missing.click();
   assert.equal(await page.locator(".session-card").count(), 1);
@@ -69,6 +77,7 @@ try {
     window.dispatchEvent(new Event("focus"));
   });
   await missing.waitFor({ state: "detached" });
+  assert.equal(await page.locator(`.sidebar-project-list .project-item[title="${missingPath}"] .project-icon.lucide-folder`).count(), 1);
   pass("explicit projectless IDs form one group; source directories stay hidden on those cards only");
 
   await group.click();

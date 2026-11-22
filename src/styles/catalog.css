@@ -42,7 +42,12 @@
 .project-item:hover { background: var(--bg-hover); }
 .project-item.active { background: var(--accent-soft); }
 
+.project-heading { display: flex; align-items: center; gap: 6px; }
+.project-icon { color: var(--text-dim); }
+
 .project-path {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
@@ -50,12 +55,9 @@
   text-overflow: ellipsis;
 }
 
-.project-item.active .project-path { color: var(--accent); font-weight: 600; }
-.project-item.missing :is(.project-path, .project-meta) { color: var(--text-muted); }
-
-.project-heading { display: flex; align-items: center; gap: 6px; }
-.project-heading .project-path { flex: 1; min-width: 0; }
-.project-heading .status-tag { flex: none; }
+.project-item.missing :is(.project-icon, .project-path, .project-meta) { color: var(--text-muted); }
+.project-item.active :is(.project-icon, .project-path) { color: var(--accent); }
+.project-item.active .project-path { font-weight: 600; }
 
 .project-meta,
 .session-card-sub {
