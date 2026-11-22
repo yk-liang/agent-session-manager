@@ -10,6 +10,7 @@ import SearchField from "./SearchField";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
 import CopyButton from "./CopyButton";
+import PathLabel from "./PathLabel";
 import { Checkbox, CheckboxField } from "./Checkbox";
 
 interface Props {
@@ -207,16 +208,18 @@ export default function SessionList({
               </>
             );
             const pathButton = showPaths && !hidePath && displayPath && copyPath ? (
-              <CopyButton
-                className="status-tag session-project-path"
-                value={copyPath}
-                label={`复制路径：${copyPath}`}
-                title={copyPath}
-                iconClassName="session-path-copy-icon"
-                onError={error => toast(`复制路径失败：${String(error)}`, true)}
-              >
-                <span className="session-project-path-text">{shortPath(displayPath)}</span>
-              </CopyButton>
+              <div className="session-card-path">
+                <CopyButton
+                  className="status-tag session-project-path"
+                  value={copyPath}
+                  label={`复制路径：${copyPath}`}
+                  title={copyPath}
+                  iconClassName="session-path-copy-icon"
+                  onError={error => toast(`复制路径失败：${String(error)}`, true)}
+                >
+                  <PathLabel path={shortPath(displayPath)} className="session-project-path-text" bounds=".session-card-path" reservedWidth={30} />
+                </CopyButton>
+              </div>
             ) : null;
             return (
               <div className="session-card-row" key={item.key} data-index={item.index}

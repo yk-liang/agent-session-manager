@@ -13,7 +13,7 @@ try {
   await addUsageInitScript(page, (_, createCollector) => {
     const rows = [
       { sessionId: 'first', cwd: '/tmp/project' },
-      { sessionId: 'second', cwd: '/private/tmp/workspace/very-long-directory-name-for-overflow-check' },
+      { sessionId: 'second', cwd: '/private/tmp/workspace/nested/project-overflow-check' },
     ].map(({ sessionId, cwd }) => ({ sessionId, title: `${sessionId} session`, projectDir: 'project', cwd,
       model: null, firstTs: null, lastTs: null, userCount: 1, assistantCount: 1, realUserCount: 1, assistantTextCount: 1, sizeBytes: 100, hasTranscript: true }));
     const state = window.__FEEDBACK__ = { rows, catalogs: 0, holdCatalog: false, failCatalog: false, releaseCatalog: null, copyMode: 'success', copied: [], releaseCopy: null, holdSync: false, releaseSync: null, total: 0, listeners: {}, listenerId: 0, watch: { generation: 0, agent: null } };
@@ -62,6 +62,9 @@ try {
   const secondCard = page.locator('.session-card', { hasText: 'second session' });
   const secondPath = secondCard.locator('.session-project-path');
   const secondPathIcon = secondPath.locator('.session-path-copy-icon');
+  const secondPathText = await secondPath.textContent();
+  assert.ok(secondPathText.startsWith('/p/') && secondPathText.endsWith('/project-overflow-check'),
+    `expected fish-abbreviated path, got: ${secondPathText}`);
   await secondCard.locator('.session-card-title').hover();
   assert.equal(await secondPathIcon.isVisible(), false, 'hovering the card must not show the path copy icon');
   const pathColor = await secondPath.evaluate(el => getComputedStyle(el).color);
@@ -76,7 +79,7 @@ try {
   await secondPath.click();
   await page.mouse.move(0, 0);
   await secondPath.locator('.lucide-check').waitFor();
-  assert.deepEqual(await page.evaluate(() => window.__FEEDBACK__.copied), ['/private/tmp/workspace/very-long-directory-name-for-overflow-check']);
+  assert.deepEqual(await page.evaluate(() => window.__FEEDBACK__.copied), ['/private/tmp/workspace/nested/project-overflow-check']);
   assert.equal(await page.locator('.detail-title').count(), 0, 'copying a card path should not open the session');
   await page.clock.runFor(2100);
   await secondPathIcon.waitFor({ state: 'hidden' });
