@@ -15,8 +15,8 @@ fn context_visibility_pi_tree_summaries_and_extensions() {
         json!({"type":"compaction","id":"compact","parentId":"injected","summary":"context-secret compacted history","firstKeptEntryId":"user","tokensBefore":4000}),
         json!({"type":"branch_summary","id":"branch","parentId":"compact","summary":"context-secret previous branch","fromId":"abandoned"}),
         json!({"type":"message","id":"skill","parentId":"branch","message":{"role":"user","content":"<skill name=\"demo\" location=\"/tmp/demo/SKILL.md\">\ncontext-secret skill instructions\n</skill>\n\nuser skill request"}}),
-        json!({"type":"message","id":"answer","parentId":"skill","message":{"role":"assistant","content":[{"type":"text","text":"visible-answer"}]}}),
-        json!({"type":"custom","id":"state","parentId":"answer","data":{"internal":"not LLM context"}}),
+        json!({"type":"message","id":"answer","parentId":"skill","timestamp":"2026-10-27T00:05:00Z","message":{"role":"assistant","content":[{"type":"text","text":"visible-answer"}]}}),
+        json!({"type":"custom","id":"state","parentId":"answer","timestamp":"2026-10-28T00:00:00Z","data":{"internal":"not LLM context"}}),
     ];
     fs::write(
         &file,
@@ -29,6 +29,7 @@ fn context_visibility_pi_tree_summaries_and_extensions() {
     let summary = summary.unwrap();
     assert_eq!(summary.meta.real_user_count, 2);
     assert_eq!(summary.meta.assistant_text_count, 1);
+    assert_eq!(summary.meta.last_ts.as_deref(), Some("2026-10-27T00:05:00Z"));
     let detail = read_session_in(dir.path(), "project", "pi-context").unwrap();
     assert_eq!(
         detail

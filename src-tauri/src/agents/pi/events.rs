@@ -8,6 +8,14 @@ pub(super) fn timestamp(entry: &Value) -> Option<String> {
         .or_else(|| entry["timestamp"].as_i64().or_else(|| entry["message"]["timestamp"].as_i64()).and_then(ms_to_iso))
 }
 
+pub(super) fn is_conversation_message(entry: &Value) -> bool {
+    entry["type"] == "message"
+        && matches!(
+            entry["message"]["role"].as_str(),
+            Some("user" | "assistant" | "toolResult" | "bashExecution")
+        )
+}
+
 fn message_event(entry: &Value, cwd: Option<&str>, role: &str, content: Value) -> Value {
     json!({"type":role,"uuid":entry["id"],"timestamp":timestamp(entry),"cwd":cwd,
         "message":{"role":role,"content":content}})

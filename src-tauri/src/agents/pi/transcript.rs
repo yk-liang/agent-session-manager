@@ -73,21 +73,29 @@ pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi>
     let mut first_user_text = None;
     let mut events = Vec::new();
     for entry in active_branch(&entries, version) {
-        if let Some(timestamp) = events::timestamp(entry) {
-            meta.last_ts = Some(timestamp);
+        if events::is_conversation_message(entry) {
+            if let Some(timestamp) = events::timestamp(entry) {
+                if meta.first_ts.is_none() {
+                    meta.first_ts = Some(timestamp.clone());
+                }
+                meta.last_ts = Some(timestamp);
+            }
         }
         let kind = entry["type"].as_str();
-        if kind == Some("session_info") {
-            name = nonempty(&entry["name"]);
-        }
         let message = &entry["message"];
-        let next_model = match kind {
-            Some("model_change") => nonempty(&entry["modelId"]),
-            Some("message") if message["role"] == "assistant" => nonempty(&message["model"]),
-            _ => None,
-        };
-        if let Some(model) = next_model {
-            meta.model = Some(model.to_owned());
+        match kind {
+            Some("session_info") => name = nonempty(&entry["name"]),
+            Some("model_change") => {
+                if let Some(model) = nonempty(&entry["modelId"]) {
+                    meta.model = Some(model.to_owned());
+                }
+            }
+            Some("message") if message["role"] == "assistant" => {
+                if let Some(model) = nonempty(&message["model"]) {
+                    meta.model = Some(model.to_owned());
+                }
+            }
+            _ => {}
         }
         for mut event in events::entry(entry, meta.cwd.as_deref(), collect_events) {
             let content = &event["message"]["content"];
