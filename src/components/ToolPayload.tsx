@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { toolCommand } from "../sessionContent";
 import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
 
@@ -24,17 +25,6 @@ export function ToolSection({ kind, title, actions, children }: {
   </section>;
 }
 
-function commandText(input: unknown): string | undefined {
-  if (!input || typeof input !== "object") return;
-  const fields = input as Record<string, unknown>;
-  for (const command of [fields.command, fields.cmd, fields.commandLine]) {
-    if (typeof command === "string" && command.trim()) return command;
-    if (Array.isArray(command) && command.length && command.every(arg => typeof arg === "string")) {
-      return command.map(arg => /^[\w./:=@%+,\-]+$/.test(arg) ? arg : "'" + arg.replace(/'/g, "'\\''") + "'").join(" ");
-    }
-  }
-}
-
 function CommandPreview({ command }: { command: string }) {
   const tokens = command.match(/'(?:[^']*)'|"(?:\\.|[^"\\])*"|&&|\|\||[|;<>]|\s+|[^\s|;&<>'"]+|[\s\S]/g) ?? [];
   return <div className="tool-command"><span aria-hidden="true">$</span><pre className="code">{tokens.map((token, i) => {
@@ -47,7 +37,7 @@ function CommandPreview({ command }: { command: string }) {
 export function ToolInput({ value, onCopyError }: { value: unknown; onCopyError: CopyError }) {
   const [showRaw, setShowRaw] = useState(false);
   const raw = payloadText(value);
-  const command = commandText(value);
+  const command = toolCommand(value);
   const showingCommand = !!command && !showRaw;
   return <ToolSection kind="input" title={showingCommand ? "命令" : undefined} actions={<>
     {command && <button type="button" className="content-action btn-ghost btn-sm" onClick={() => setShowRaw(!showRaw)}>

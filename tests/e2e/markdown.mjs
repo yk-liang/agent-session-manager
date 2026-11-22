@@ -22,6 +22,8 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
       tools:[user('u-tools','查看日志'),{type:'assistant',uuid:'a-tools',message:{content:[{type:'thinking',thinking:'## 思考标题\n**保持原文**'},{type:'tool_use',id:'call',name:'fixture',deferred:'tool-input',description:'查看运行日志'}, {type:'text',text:'样例助手正文'}]}},{type:'user',uuid:'r-tools',message:{content:[{type:'tool_result',tool_use_id:'call',deferred:'tool-output'}]}},
         {type:'assistant',message:{content:[{type:'tool_use',id:'standalone',name:'Bash',input:{cmd:['git','status','--short']}}]}},
         {type:'user',message:{content:[{type:'tool_result',tool_use_id:'standalone',is_error:true,content:standaloneOutput}]}},
+        {type:'assistant',message:{content:[{type:'tool_use',id:'antigravity-cmd',name:'run_command',input:{CommandLine:'git diff --stat && ls -la',WaitMsBeforeAsync:5000,toolSummary:'检查仓库变更'}}]}},
+        {type:'user',message:{content:[{type:'tool_result',tool_use_id:'antigravity-cmd',status:'completed',content:'src/sessionContent.ts | 10 +++'}]}},
         assistant('a-preview',longPreview),user('u-preview',longPreview)],
       safe:[assistant('a-safe','## 安全样例\n\n<script>window.__PWNED__=true</script>\n\n![图片说明](https://markdown-image.invalid/pixel.png)\n\n[危险](javascript:alert(1))\n\n<img src="https://markdown-image.invalid/html.png" onerror="window.__PWNED__=true">')],
     };
@@ -109,7 +111,7 @@ try{
   await toggle.check();await page.locator('.collapsible.thinking .markdown-body h2').waitFor();
   assert.equal(await page.locator('.collapsible .markdown-body').count(),2);
   assert.equal(await page.evaluate(()=>window.__MD__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
-  const standalone=page.locator('.event-group > .collapsible.tool');
+  const standalone=page.locator('.event-group > .collapsible.tool').filter({hasText:'Bash'});
   await standalone.getByRole('button',{name:/工具调用 Bash.*失败/}).click();
   assert.deepEqual(await standalone.locator(':scope > .collapsible-body > .tool-payload').evaluateAll(sections=>
     sections.map(section=>section.dataset.kind)),['input','error']);
@@ -137,6 +139,16 @@ try{
   await standalone.getByRole('button',{name:'复制输出',exact:true}).click();
   await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&
     call.args.text===Array.from({length:30},(_,i)=>`output line ${i+1}`).join('\n')));
+  const runCommand=page.locator('.event-group > .collapsible.tool').filter({hasText:'run_command'});
+  await runCommand.getByRole('button',{name:/^工具调用 run_command.*检查仓库变更.*已完成$/}).click();
+  await runCommand.locator('.tool-command .code').waitFor();
+  assert.equal(await runCommand.locator('.tool-payload[data-kind="input"] .tool-payload-title').textContent(),'命令');
+  assert.equal(await runCommand.locator('.tool-command .code').textContent(),'git diff --stat && ls -la');
+  assert.equal(await runCommand.locator('.tool-command .tool-token-operator').textContent(),'&&');
+  await runCommand.getByRole('button',{name:'复制命令',exact:true}).click();
+  await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&call.args.text==='git diff --stat && ls -la'));
+  await runCommand.getByRole('button',{name:'原始 JSON',exact:true}).click();
+  assert.ok((await runCommand.locator('.tool-input-code').textContent()).includes('"CommandLine"'));
   console.log(`PASS: plain text and Markdown, command/raw input, numbered output and full copy in grouped and standalone tools (${engine})`);
 
   await page.locator('.session-card',{hasText:'安全渲染示例'}).click();await page.locator('.markdown-body h2').waitFor();

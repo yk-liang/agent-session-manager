@@ -3,7 +3,7 @@ import { Brain, ChevronDown, ChevronRight, FileOutput, FileText, Wrench, type Lu
 import * as api from "../api";
 import { matchRanges } from "../conversationText";
 import type { ContentBlock } from "../types";
-import { attachmentLabel, isAttachment, messageBlockText, visibleBlockKind, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
+import { attachmentLabel, isAttachment, messageBlockText, toolDescription, toolStatus, visibleBlockKind, type SessionRow, type SessionBlock, type Visibility } from "../sessionContent";
 import { formatMessageTimestamp } from "../utils";
 import CopyButton from "./CopyButton";
 import MessageText from "./MessageText";
@@ -152,19 +152,6 @@ function Collapsible({
 }
 
 const toolStatusLabels = { pending: "等待中", running: "进行中", completed: "已完成", error: "失败" };
-
-function toolStatus(block: ContentBlock, result?: ContentBlock) {
-  if (block.status === "error" || result?.status === "error" || result?.is_error) return "error";
-  if (block.status === "completed" || result?.status === "completed") return "completed";
-  return result?.status ?? block.status ?? (result && "completed");
-}
-
-function toolDescription(block: ContentBlock) {
-  const input = block.input && typeof block.input === "object" ? block.input as Record<string, unknown> : {};
-  const description = [block.description, input.description, input.toolSummary, input.query]
-    .find((value): value is string => typeof value === "string" && !!value.trim());
-  return description?.trim().replace(/\s+/g, " ");
-}
 
 function ToolCard({ block, result, index }: { block: ContentBlock; result?: ContentBlock; index: number }) {
   const status = toolStatus(block, result);

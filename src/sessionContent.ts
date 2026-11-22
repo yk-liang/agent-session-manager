@@ -56,6 +56,38 @@ export function hasActivity(part: SessionBlock): Activity | undefined {
   if (part.content.type === "tool_use" || part.content.type === "tool_result" && !part.linked) return "tool";
 }
 
+const COMMAND_FIELDS = ["command", "cmd", "commandline"] as const;
+const DESCRIPTION_FIELDS = ["description", "toolsummary", "query"] as const;
+
+function toolInputValues(input: unknown, fields: readonly string[]) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const entries = Object.entries(input);
+  return fields.flatMap(name =>
+    entries.filter(([key]) => key.replace(/[_-]/g, "").toLowerCase() === name).map(([, value]) => value),
+  );
+}
+
+export function toolStatus(block: ContentBlock, result?: ContentBlock) {
+  if (block.status === "error" || result?.status === "error" || result?.is_error) return "error";
+  if (block.status === "completed" || result?.status === "completed") return "completed";
+  return result?.status ?? block.status ?? (result && "completed");
+}
+
+export function toolDescription(block: ContentBlock) {
+  const description = [block.description, ...toolInputValues(block.input, DESCRIPTION_FIELDS)]
+    .find((value): value is string => typeof value === "string" && !!value.trim());
+  return description?.trim().replace(/\s+/g, " ");
+}
+
+export function toolCommand(input: unknown): string | undefined {
+  for (const command of toolInputValues(input, COMMAND_FIELDS)) {
+    if (typeof command === "string" && command.trim()) return command;
+    if (Array.isArray(command) && command.length && command.every(arg => typeof arg === "string")) {
+      return command.map(arg => /^[\w./:=@%+,\-]+$/.test(arg) ? arg : "'" + arg.replace(/'/g, "'\\''") + "'").join(" ");
+    }
+  }
+}
+
 export function isAttachment(block: ContentBlock) {
   return ["image", "input_image", "input_file", "file", "document"].includes(block.type);
 }

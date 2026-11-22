@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sessionRows, rowVisible } from '../../src/sessionContent.ts';
+import { sessionRows, rowVisible, toolCommand, toolDescription } from '../../src/sessionContent.ts';
 import { eventTextParts, eventMatches, matchRanges } from '../../src/conversationText.ts';
 
 test('only normalized dialogue is searched; literal instruction markup is preserved', () => {
@@ -45,4 +45,13 @@ test('tool results pair in source order and unmatched results stay visible', () 
   assert.equal(rows[0].blocks[0].linked, undefined);
   assert.equal(rows[3].blocks[1].linked, undefined);
   assert.equal(rows[3].blocks[0].linked, true);
+
+  assert.equal(toolCommand({ command: 'git status' }), 'git status');
+  assert.equal(toolCommand({ cmd: ['git', 'commit', '-m', "it's ok"] }), "git commit -m 'it'\\''s ok'");
+  assert.equal(toolCommand({ CommandLine: 'ls -la && pwd', toolSummary: 'List files' }), 'ls -la && pwd');
+  assert.equal(toolCommand({ command: '  ', command_line: 'echo fallback' }), 'echo fallback');
+  assert.equal(toolCommand(['not', 'an', 'object']), undefined);
+  assert.equal(toolCommand({ command: [] }), undefined);
+  assert.equal(toolDescription({ type: 'tool_use', input: { toolSummary: 'List\n  files' } }), 'List files');
+  assert.equal(toolDescription({ type: 'tool_use', input: { Description: 'Subagent task' } }), 'Subagent task');
 });
