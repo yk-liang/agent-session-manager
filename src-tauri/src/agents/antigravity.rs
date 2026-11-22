@@ -16,6 +16,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const SUMMARY_CACHE_KIND: &str = "antigravity-v4";
+
 const DEFAULT_ROOTS: [&str; 6] = [
     ".gemini/antigravity-cli",
     ".gemini/antigravity",
@@ -120,7 +122,7 @@ fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bo
                 continue;
             }
             let sources = [path.clone(), super::scanning::sqlite_wal_path(&path)];
-            match super::catalog_cache::summary("antigravity-v3", &sources, || {
+            match super::catalog_cache::summary(SUMMARY_CACHE_KIND, &sources, || {
                 let detail = transcript::read(&path, false)?;
                 Ok((detail.meta, detail.warnings))
             }) {
