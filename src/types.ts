@@ -71,7 +71,7 @@ export interface ConversationSearchHit {
   projectDir: string;
   eventIndex: number;
   eventId: string | null;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "agent";
   snippet: string;
 }
 
@@ -118,9 +118,11 @@ export interface SessionDetail {
 }
 
 export interface SessionEvent {
-  type: "user" | "assistant" | "system" | "context";
+  type: "user" | "assistant" | "system" | "context" | "agent";
   /** 自动注入的运行上下文；保留原文，但不属于用户或助手对话。 */
   context?: { kind: string; label: string; summary?: string | null };
+  /** 其他代理发给本会话的消息；正文加密时内容为空。 */
+  agent?: AgentEnvelope;
   uuid?: string;
   timestamp?: string;
   isMeta?: boolean;
@@ -131,6 +133,14 @@ export interface SessionEvent {
     model?: string;
     content: ContentBlock[] | string;
   };
+}
+
+export interface AgentEnvelope {
+  kind: "task" | "message" | "result";
+  /** 发送方与接收方在代理树中的路径，例如 `/root` 与 `/root/review`。 */
+  from: string;
+  to: string;
+  encrypted?: boolean;
 }
 
 export interface ContentBlock {
@@ -237,8 +247,8 @@ export type ToolOp =
   | { kind: "web_search"; query: string; domain?: string; results?: number }
   | { kind: "web_fetch"; url: string; prompt?: string }
   | { kind: "ask"; questions: AskQuestion[] }
-  | { kind: "agent"; agent?: string; task: string; background?: boolean }
-  | { kind: "message"; to: string; summary?: string }
+  | { kind: "agent"; agent?: string; task: string; background?: boolean; encrypted?: boolean }
+  | { kind: "message"; to: string; summary?: string; encrypted?: boolean }
   | { kind: "wait"; seconds?: number; target?: string }
   | { kind: "wake"; seconds: number; reason?: string }
   | { kind: "stop"; task: string; detail?: string }

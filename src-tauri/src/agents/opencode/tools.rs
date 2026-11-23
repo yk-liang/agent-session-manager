@@ -82,6 +82,7 @@ pub(super) fn describe(name: &str, state: &Value) -> (Vec<Op>, Option<String>) {
             agent: text(input, "subagent_type").or_else(|| text(input, "agent")).map(Into::into),
             task: text(input, "description").or_else(|| text(input, "prompt").and_then(|prompt| prompt.lines().next())).unwrap_or("子任务").into(),
             background: false,
+            encrypted: false,
         },
         ("todowrite", _) => Op::todo(&input["todos"], "content"),
         _ => return (Vec::new(), None),

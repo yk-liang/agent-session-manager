@@ -109,9 +109,10 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
             agent: text(input, "subagent_type").map(Into::into),
             task: text(input, "description").unwrap_or("子任务").into(),
             background: input["run_in_background"] == true || outcome["isAsync"] == true,
+            encrypted: false,
         },
         ("SendMessage", _) => match text(input, "to") {
-            Some(to) => Op::Message { to: to.into(), summary: text(input, "summary").map(Into::into) },
+            Some(to) => Op::Message { to: to.into(), summary: text(input, "summary").map(Into::into), encrypted: false },
             None => return Vec::new(),
         },
         ("ToolSearch", _) => match text(input, "query") {

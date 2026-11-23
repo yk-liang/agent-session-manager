@@ -62,6 +62,7 @@ try {
             ...(args.sessionId === 'leaf' ? [
               { type: 'user', message: { content: '父会话的提问' } },
               { type: 'assistant', message: { content: '父会话的回答' } },
+              { type: 'agent', agent: { kind: 'task', from: '/root/child', to: '/root/child/leaf', encrypted: true }, message: { content: [] } },
             ] : []),
             { type: 'assistant', message: { content: '子会话正文样例' } },
           ],
@@ -209,17 +210,24 @@ try {
   assert.equal(await parentId.locator('.copy-id-icon').count(), 1);
   assert.equal(await header.getByRole('button', { name: '在终端恢复' }).count(), 0);
   assert.equal(await header.getByRole('button', { name: '归档', exact: true }).count(), 1);
-  const inherited = page.locator('.inherited-head');
-  await inherited.getByText('2 条消息', { exact: true }).waitFor();
+  const forkLine = page.locator('.fork-line');
+  await forkLine.getByRole('button', { name: '显示分叉前的 2 条消息' }).waitFor();
   await page.getByText('子会话正文样例', { exact: true }).waitFor();
   assert.equal(await page.getByText('父会话的回答', { exact: true }).count(), 0);
-  await inherited.click();
+  const task = page.locator('.msg.agent');
+  assert.equal(await task.locator('.agent-head').textContent(), '任务leaf来自 /root/child正文已加密');
+  const toc = page.locator('nav.toc');
+  assert.deepEqual(await toc.locator('.toc-list > li').allTextContents(), ['分叉点', '#01任务 leaf']);
+  await forkLine.getByRole('button').click();
   await page.getByText('父会话的回答', { exact: true }).waitFor();
-  assert.equal(await page.locator('.event-group.inherited').count(), 2);
-  await page.getByText('子会话开始', { exact: true }).waitFor();
-  await page.getByRole('button', { name: '收起继承内容' }).click();
+  assert.deepEqual(await toc.locator('.toc-list > li').allTextContents(), ['父会话的提问', '分叉点', '#01任务 leaf']);
+  await header.getByRole('button', { name: '对话导览' }).click();
+  await toc.getByRole('button', { name: '分叉前的提问：父会话的提问' }).waitFor();
+  await toc.getByRole('button', { name: '分叉点' }).click();
+  await page.locator('.fork-line.flash').waitFor();
+  await forkLine.getByRole('button', { name: '收起分叉前的消息' }).click();
   await page.getByText('父会话的回答', { exact: true }).waitFor({ state: 'detached' });
-  assert.equal(await inherited.getAttribute('aria-expanded'), 'false');
+  assert.equal(await forkLine.getByRole('button').getAttribute('aria-expanded'), 'false');
   await card('父任务').getByRole('button', { name: '收起 父任务 的 1 个子会话' }).click();
   await header.getByRole('button', { name: '在列表定位' }).click();
   await card('二级子任务').locator('.session-card-open').waitFor();
@@ -230,7 +238,7 @@ try {
   await page.locator('.sidebar-project-list .project-meta').getByText('2 个会话', { exact: true }).waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   assert.deepEqual(errors, []);
-  console.log(`PASS: nested Codex sessions, inherited fork context, orphans, all-session counts, and cascade deletion (${engine})`);
+  console.log(`PASS: nested Codex sessions, fork line and outline, agent tasks, orphans, all-session counts, and cascade deletion (${engine})`);
 } finally {
   await browser?.close();
   rmSync(dir, { recursive: true, force: true });

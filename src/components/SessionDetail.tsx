@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
-import { ArrowDown, ChevronRight, History } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, type MouseEvent } from "react";
+import { ArrowDown, ChevronDown } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { CheckboxField } from "./Checkbox";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -13,7 +13,7 @@ import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSegments
 import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
-import { displaySessionId, formatLocalDateTime, sessionKey } from "../utils";
+import { displaySessionId, formatLocalDateTime, formatMessageTimestamp, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../models";
 import ReadDiagnostics from "./ReadDiagnostics";
 import UiIcon from "./UiIcon";
@@ -32,24 +32,10 @@ interface Props {
   onRetryRead?: () => void;
 }
 
-/** 虚拟列表的一行：会话事件，或继承上下文的折叠条与结尾。 */
-type ListItem =
-  | { key: number; row: VisibleRow; inherited: boolean }
-  | { key: "inherited" | "inherited-end"; row?: undefined };
+/** 虚拟列表的一行：会话事件，或没有事件的分叉线。键是事件序号，分叉线取继承事件与子会话事件之间的位置。 */
+type ListItem = { key: number; row?: VisibleRow };
 
 const INHERITED_OPEN = "inherited";
-
-function InheritedHead({ open, messages, onToggle }: { open: boolean; messages: number; onToggle: () => void }) {
-  return (
-    <button type="button" className="inherited-head" aria-expanded={open} onClick={onToggle}>
-      <UiIcon icon={ChevronRight} size={14} className="inherited-chevron" />
-      <UiIcon icon={History} size={14} />
-      <strong>继承自父会话</strong>
-      <span className="inherited-count">{messages} 条消息</span>
-      <span className="inherited-action">{open ? "收起" : "展开"}</span>
-    </button>
-  );
-}
 
 function SessionId({ id, parent = false, onError }: { id: string; parent?: boolean; onError: (error: unknown) => void }) {
   const label = parent ? "父会话 ID" : "会话 ID";
@@ -100,26 +86,42 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
     : visibleSegments(content.rows, visibility, inherited), [content, visibility, inherited]);
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const inheritedOpen = reading.expanded.get(INHERITED_OPEN) ?? false;
-  const toggleInherited = () => {
-    reading.expanded.set(INHERITED_OPEN, !inheritedOpen);
-    rerender();
-  };
+  const fork = useMemo(() => {
+    if (!inherited) return;
+    const time = detail.events.find((event, index) => index >= inherited && event.timestamp)?.timestamp;
+    return { at: inherited - 0.5, title: time && `${formatMessageTimestamp(time)} 从父会话分叉` };
+  }, [detail.events, inherited]);
   const items = useMemo((): ListItem[] => {
-    const own = segments.own.map(row => ({ key: row.index, row, inherited: false }));
-    if (!inherited) return own;
-    const head: ListItem = { key: "inherited" };
-    if (!inheritedOpen) return [head, ...own];
-    const parent = segments.inherited.map(row => ({ key: row.index, row, inherited: true }));
-    return [head, ...parent, { key: "inherited-end" }, ...own];
-  }, [segments, inherited, inheritedOpen]);
-  const heads = useMemo(() => items.map(item => item.row?.index ?? -1), [items]);
+    const own = segments.own.map(row => ({ key: row.index, row }));
+    if (!fork) return own;
+    const parent = inheritedOpen ? segments.inherited.map(row => ({ key: row.index, row })) : [];
+    return [...parent, { key: fork.at }, ...own];
+  }, [segments, fork, inheritedOpen]);
+  const entries = useMemo(() => inheritedOpen ? toc : toc.filter(entry => entry.idx >= inherited), [toc, inheritedOpen, inherited]);
+  const heads = useMemo(() => items.map(item => item.key), [items]);
   const groups = useMemo(() => items.map(({ row }) => row ? [row.index, ...row.members].map(i => rows[i]) : []), [items, rows]);
   const itemKey = useCallback((index: number) => items[index].key, [items]);
   const virtual = useVirtualizer({ count: items.length, getScrollElement: () => bodyRef.current,
     estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 8, useAnimationFrameWithResizeObserver: true });
-  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, heads, virtual, bodyRef, contentRef);
-  const outline = useSessionOutline(toc, key, position, jumpTo);
-  const markdownAnchor = useRef<ListItem["key"] | null>(null);
+  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, entries, heads, virtual, bodyRef, contentRef);
+  const outline = useSessionOutline(entries, key, position, jumpTo, fork);
+  // 切换后定位到分叉线：展开时它下移到视口约三分之一处，露出分叉前的最后几条消息；收起后回到正文顶部。
+  const forkJump = useRef<{ offset?: number } | null>(null);
+  const toggleInherited = ({ currentTarget }: MouseEvent<HTMLElement>) => {
+    const viewport = bodyRef.current, row = currentTarget.parentElement;
+    forkJump.current = inheritedOpen || !viewport || !row ? {} : {
+      offset: Math.max(row.getBoundingClientRect().top - viewport.getBoundingClientRect().top, viewport.clientHeight / 3),
+    };
+    reading.expanded.set(INHERITED_OPEN, !inheritedOpen);
+    rerender();
+  };
+  useLayoutEffect(() => {
+    const options = forkJump.current;
+    if (!options || !fork) return;
+    forkJump.current = null;
+    jumpTo(fork.at, options);
+  }, [fork, jumpTo]);
+  const markdownAnchor = useRef<number | null>(null);
   const changeMarkdown = (enabled: boolean) => {
     const offset = virtual.scrollOffset ?? 0;
     const first = virtual.getVirtualItems().find((row) => row.end > offset);
@@ -197,20 +199,18 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
                 const item = items[row.index];
                 const placement = { "data-index": row.index, ref: virtual.measureElement, style: { transform: `translateY(${row.start}px)` } };
                 if (!item.row) {
-                  return item.key === "inherited"
-                    ? <div {...placement} className="event-group" key={row.key}>
-                      <InheritedHead open={inheritedOpen} messages={content.inheritedMessages} onToggle={toggleInherited} />
-                    </div>
-                    : <div {...placement} className="event-group inherited-end" key={row.key}>
-                      <button type="button" className="btn-ghost btn-sm" onClick={toggleInherited}>收起继承内容</button>
-                      <div className="inherited-boundary">子会话开始</div>
-                    </div>;
+                  return <div {...placement} tabIndex={-1} title={fork?.title} className="event-group fork-line" id={`ev-${item.key}`} key={row.key}>
+                    <button type="button" className="btn-sm" aria-expanded={inheritedOpen} onClick={toggleInherited}>
+                      {inheritedOpen ? "收起分叉前的消息" : `显示分叉前的 ${content.inheritedMessages} 条消息`}
+                      <UiIcon icon={ChevronDown} size={14} className="fork-chevron" />
+                    </button>
+                  </div>;
                 }
                 const i = item.row.index;
                 const previous = items[row.index - 1]?.row;
                 return <div {...placement} tabIndex={-1} title={eventModelTitle(detail.events[i])}
                   data-follows-activity={previous && !rowEndsWithMessage(rows, previous, visibility) || undefined}
-                  className={`event-group${item.inherited ? " inherited" : ""}${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
+                  className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
                   <EventView
                     index={i}
                     rows={groups[row.index]}

@@ -209,9 +209,18 @@ pub(super) fn describe(name: &str, input: &Value) -> Option<Op> {
         "js" => Op::script("JavaScript", text(input, "title"), text(input, "code")?),
         "wait" => Op::Wait { seconds: input["yield_time_ms"].as_f64().map(|ms| ms / 1000.0), target: text(input, "cell_id").map(Into::into) },
         "sleep" => Op::Wait { seconds: input["duration_ms"].as_f64().map(|ms| ms / 1000.0), target: None },
-        "spawn_agent" => Op::Agent { agent: None, task: text(input, "task_name").unwrap_or("子任务").into(), background: true },
-        "send_message" => Op::Message { to: text(input, "target")?.into(), summary: None },
-        "send_message_to_user_async" => Op::Message { to: "用户".into(), summary: text(input, "message").map(|m| m.lines().next().unwrap_or(m).into()) },
+        "spawn_agent" => Op::Agent {
+            agent: None,
+            task: text(input, "task_name").unwrap_or("子任务").into(),
+            background: true,
+            encrypted: text(input, "message").is_some_and(is_fernet_token),
+        },
+        "send_message" => {
+            let message = text(input, "message");
+            let encrypted = message.is_some_and(is_fernet_token);
+            Op::Message { to: text(input, "target")?.into(), summary: message.filter(|_| !encrypted).map(first_line), encrypted }
+        }
+        "send_message_to_user_async" => Op::Message { to: "用户".into(), summary: text(input, "message").map(first_line), encrypted: false },
         "request_user_input" | "request_user_input_async" => Op::ask(input["questions"].as_array()?.iter().filter_map(|q| Some(Question {
             question: text(q, "title").or_else(|| text(q, "question"))?.into(),
             header: None,
@@ -223,6 +232,28 @@ pub(super) fn describe(name: &str, input: &Value) -> Option<Op> {
         "view_image" => Op::Image { path: text(input, "path")?.into() },
         _ => return None,
     })
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or(text).into()
+}
+
+/// 多代理 V2 的代理间消息在日志里只有 Fernet 令牌，本地无法解密。令牌是规范的 URL 安全 Base64，
+/// 解码后依次为版本字节 0x80、时间戳、IV、整块密文与 HMAC，即 57 字节加上 16 字节的整数倍。
+fn is_fernet_token(text: &str) -> bool {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let body = text.trim_end_matches('=');
+    let padding = text.len() - body.len();
+    let bytes = body.len() * 3 / 4;
+    text.len().is_multiple_of(4)
+        && padding <= 2
+        && body.starts_with("gAAAAA")
+        && body.bytes().all(|byte| ALPHABET.contains(&byte))
+        // 补位前最后一个字符的空余位必须为零。
+        && ALPHABET.iter().position(|&byte| Some(byte) == body.bytes().last())
+            .is_some_and(|value| value & ((1 << (padding * 2)) - 1) == 0)
+        && bytes >= 73
+        && (bytes - 57).is_multiple_of(16)
 }
 
 /// MCP 结果的文本和图片；没有内容时取错误原因。

@@ -21,6 +21,27 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
+/// 多代理之间的消息：信封写明类型和收发方，正文可能只有密文。
+fn agent_message(payload: &Value, ts: Option<&str>, cwd: Option<&str>) -> Value {
+    let items = payload["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let text = text_of_content(items);
+    let (kind, body) = match text.strip_prefix("Message Type: ").and_then(|rest| rest.split_once("\nPayload:")) {
+        Some((envelope, body)) => (envelope.lines().next(), body),
+        None => (None, text.as_str()),
+    };
+    let body = body.trim();
+    let mut agent = json!({
+        "kind": match kind { Some("NEW_TASK") => "task", Some("FINAL_ANSWER") => "result", _ => "message" },
+        "from": payload["author"].as_str().unwrap_or_default(),
+        "to": payload["recipient"].as_str().unwrap_or_default(),
+    });
+    if items.iter().any(|item| item["type"] == "encrypted_content") {
+        agent["encrypted"] = json!(true);
+    }
+    let content: Vec<Value> = (!body.is_empty()).then(|| json!({"type": "text", "text": body})).into_iter().collect();
+    json!({"type": "agent", "timestamp": ts, "cwd": cwd, "agent": agent, "message": {"content": content}})
+}
+
 pub(super) fn convert(
     payload: &Value,
     ts: Option<&str>,
@@ -75,6 +96,7 @@ pub(super) fn convert(
                     }
                 }]}}));
         }
+        "agent_message" => out.push(agent_message(payload, ts, cwd)),
         "tool_search_output" => {
             out.push(json!({"type":"user","timestamp":ts,"cwd":cwd,
                 "message":{"role":"user","content":[{

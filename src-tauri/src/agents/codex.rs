@@ -567,6 +567,10 @@ fn read_rollout(
                     }
                     for ev in &mut new_events {
                         match ev.get("type").and_then(Value::as_str) {
+                            Some("agent") => {
+                                parsed.user_count += 1;
+                                parsed.real_user_count += 1;
+                            }
                             Some("user") => {
                                 let content = &ev["message"]["content"];
                                 if super::context::has_user_content(content) {
@@ -1231,7 +1235,10 @@ mod tests {
             format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","ordinal":0,"type":"session_meta","payload":{{"id":"{id_sub}","cwd":"/tmp/codex-it","originator":"Codex Desktop","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{id_main}","depth":1}}}}}},"thread_source":"subagent","forked_from_id":"{id_main}","subagent_history_start_ordinal":3}}}}"#),
             format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","ordinal":1,"type":"session_meta","payload":{{"id":"{id_main}","cwd":"/tmp/codex-it"}}}}"#),
             r#"{"timestamp":"2099-12-31T00:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg-reply","role":"assistant","content":[{"type":"output_text","text":"收到"}]}}"#.to_string(),
-            r#"{"timestamp":"2099-12-31T00:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"子代理任务"}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"agent_message","id":"amsg-task","author":"/root","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/sub\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw=="}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:04Z","ordinal":4,"type":"response_item","payload":{"type":"function_call","name":"send_message","call_id":"call-report","arguments":"{\"target\":\"/root\",\"message\":\"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw==\"}"}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:05Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg-done","author":"/root/sub/leaf","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/sub\nSender: /root/sub/leaf\nPayload:\n子代理完成"}]}}"#.to_string(),
+            format!(r#"{{"timestamp":"2099-12-31T00:00:06Z","ordinal":6,"type":"response_item","payload":{{"type":"function_call","name":"send_message","call_id":"call-plain","arguments":"{{\"target\":\"/root\",\"message\":\"gAAAAA{}==\"}}"}}}}"#, "B".repeat(92)),
         ]
         .join("\n");
         fs::write(
@@ -1263,8 +1270,14 @@ mod tests {
         let detail = read_session_in(&root, &id_main).unwrap();
         assert_eq!(detail.events.len(), 2);
         let sub = read_session_in(&root, &id_sub).unwrap();
-        assert_eq!((sub.events.len(), sub.inherited), (3, 2));
+        assert_eq!((sub.events.len(), sub.inherited), (6, 2));
         assert_eq!(sub.events[..2], detail.events[..]);
+        assert_eq!(sub.events[2]["agent"], json!({"kind": "task", "from": "/root", "to": "/root/sub", "encrypted": true}));
+        assert_eq!(sub.events[2]["message"]["content"], json!([]));
+        assert_eq!(sub.events[3]["message"]["content"][0]["ops"][0]["encrypted"], true);
+        assert_eq!(sub.events[4]["agent"]["kind"], "result");
+        assert_eq!(sub.events[4]["message"]["content"][0]["text"], "子代理完成");
+        assert!(sub.events[5]["message"]["content"][0]["ops"][0].get("encrypted").is_none(), "非规范补位的明文不能当成密文");
         let sub_meta = ours.iter().find(|meta| meta.session_id == id_sub).unwrap();
         assert_eq!(CodexSource.search_events(sub_meta).unwrap(), sub.events[2..]);
         assert!(!sub.meta.codex.unwrap().can_resume);

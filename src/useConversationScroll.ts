@@ -2,7 +2,8 @@ import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "
 import type { Virtualizer } from "@tanstack/react-virtual";
 
 type Prompt = { idx: number };
-type JumpOptions = { focus?: boolean; match?: boolean };
+/** `offset`：目标行停在距视口顶部多远处，默认贴着内边距。 */
+type JumpOptions = { focus?: boolean; match?: boolean; offset?: number };
 
 function promptAt(prompts: Prompt[], index: number) {
   let low = 0, high = prompts.length;
@@ -92,7 +93,7 @@ export function useConversationScroll(
     };
   }, [body, content, cancelJump, track]);
 
-  const jumpTo = useCallback((index: number, { focus = false, match = false }: JumpOptions = {}) => {
+  const jumpTo = useCallback((index: number, { focus = false, match = false, offset }: JumpOptions = {}) => {
     const viewport = body.current;
     const rowIndex = visible.indexOf(index);
     if (!viewport || rowIndex < 0) return;
@@ -104,7 +105,7 @@ export function useConversationScroll(
     // 等待虚拟行与搜索高亮挂载，再在正文滚动区内精确定位。
     let frames = 0;
     const settle = () => {
-      const row = viewport.querySelector<HTMLElement>(`#ev-${index}`);
+      const row = document.getElementById(`ev-${index}`);
       if ((!row && frames < 20) || frames < 2 || (match && row?.querySelector("[data-markdown-pending]") && frames < 120)) {
         frames++;
         jumpFrame.current = requestAnimationFrame(settle);
@@ -114,7 +115,7 @@ export function useConversationScroll(
       if (row) {
         const mark = match ? row.querySelector("mark.search-highlight") : null;
         const rect = (mark ?? row).getBoundingClientRect();
-        const inset = mark ? (viewport.clientHeight - rect.height) / 2 : parseFloat(getComputedStyle(viewport).paddingTop);
+        const inset = mark ? (viewport.clientHeight - rect.height) / 2 : offset ?? parseFloat(getComputedStyle(viewport).paddingTop);
         viewport.scrollTop += rect.top - viewport.getBoundingClientRect().top - inset;
         if (focus) row.focus({ preventScroll: true });
         row.classList.remove("flash");

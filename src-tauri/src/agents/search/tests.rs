@@ -108,6 +108,12 @@ fn matches_visible_body_and_keeps_detail_event_position() {
     assert_eq!(hit.role, "assistant");
     assert!(hit.snippet.contains("😀 NeEdLe"));
     assert_eq!(result.skipped, 0);
+
+    let agents = index_events(&[
+        json!({"type":"agent","agent":{"kind":"task","encrypted":true},"message":{"content":[]}}),
+        json!({"type":"agent","agent":{"kind":"result"},"message":{"content":[{"type":"text","text":"needle result"}]}}),
+    ]);
+    assert_eq!(agents.messages.iter().map(|m| (m.event_index, m.role.as_str())).collect::<Vec<_>>(), [(1, "agent")]);
 }
 
 #[test]

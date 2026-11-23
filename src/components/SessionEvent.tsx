@@ -1,6 +1,7 @@
 import { memo, useContext, type ReactNode } from "react";
-import { FileText } from "lucide-react";
-import { messageBlockText, visibleBlockKind, type SessionBlock, type SessionRow, type Visibility } from "../sessionContent";
+import { FileText, Lock } from "lucide-react";
+import { AGENT_KINDS, agentTaskName, messageBlockText, visibleBlockKind, type SessionBlock, type SessionRow, type Visibility } from "../sessionContent";
+import type { AgentEnvelope, SessionEvent } from "../types";
 import { formatMessageTimestamp } from "../utils";
 import { ActivityList } from "./ActivityCards";
 import Collapsible from "./Collapsible";
@@ -9,24 +10,37 @@ import { DetailState } from "./DetailState";
 import { Attachment, LongText } from "./MessageParts";
 import UiIcon from "./UiIcon";
 
-function MessageBubble({ role, timestamp, blocks, markdown, query }: {
-  role: "user" | "assistant";
+function MessageBubble({ role, timestamp, blocks, markdown, query, head }: {
+  role: SessionEvent["type"];
   timestamp?: string;
   blocks: SessionBlock[];
   markdown: boolean;
   query: string;
+  head?: ReactNode;
 }) {
   const { onCopyError } = useContext(DetailState);
   const time = timestamp && formatMessageTimestamp(timestamp);
   const copyText = blocks.flatMap(({ content }) => messageBlockText(content) ?? []).join("\n\n");
   return <div className={`message ${role}`}>
-    <div className={`msg ${role}`}>{blocks.map(({ key, content }) => content.type === "text"
+    <div className={`msg ${role}`}>{head}{blocks.map(({ key, content }) => content.type === "text"
       ? <div key={key} className="msg-text"><LongText text={content.text?.trim() ?? ""} query={query} markdown={markdown} /></div>
       : <Attachment key={key} block={content} />)}</div>
     <div className="message-actions">
       {time && <time dateTime={timestamp}>{time}</time>}
-      <CopyButton className="message-copy btn-icon btn-ghost" value={copyText} label="复制消息" onError={onCopyError} />
+      {copyText && <CopyButton className="message-copy btn-icon btn-ghost" value={copyText} label="复制消息" onError={onCopyError} />}
     </div>
+  </div>;
+}
+
+/** 其他代理发来的消息：类型、任务名和发送方；正文只有密文时如实说明。 */
+function AgentHead({ agent }: { agent: AgentEnvelope }) {
+  return <div className="agent-head">
+    <strong>{AGENT_KINDS[agent.kind]}</strong>
+    {agent.kind === "task" && <code>{agentTaskName(agent)}</code>}
+    <span>来自 <code>{agent.from}</code></span>
+    {agent.encrypted && <span className="agent-encrypted" title="本地只保存了这条消息的密文">
+      <UiIcon icon={Lock} size={12} />正文已加密
+    </span>}
   </div>;
 }
 
@@ -57,6 +71,10 @@ export const EventView = memo(function EventView({ index, rows, visibility, rend
     const text = String(event.content ?? event.subtype ?? "").trim();
     return text ? <div className="system-line">{text}</div> : null;
   }
+  if (event.type === "agent" && event.agent) {
+    return <MessageBubble role="agent" timestamp={event.timestamp} blocks={rows[0].blocks} markdown={renderMarkdown}
+      query={highlightQuery} head={<AgentHead agent={event.agent} />} />;
+  }
 
   const parts: ReactNode[] = [];
   let activity: SessionBlock[] = [];
@@ -69,7 +87,7 @@ export const EventView = memo(function EventView({ index, rows, visibility, rend
     let message: SessionBlock[] = [];
     const flushMessage = () => {
       if (!message.length) return;
-      parts.push(<MessageBubble key={message[0].key} role={event.type as "user" | "assistant"} timestamp={event.timestamp}
+      parts.push(<MessageBubble key={message[0].key} role={event.type} timestamp={event.timestamp}
         blocks={message} markdown={renderMarkdown} query={highlightQuery} />);
       message = [];
     };

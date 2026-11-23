@@ -42,8 +42,9 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
             agent: text(input, "Model").filter(|model| *model != "inherit").map(Into::into),
             task: text(input, "toolSummary").or_else(|| text(input, "Prompt").and_then(|prompt| prompt.lines().next())).unwrap_or("子任务").into(),
             background: false,
+            encrypted: false,
         }),
-        (Some("send_message"), _) => Some(Op::Message { to: text(input, "Recipient").unwrap_or("主任务").into(), summary: text(input, "toolSummary").map(Into::into) }),
+        (Some("send_message"), _) => Some(Op::Message { to: text(input, "Recipient").unwrap_or("主任务").into(), summary: text(input, "toolSummary").map(Into::into), encrypted: false }),
         (Some("schedule"), _) => input["DurationSeconds"].as_f64().map(|seconds| Op::Wake { seconds, reason: text(input, "Prompt").map(Into::into) }),
         (Some("manage_task"), _) if text(input, "Action") == Some("kill") => text(input, "TaskId").map(|task| Op::Stop {
             task: task.rsplit('/').next().unwrap_or(task).into(),

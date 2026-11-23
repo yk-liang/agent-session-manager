@@ -69,6 +69,13 @@ function SkillBody({ item, op }: { item: ToolItem; op: Op<"skill"> }) {
 
 type View = { icon: LucideIcon; label: string; head: ReactNode; body?: (actions: ReactNode) => ReactNode };
 
+/** 数据源只保存了密文：如实说明，不把密文当正文展示。 */
+function EncryptedSection({ title }: { title: string }) {
+  return <ToolSection kind="input" title={title}>
+    <p className="tool-payload-message tool-plain">正文已加密，本地只保存了密文。</p>
+  </ToolSection>;
+}
+
 function semanticView(item: ToolItem, op: Exclude<ToolOp, { kind: "read" | "search" | "find" | "list" | "edit" | "write" | "delete" | "shell" | "script" | "skill" }>, cwd: string | null): View {
   switch (op.kind) {
     case "web_search": return {
@@ -114,15 +121,19 @@ function semanticView(item: ToolItem, op: Exclude<ToolOp, { kind: "read" | "sear
       head: <>{op.agent && <Chip tone="kind">{op.agent}</Chip>}<Title>{op.task}</Title>
         {op.background && <span className="op-meta"><Chip tone="sans">后台</Chip></span>}</>,
       body: actions => <>
-        <FullOp item={item}>{(_, call) => {
+        {op.encrypted ? <EncryptedSection title="任务" /> : <FullOp item={item}>{(_, call) => {
           const input = call.input as Record<string, unknown> | undefined;
           const prompt = ["prompt", "Prompt", "message"].map(key => input?.[key]).find(value => typeof value === "string") as string | undefined;
           return prompt ? <ToolSection kind="input" title="任务"><LongText text={prompt} code /></ToolSection> : null;
-        }}</FullOp>
+        }}</FullOp>}
         <ResultOutput item={item} actions={actions} />
       </>,
     };
-    case "message": return { icon: Send, label: "发送消息", head: <><Name>{op.to}</Name><Detail>{op.summary}</Detail></> };
+    case "message": return {
+      icon: Send, label: "发送消息",
+      head: <><Name>{op.to}</Name><Detail>{op.encrypted ? "正文已加密" : op.summary}</Detail></>,
+      body: op.encrypted ? actions => <><EncryptedSection title="消息" /><ResultOutput item={item} actions={actions} /></> : undefined,
+    };
     case "wait": return {
       icon: Hourglass, label: "等待",
       head: <><Title>{op.seconds === undefined ? "等待" : `等待 ${duration(op.seconds)}`}</Title>{op.target && <span className="op-meta"><Chip>{op.target}</Chip></span>}</>,

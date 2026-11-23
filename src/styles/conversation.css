@@ -179,6 +179,22 @@
   gap: 8px;
 }
 
+/* 子会话的分叉线：虚线中间的按钮显示或收起分叉前继承的父会话内容。 */
+.virtual-events > .event-group.fork-line { flex-direction: row; align-items: center; gap: 10px; }
+.fork-line::before,
+.fork-line::after { content: ""; flex: 1; border-top: 1px dashed var(--border-raised); }
+.fork-line > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: var(--border-raised);
+  border-radius: var(--radius-pill);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+.fork-line > button:hover:not(:disabled) { color: var(--text); }
+.fork-line > button[aria-expanded="true"] .fork-chevron { transform: rotate(180deg); }
+
 .content-action {
   display: inline-flex;
   align-items: center;
@@ -212,7 +228,7 @@
 
 .event-group > :is(.message, .collapsible) { max-width: 85%; min-width: 0; }
 .event-group > .collapsible { align-self: flex-start; width: 100%; }
-.message.user { align-self: flex-end; }
+.message:is(.user, .agent) { align-self: flex-end; }
 .message.assistant { align-self: flex-start; }
 
 .event-group > :is(.collapsible, .system-line) + .message,
@@ -253,6 +269,19 @@
   border-bottom-left-radius: var(--radius-sm);
 }
 
+/* 其他代理发来的消息与用户提问同侧，以描边区分。 */
+.msg.agent {
+  margin-left: auto;
+  border: 1px solid var(--info-border);
+  border-bottom-right-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel));
+}
+.agent-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: var(--text-dim); font-size: var(--text-meta); }
+.agent-head strong { color: var(--info); font-weight: 600; }
+.agent-head code { color: var(--text); font: 11.5px var(--font-mono); }
+.agent-encrypted { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.agent-head + .msg-text { margin-top: 6px; }
+
 .message-actions {
   display: flex;
   align-items: center;
@@ -266,7 +295,7 @@
 }
 
 .message-actions time { white-space: nowrap; }
-.message.user .message-actions { justify-content: flex-end; }
+.message:is(.user, .agent) .message-actions { justify-content: flex-end; }
 
 .message:hover .message-actions,
 .message-actions:has(:focus-visible, [data-copied="true"]) {
@@ -491,6 +520,31 @@
 
 .toc-item[aria-current] .toc-text { color: var(--text); }
 
+/* 分叉前的提问用灰色，蓝色只留给子会话自己的提问。 */
+.toc-item.inherited .toc-text { color: var(--text-muted); }
+.toc-item.inherited .toc-node,
+.toc-item.inherited[data-passed="true"] .toc-node { border-color: var(--text-muted); background: var(--bg-panel); }
+.toc-item.inherited[aria-current] { background: var(--bg-hover); }
+.toc-item.inherited[aria-current] .toc-node { border-color: var(--text-dim); background: var(--text-dim); box-shadow: none; }
+.toc-item.inherited[aria-current] .toc-text { color: var(--text); }
+
+.toc-fork > button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  padding: 6px 4px;
+  border: 0;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.toc-fork > button::before,
+.toc-fork > button::after { content: ""; flex: 1; border-top: 1px dashed var(--border-raised); }
+.toc-fork > button:hover:not(:disabled) { color: var(--text); }
+
 .toc-footer {
   display: flex;
   align-items: center;
@@ -518,6 +572,7 @@
   .toc[data-collapsed="true"] .toc-heading { justify-content: center; }
   .toc[data-collapsed="true"] .toc-item { padding-inline: 0; justify-content: center; }
   .toc[data-collapsed="true"] .toc-list::before { left: 50%; }
+  .toc[data-collapsed="true"] .toc-fork span { display: none; }
 }
 
 @container (max-width: 560px) {
@@ -538,53 +593,3 @@
   .toc .toc-collapse { display: none; }
   .toc .toc-close { display: inline-flex; }
 }
-
-/* 子会话分叉时继承的父会话上下文：默认折叠为一行，展开后以左侧竖线与淡化气泡区分。 */
-.inherited-head {
-  width: 100%;
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border: 1px solid var(--border-raised);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  color: var(--text-dim);
-  text-align: left;
-}
-.inherited-head:hover { background: var(--bg-hover); }
-.inherited-head:focus-visible { outline-offset: 2px; }
-.inherited-head strong { color: var(--text); font-weight: 600; white-space: nowrap; }
-.inherited-head[aria-expanded="true"] .inherited-chevron { transform: rotate(90deg); }
-.inherited-count, .inherited-action { font-size: var(--text-meta); white-space: nowrap; }
-.inherited-action { margin-left: auto; }
-
-.virtual-events > .event-group.inherited { padding-left: 14px; }
-.event-group.inherited::before,
-.event-group.inherited-end::before {
-  content: "";
-  position: absolute;
-  inset: -8px auto 0 1px;
-  border-left: 2px solid var(--border-raised);
-}
-.event-group.inherited-end::before { bottom: auto; height: 8px; }
-.event-group.inherited .msg.user {
-  background: color-mix(in srgb, var(--accent) 22%, var(--bg-elevated));
-  color: var(--text);
-}
-.event-group.inherited .msg.user .content-action,
-.event-group.inherited .msg.user .markdown-body a { color: var(--info); }
-.event-group.inherited .msg.assistant { color: color-mix(in srgb, var(--text) 82%, var(--bg)); }
-
-.virtual-events > .event-group.inherited-end { align-items: center; gap: 12px; padding-block: 4px 8px; }
-.inherited-boundary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  color: var(--text-dim);
-  font-size: var(--text-meta);
-}
-.inherited-boundary::before,
-.inherited-boundary::after { content: ""; flex: 1; height: 1px; background: var(--border); }

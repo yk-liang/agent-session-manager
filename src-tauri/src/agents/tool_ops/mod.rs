@@ -107,11 +107,16 @@ pub(crate) enum Op {
         task: String,
         #[serde(skip_serializing_if = "Not::not")]
         background: bool,
+        /// 数据源只保存了指令的密文。
+        #[serde(skip_serializing_if = "Not::not")]
+        encrypted: bool,
     },
     Message {
         to: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        #[serde(skip_serializing_if = "Not::not")]
+        encrypted: bool,
     },
     Wait {
         #[serde(skip_serializing_if = "Option::is_none")]

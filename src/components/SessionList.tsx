@@ -14,6 +14,8 @@ import CopyButton from "./CopyButton";
 import PathLabel from "./PathLabel";
 import { Checkbox, CheckboxField } from "./Checkbox";
 
+const HIT_ROLES: Record<ConversationSearchHit["role"], string> = { user: "用户", assistant: "助手", agent: "代理" };
+
 interface Props {
   scopeKey: string;
   rows: SessionListRow[];
@@ -216,7 +218,7 @@ export default function SessionList({
                     {relativeTime(s.lastTs)}
                   </time>
                 </span>
-                {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
+                {hit && <span className="session-search-snippet"><span>{HIT_ROLES[hit.role]}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
                   {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
                   {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}

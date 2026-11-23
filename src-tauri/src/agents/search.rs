@@ -339,7 +339,7 @@ fn index_events(events: &[Value]) -> Document {
     let mut messages = Vec::new();
     let mut bytes = 0;
     for (event_index, event) in events.iter().enumerate() {
-        let Some(role @ ("user" | "assistant")) = event.get("type").and_then(Value::as_str) else {
+        let Some(role @ ("user" | "assistant" | "agent")) = event.get("type").and_then(Value::as_str) else {
             continue;
         };
         if role == "user" && event.get("isMeta").and_then(Value::as_bool) == Some(true) {

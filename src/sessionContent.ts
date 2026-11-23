@@ -1,4 +1,4 @@
-import type { ContentBlock, SessionEvent, ToolOp } from "./types";
+import type { AgentEnvelope, ContentBlock, SessionEvent, ToolOp } from "./types";
 
 export type Activity = "thinking" | "tool";
 export type Visibility = { tool: boolean; thinking: boolean; context: boolean };
@@ -37,13 +37,17 @@ function blocks(content: unknown, row: number): SessionBlock[] {
   });
 }
 
+/** 对话消息：用户、助手和其他代理发来的消息，不含自动注入的元消息。 */
+export function isMessageEvent(event: SessionEvent) {
+  return event.type === "assistant" || event.type === "agent" || event.type === "user" && !event.isMeta;
+}
+
 /** 工具调用与结果只在同一段内配对，子会话自己的结果不会并入继承的调用。 */
 export function sessionRows(events: SessionEvent[], inherited = 0): SessionRow[] {
   const calls = new Map<string, SessionBlock>();
   return events.map((event, row) => {
     if (row === inherited) calls.clear();
-    const content = event.type === "assistant" || event.type === "user" && !event.isMeta
-      ? blocks(event.message?.content, row) : [];
+    const content = isMessageEvent(event) ? blocks(event.message?.content, row) : [];
     for (const part of content) {
       const block = part.content;
       if (block.type === "tool_use" && block.id) calls.set(block.id, part);
@@ -93,6 +97,22 @@ export function messageBlockText(block: ContentBlock) {
   if (isAttachment(block)) return attachmentLabel(block);
 }
 
+export const AGENT_KINDS = { task: "任务", message: "消息", result: "结果" } as const;
+
+/** 上级代理派来的任务和追加消息，在导览中和用户提问同等对待。 */
+function fromAncestor({ from, to }: AgentEnvelope) {
+  return !!from && to.startsWith(`${from}/`);
+}
+
+export function agentTaskName({ to }: AgentEnvelope) {
+  return to.slice(to.lastIndexOf("/") + 1);
+}
+
+/** 正文加密时，导览用类型和来源代替正文。 */
+function agentSummary(agent: AgentEnvelope) {
+  return agent.kind === "task" ? `${AGENT_KINDS.task} ${agentTaskName(agent)}` : `${agent.from} 的${AGENT_KINDS[agent.kind]}`;
+}
+
 export function visibleBlockKind(part: SessionBlock, visibility: Visibility) {
   const activity = hasActivity(part);
   if (activity) return visibility[activity] ? "activity" : undefined;
@@ -100,12 +120,14 @@ export function visibleBlockKind(part: SessionBlock, visibility: Visibility) {
 }
 
 export function rowVisible({ event, blocks }: SessionRow, visibility: Visibility) {
+  if (event.type === "agent") return true;
   if (event.type === "context") return visibility.context && typeof event.message?.content === "string" && !!event.message.content.trim();
   if (event.type === "system") return !!String(event.content ?? event.subtype ?? "").trim();
   return blocks.some(part => visibleBlockKind(part, visibility));
 }
 
-function lastKind({ blocks }: SessionRow, visibility: Visibility) {
+function lastKind({ event, blocks }: SessionRow, visibility: Visibility) {
+  if (event.type === "agent") return "message";
   for (let i = blocks.length - 1; i >= 0; i--) {
     const kind = visibleBlockKind(blocks[i], visibility);
     if (kind) return kind;
@@ -152,11 +174,11 @@ function createSessionContent(events: SessionEvent[], inherited: number) {
   let inheritedMessages = 0;
   rows.forEach(({ event, blocks }, idx) => {
     if (event.type === "context") hasContext = true;
-    if (event.type !== "user" && event.type !== "assistant" || event.isMeta) return;
     const text = blocks.flatMap(({ content }) => messageBlockText(content)?.trim() || []).join("\n");
-    if (!text) return;
-    if (idx < inherited) inheritedMessages++;
-    else if (event.type === "user") toc.push({ idx, text });
+    const { agent } = event;
+    if (idx < inherited && (text || agent)) inheritedMessages++;
+    const prompt = agent ? fromAncestor(agent) && (text || agentSummary(agent)) : event.type === "user" && text;
+    if (prompt) toc.push({ idx, text: prompt });
   });
   return {
     rows, toc, hasContext, inherited, inheritedMessages,
