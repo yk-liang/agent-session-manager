@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type { RequestTimelineData } from "./types";
 import { formatCount, formatHourMinute, formatMonthDay, formatSpan } from "./format";
 import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
@@ -19,6 +19,50 @@ function axisTicks(start: number, end: number) {
     ticks.push({ time, label: at.getHours() || at.getMinutes() ? formatHourMinute(time) : formatMonthDay(time) });
   }
   return ticks;
+}
+
+function bucketOf(bounds: number[], time: number) {
+  const next = bounds.findIndex(bound => bound > time);
+  return next < 0 ? bounds.length - 2 : Math.max(0, next - 1);
+}
+
+function positionOf(bounds: number[], time: number) {
+  const i = bucketOf(bounds, time);
+  const fraction = (time - bounds[i]) / (bounds[i + 1] - bounds[i]);
+  return ((i + fraction) / (bounds.length - 1)) * 100;
+}
+
+function TimelineAxis({ bounds, now }: { bounds: number[]; now?: number }) {
+  const axis = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const root = axis.current;
+    if (!root) return;
+    const ticks = [...root.querySelectorAll<HTMLSpanElement>("[data-tick]")];
+    const current = root.querySelector<HTMLSpanElement>("[data-now]");
+    const layout = () => {
+      const { left, right } = root.getBoundingClientRect();
+      const marker = current?.getBoundingClientRect();
+      let nextLeft = left;
+      for (const tick of ticks) {
+        const box = tick.getBoundingClientRect();
+        const clear = !marker || box.right + 6 <= marker.left || box.left >= marker.right + 6;
+        const visible = box.left >= nextLeft && box.right <= right && clear;
+        tick.style.visibility = visible ? "" : "hidden";
+        if (visible) nextLeft = box.right + 6;
+      }
+    };
+    layout();
+    const observer = new ResizeObserver(layout);
+    observer.observe(root);
+    for (const label of root.children) observer.observe(label);
+    return () => observer.disconnect();
+  }, [bounds, now]);
+
+  return <div className="request-timeline-axis" ref={axis} aria-hidden="true">
+    {axisTicks(bounds[0], bounds[bounds.length - 1]).map(({ time, label }) =>
+      <span key={time} data-tick style={{ left: `${positionOf(bounds, time)}%` }}>{label}</span>)}
+    {now !== undefined && <span data-now style={{ left: `clamp(1em, ${positionOf(bounds, now)}%, calc(100% - 1em))` }}>现在</span>}
+  </div>;
 }
 
 export default function RequestTimeline({ timeline, pageTimes, pageSize, page, now, onJump }: {
@@ -56,16 +100,7 @@ export default function RequestTimeline({ timeline, pageTimes, pageSize, page, n
   const start = bounds[0];
   const end = bounds[bucketCount];
   const pageOf = (offset: number) => Math.floor(offset / pageSize) + 1;
-  const bucketOf = (time: number) => {
-    const next = bounds.findIndex(bound => bound > time);
-    return next < 0 ? bucketCount - 1 : Math.max(0, next - 1);
-  };
-  const current = pageTimes.length ? [bucketOf(Math.min(...pageTimes)), bucketOf(Math.max(...pageTimes))] : null;
-  const x = (ms: number) => {
-    const i = bucketOf(ms);
-    const fraction = (ms - bounds[i]) / (bounds[i + 1] - bounds[i]);
-    return ((i + fraction) / bucketCount) * 100;
-  };
+  const current = pageTimes.length ? [bucketOf(bounds, Math.min(...pageTimes)), bucketOf(bounds, Math.max(...pageTimes))] : null;
   const openEnd = now < end && now >= start;
 
   const label = (i: number) => formatSpan(bounds[i], bounds[i + 1]);
@@ -155,12 +190,7 @@ export default function RequestTimeline({ timeline, pageTimes, pageSize, page, n
         </div>
       </div>
       {tip.tooltip}
-      <div className="request-timeline-axis" aria-hidden="true">
-        {axisTicks(start, end)
-          .filter(({ time }) => x(time) > 3 && x(time) < (openEnd ? 88 : 97))
-          .map(({ time, label: text }) => <span key={time} style={{ left: `${x(time)}%` }}>{text}</span>)}
-        {openEnd && <span style={{ left: `clamp(1em, ${x(now)}%, calc(100% - 1em))` }}>现在</span>}
-      </div>
+      <TimelineAxis bounds={bounds} now={openEnd ? now : undefined} />
       {(untimed > 0 || daysPerBucket != null) && <div className="request-timeline-meta">
         {untimed > 0 && (
           <button type="button" className="request-timeline-untimed btn-sm" onClick={() => onJump(pageOf(timed))}
