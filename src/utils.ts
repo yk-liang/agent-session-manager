@@ -1,4 +1,4 @@
-import type { SessionMeta } from "./types";
+import type { SessionMeta, SessionRef } from "./types";
 
 export function formatClient(agentName: string, client?: string | null, version?: string | null) {
   const recorded = client?.trim();
@@ -10,8 +10,14 @@ export function formatClient(agentName: string, client?: string | null, version?
   return { name, version: release, label: release ? `${name} ${release}` : name };
 }
 
-export function sessionKey(session: Pick<SessionMeta, "projectDir" | "sessionId">): string {
+export function sessionKey(session: SessionRef): string {
   return JSON.stringify([session.projectDir, session.sessionId]);
+}
+
+export function isEmptySession(session: SessionMeta) {
+  const thread = session.codex;
+  return thread && (!thread.canResume || ["exec", "mcp", "appServer"].includes(thread.source ?? "")) && thread.empty !== undefined
+    ? thread.empty : session.realUserCount === 0;
 }
 
 export function compareTimestamps(a: string | null, b: string | null): number {

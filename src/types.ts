@@ -10,9 +10,23 @@ export interface AgentInfo {
   deletePolicy: "trash" | "permanent" | "readOnly";
 }
 
-export interface SessionMeta {
+export interface SessionRef {
   sessionId: string;
   projectDir: string;
+}
+
+export interface CodexThread {
+  source?: string;
+  threadSource?: string;
+  parentId?: string;
+  subagent: boolean;
+  canResume: boolean;
+  empty?: boolean;
+  orphan?: boolean;
+  projectOwner?: SessionRef & { cwd: string | null };
+}
+
+export interface SessionMeta extends SessionRef {
   cwd: string | null;
   title: string | null;
   model: string | null;
@@ -20,6 +34,7 @@ export interface SessionMeta {
   client?: string | null;
   gitBranch: string | null;
   entrypoint: string | null;
+  codex?: CodexThread;
   firstTs: string | null;
   lastTs: string | null;
   userCount: number;

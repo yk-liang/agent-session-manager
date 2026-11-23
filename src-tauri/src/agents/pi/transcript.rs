@@ -53,6 +53,7 @@ pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi>
         client: None,
         git_branch: None,
         entrypoint: None,
+        codex: None,
         last_ts: first_ts.clone(),
         first_ts,
         user_count: 0,

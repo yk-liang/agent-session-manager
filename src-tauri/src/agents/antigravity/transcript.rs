@@ -71,6 +71,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             client: storage::client_id(path).map(str::to_owned),
             git_branch: None,
             entrypoint: Some(if is_cli(path) { "cli" } else { "antigravity" }.into()),
+            codex: None,
             first_ts: created.and_then(ms_to_iso),
             last_ts: None,
             user_count: 0,

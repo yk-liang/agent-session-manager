@@ -124,7 +124,7 @@ try{
   assert.ok(active.every(s=>s.width===active[0].width&&s.height===active[0].height));
   await page.evaluate(()=>window.dispatchEvent(new Event('blur')));assert.deepEqual(await page.evaluate(style),active);
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));assert.deepEqual(await page.evaluate(style),active);
-  for(const name of ['显示空会话','工具调用','思考过程','Markdown']){
+  for(const name of ['空会话','工具调用','思考过程','Markdown']){
     const box=page.getByRole('checkbox',{name,exact:true});await box.focus();const before=await box.isChecked();await box.press('Space');assert.equal(await box.isChecked(),!before);await box.press('Space');assert.equal(await box.isChecked(),before);
   }
   console.log(`PASS: explicit checkbox colors survive focus events and retain Space-key/accessibility behavior (${engine})`);

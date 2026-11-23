@@ -101,6 +101,7 @@ fn missing_project_paths(
         .iter()
         .map(|project| project.display_path.as_str())
         .chain(catalog.session_group_hints.iter().filter_map(|hint| hint.root.as_deref()))
+        .chain(catalog.sessions.iter().filter_map(|session| session.codex.as_ref()?.project_owner.as_ref()?.cwd.as_deref()))
         .collect();
     let mut missing = Vec::new();
     for path in paths {

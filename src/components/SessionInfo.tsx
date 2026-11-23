@@ -66,6 +66,8 @@ export default function SessionInfo({ meta, agentName, models = [], onCopyError 
               <dt>客户端</dt>
               <dd>{formatClient(agentName, meta.client, meta.version).label}</dd>
             </div>
+            {meta.codex?.source && <div><dt>会话来源</dt><dd><code>{meta.codex.source}</code></dd></div>}
+            {meta.codex?.threadSource && <div><dt>线程类型</dt><dd><code>{meta.codex.threadSource}</code></dd></div>}
             {meta.gitBranch && (
               <div>
                 <dt>Git 分支</dt>

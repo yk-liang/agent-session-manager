@@ -111,20 +111,24 @@ fn apply_with_environment(catalog: &mut Catalog, home: &Path, temporary_root: &P
         .map(|h| (h.project_dir.clone(), h.session_id.clone()))
         .collect();
     let mut roots = HashMap::new();
-    for session in &catalog.sessions {
-        let key = (session.project_dir.clone(), session.session_id.clone());
+    let identities = catalog.sessions.iter().flat_map(|session| {
+        let own = (&session.project_dir, &session.session_id, session.cwd.as_deref());
+        let owner = session.codex.as_ref().and_then(|thread| thread.project_owner.as_ref())
+            .map(|owner| (&owner.project_dir, &owner.session_id, owner.cwd.as_deref()));
+        std::iter::once(own).chain(owner)
+    });
+    for (project_dir, session_id, cwd) in identities {
+        let key = (project_dir.clone(), session_id.clone());
         if classified.contains(&key)
-            || catalog
-                .projectless_session_ids
-                .contains(&session.session_id)
+            || catalog.projectless_session_ids.contains(session_id)
         {
             continue;
         }
-        let Some(cwd) = session.cwd.as_deref() else {
+        let Some(cwd) = cwd else {
             continue;
         };
         let path = Path::new(cwd);
-        if !automatic_temporary(path, &session.session_id, temporary_root) {
+        if !automatic_temporary(path, session_id, temporary_root) {
             continue;
         }
         // 自动运行目录里的 AGENTS.md 常为临时生成；真实 Git 仓库（含 worktree）仍优先归组。
@@ -136,8 +140,8 @@ fn apply_with_environment(catalog: &mut Catalog, home: &Path, temporary_root: &P
             continue;
         };
         catalog.session_group_hints.push(SessionGroupHint {
-            project_dir: session.project_dir.clone(),
-            session_id: session.session_id.clone(),
+            project_dir: project_dir.clone(),
+            session_id: session_id.clone(),
             root: root
                 .as_ref()
                 .map(|root| root.to_string_lossy().into_owned()),

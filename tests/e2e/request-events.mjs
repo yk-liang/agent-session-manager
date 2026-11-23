@@ -517,8 +517,8 @@ try {
   await openCodex.click();
   await page.locator('.detail-body').getByText('关联的归档 Codex 会话', { exact: true }).waitFor();
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(call => call.cmd === 'read_session' && call.args.agent === 'codex' && call.args.projectDir === 'codex-source')));
-  assert.equal(await page.getByRole('checkbox', { name: '显示已归档', exact: true }).isChecked(), true);
-  await page.getByRole('checkbox', { name: '显示空会话', exact: true }).check();
+  assert.equal(await page.getByRole('checkbox', { name: '已归档', exact: true }).isChecked(), true);
+  await page.getByRole('checkbox', { name: '空会话', exact: true }).check();
   assert.ok(await page.locator('.detail-body').getByText('关联的归档 Codex 会话', { exact: true }).isVisible());
 
   await usageTab.click();

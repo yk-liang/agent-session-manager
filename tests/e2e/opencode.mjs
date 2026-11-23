@@ -96,7 +96,7 @@ try {
   await page.locator('.session-card-sub').waitFor();
   assert.match(await page.locator('.session-card-stats').textContent(), /^\d+ 条消息$/);
   console.log(`PASS: measured session sizes render and unavailable sizes are omitted (${engine})`);
-  const archiveFilter=page.getByRole('checkbox',{name:'显示已归档',exact:true});
+  const archiveFilter=page.getByRole('checkbox',{name:'已归档',exact:true});
   const archivedCard=page.locator('.session-card.archived');
   assert.equal(await archivedCard.count(),0);
   await archiveFilter.check();

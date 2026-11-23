@@ -12,7 +12,7 @@ fn snapshot(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
-) -> Result<BTreeMap<PathBuf, source::Stamp>, String> {
+) -> Result<BTreeMap<PathBuf, Vec<source::Stamp>>, String> {
     if targets.is_empty() {
         return Err("缺少待删会话文件，已中止删除".into());
     }
@@ -60,7 +60,7 @@ fn snapshot(
                 .ok_or("待删用量文件越出数据目录，已中止删除")?;
             // 状态目录里的日志也逐个验证；不能跟随子目录中的链接读到范围外的用量。
             verify_within_root(root, &path, TargetKind::File)?;
-            let stamp = source::stamp(&path).map_err(|e| source_error(&path, e))?;
+            let stamp = source::Source::for_agent(agent).stamps(&path).map_err(|e| source_error(&path, e))?;
             Ok((path, stamp))
         })
         .collect()
@@ -73,6 +73,17 @@ pub(super) fn preserve_at(
     targets: &[PathBuf],
     delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    preserve_validated_at(agent, roots, store, targets, || Ok(()), delete)
+}
+
+pub(super) fn preserve_validated_at(
+    agent: &str,
+    roots: &[PathBuf],
+    store: &mut Store,
+    targets: &[PathBuf],
+    validate: impl FnOnce() -> Result<(), String>,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     preserve_with_sync(
         agent,
         roots,
@@ -80,7 +91,8 @@ pub(super) fn preserve_at(
         |paths| {
             // 保留原 roots / scope，仅限制本次读取的路径；不能让局部同步清理其他会话缓存，
             // 也不能把它标记为整个 Agent 已完成首次同步。
-            super::ingest::sync_paths(agent, roots, store, Some(paths), &|| false).map(|_| ())
+            super::ingest::sync_paths(agent, roots, store, Some(paths), &|| false)?;
+            validate()
         },
         delete,
     )

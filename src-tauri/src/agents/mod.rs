@@ -65,11 +65,13 @@ pub struct SessionMeta {
     pub client: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex: Option<codex::ThreadMeta>,
     pub first_ts: Option<String>,
     pub last_ts: Option<String>,
     pub user_count: u32,
     pub assistant_count: u32,
-    /// 非 meta、有真实文本的用户消息数；为 0 表示空会话
+    /// 非 meta、有正文的用户消息数。
     pub real_user_count: u32,
     /// 含正文文本的 assistant 消息数（排除纯工具调用/思考事件）
     pub assistant_text_count: u32,
@@ -84,6 +86,15 @@ pub struct SessionMeta {
     /// 后端搜索定位及缓存校验用的源文件，SQLite 同时记录 WAL；不通过 IPC 暴露。
     #[serde(skip)]
     pub source_files: Vec<PathBuf>,
+}
+
+impl SessionMeta {
+    fn is_empty(&self) -> bool {
+        self.codex.as_ref()
+            .filter(|thread| !thread.can_resume || matches!(thread.source.as_deref(), Some("exec" | "mcp" | "appServer")))
+            .and_then(|thread| thread.empty)
+            .unwrap_or(self.real_user_count == 0)
+    }
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
@@ -103,6 +114,18 @@ pub struct SessionDetail {
     /// 可读取当前片段，但历史分页缺失时在打开详情后提示，不阻断已有内容。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SessionDeletion {
+    pub removed: Vec<search::SessionRef>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ArchiveChange {
+    pub session: search::SessionRef,
+    pub archived: bool,
 }
 
 /// 会话目录快照，包含项目分组、会话摘要和读取告警。

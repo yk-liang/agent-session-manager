@@ -62,6 +62,9 @@
   font: 11px/1.5 var(--font-mono);
   overflow-wrap: anywhere;
 }
+.parent-session { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.parent-session > span { flex-shrink: 0; }
+.parent-session code { overflow-wrap: anywhere; }
 
 .copy-id-icon { align-self: center; opacity: 0.6; }
 .session-id:hover { border-color: var(--border); background: var(--bg-hover); }

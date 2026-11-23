@@ -21,11 +21,13 @@ pub(super) fn rollouts(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
-    for year in read_dir_warned(active_root, warnings) {
-        check_catalog_cancelled(cancelled)?;
-        for month in read_dir_warned(&year.path(), warnings) {
-            for day in read_dir_warned(&month.path(), warnings) {
-                read_rollouts(&day.path(), &mut paths, warnings, cancelled)?;
+    if !active_root.symlink_metadata().is_err_and(|error| error.kind() == ErrorKind::NotFound) {
+        for year in read_dir_warned(active_root, warnings) {
+            check_catalog_cancelled(cancelled)?;
+            for month in read_dir_warned(&year.path(), warnings) {
+                for day in read_dir_warned(&month.path(), warnings) {
+                    read_rollouts(&day.path(), &mut paths, warnings, cancelled)?;
+                }
             }
         }
     }
@@ -65,6 +67,32 @@ fn read_rollouts(
         }
     }
     Ok(())
+}
+
+pub(super) fn deletion_rollouts(active_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut pending = vec![active_root.to_path_buf(), archived_root(active_root)];
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if !crate::agents::present(&directory)? {
+            continue;
+        }
+        for entry in read_dir_warned(&directory, &mut warnings) {
+            let kind = entry.file_type().map_err(|error| format!("无法读取 {:?}：{error}", entry.path()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if name.starts_with("rollout-") && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    if let Some(warning) = warnings.into_iter().next() {
+        return Err(warning);
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 enum Input {

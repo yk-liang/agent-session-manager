@@ -349,6 +349,7 @@ mod tests {
             "archived_sessions/a.jsonl.zst",
             "session_index.jsonl",
             ".codex-global-state.json",
+            "state_5.sqlite-wal",
         ] {
             assert!(codex.relevant(&change(root.join(path))));
         }

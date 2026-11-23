@@ -39,7 +39,7 @@ try {
   assert.equal(await project.getAttribute('title'), '/Users/demo/.codex');
   await project.click();
   for (const count of [4, 1, 4, 1]) {
-    await page.getByRole('checkbox', { name: '显示空会话', exact: true }).setChecked(count === 4);
+    await page.getByRole('checkbox', { name: '空会话', exact: true }).setChecked(count === 4);
     await page.waitForFunction(count => document.querySelectorAll('.session-card').length === count, count);
     assert.equal(await project.getAttribute('title'), '/Users/demo/.codex');
     assert.equal(await project.locator('.project-path').textContent(), '~/.codex');

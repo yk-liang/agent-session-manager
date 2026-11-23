@@ -19,6 +19,8 @@ fn mutations_use_the_verified_thread_and_ignore_notifications() {
             action,
             &escape_cwd("/private/tmp/project"),
             "test-thread",
+            None,
+            &Mutex::new(()),
         )
         .unwrap();
         let sent: Vec<Value> = Cursor::new(input)
@@ -46,6 +48,8 @@ fn rejects_a_mismatched_project_before_sending_a_mutation() {
         ThreadAction::Delete,
         &escape_cwd("/tmp/project"),
         "test-thread",
+        None,
+        &Mutex::new(()),
     );
     assert!(matches!(result, Err(UpdateError::Operation(message)) if message.contains("所属项目")));
     assert_eq!(Cursor::new(input).lines().count(), 3);
@@ -62,6 +66,8 @@ fn only_an_explicitly_unsupported_mutation_can_try_another_runtime() {
             ThreadAction::Delete,
             &escape_cwd("/tmp/project"),
             "test-thread",
+            None,
+            &Mutex::new(()),
         )
     };
     assert!(matches!(
@@ -108,7 +114,7 @@ fn check_runtime(executables: &[PathBuf]) {
     fs::write(&active, format!("{header}\n{message}\n")).unwrap();
 
     let project = escape_cwd(home.to_str().unwrap());
-    let update = |action| update_using(executables, &home, action, &project, id).unwrap();
+    let update = |action| update_using(executables, &home, action, &project, id, None).unwrap();
     update(ThreadAction::Archive);
     assert!(!active.exists());
     assert!(archived.is_file());
@@ -130,7 +136,45 @@ fn check_runtime(executables: &[PathBuf]) {
     );
 
     update(ThreadAction::Archive);
-    update(ThreadAction::Delete);
+    let children = [
+        ("019a2856-2000-7000-8000-000000000002", id),
+        (
+            "019a2856-2000-7000-8000-000000000003",
+            "019a2856-2000-7000-8000-000000000002",
+        ),
+    ];
+    for (child, parent) in children {
+        let mut header = header.clone();
+        header["payload"]["id"] = json!(child);
+        header["payload"]["source"] =
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":parent,"depth":1}}});
+        header["payload"]["parent_thread_id"] = json!(parent);
+        let child_path =
+            archived.with_file_name(format!("rollout-2026-10-27T00-00-00-{child}.jsonl"));
+        fs::write(child_path, format!("{header}\n{message}\n")).unwrap();
+    }
+    let plan = super::super::deletion::Plan::for_session(&home, &project, id).unwrap();
+    let result = plan
+        .run_using(
+            &home.join("thread_history_1.sqlite"),
+            &|_, validate, mutate| {
+                validate()?;
+                mutate()
+            },
+            |home, project, id, check| {
+                update_using(
+                    executables,
+                    home,
+                    ThreadAction::Delete,
+                    project,
+                    id,
+                    Some(check),
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(result.error, None);
+    assert_eq!(result.removed.len(), 3);
     assert!(!archived.exists());
     assert!(super::super::read_session_in(&root, id).is_err());
 }

@@ -182,8 +182,7 @@ pub(crate) fn read_jsonl_checked(
 /// - Degraded：解析成功但有瑕疵（如跳过了若干损坏行，统计可能不完整），
 ///   附带的说明必须进 warnings
 /// - Failed：不可读/损坏（附原因，进 warnings）
-/// "与本应用无关"（如 Codex 非交互会话）由调用方依据解析结果判断后
-/// 静默跳过，不算错误、不进 warnings。
+/// 调用方可依据目录筛选条件跳过成功解析的会话。
 pub enum ParseOutcome<T> {
     Ok(T),
     Degraded(T, String),
