@@ -68,6 +68,31 @@ export function shortPath(path: string | null): string {
   return path;
 }
 
+/** 按 fish 风格逐级缩写目录直到放得下，仍放不下时省略前面的目录。 */
+export function fitPath(path: string, fits: (label: string) => boolean) {
+  if (fits(path)) return path;
+
+  const parts = path.split("/");
+  const trailingSlash = path.endsWith("/");
+  if (trailingSlash) parts.pop();
+  const leaf = parts.pop();
+  if (!parts.length || !leaf) return path;
+
+  const suffix = trailingSlash ? `${leaf}/` : leaf;
+  const compact = [...parts];
+  for (const [index, part] of parts.entries()) {
+    if (!part || part === "~" || part === "." || part === "..") continue;
+    compact[index] = Array.from(part).slice(0, part.startsWith(".") ? 2 : 1).join("");
+    const label = [...compact, suffix].join("/");
+    if (fits(label)) return label;
+  }
+  for (let start = 1; start <= parts.length; start++) {
+    const label = ["…", ...parts.slice(start), suffix].join("/");
+    if (fits(label)) return label;
+  }
+  return suffix;
+}
+
 export function projectName(path: string | null): string {
   return path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path || "项目未记录";
 }

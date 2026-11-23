@@ -1,30 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { fitPath } from "../utils";
 
 let pathMeasure: CanvasRenderingContext2D | null = null;
-
-export function fitPath(path: string, fits: (label: string) => boolean) {
-  if (fits(path)) return path;
-
-  const parts = path.split("/");
-  const trailingSlash = path.endsWith("/");
-  if (trailingSlash) parts.pop();
-  const leaf = parts.pop();
-  if (!parts.length || !leaf) return path;
-
-  const suffix = trailingSlash ? `${leaf}/` : leaf;
-  const compact = [...parts];
-  for (const [index, part] of parts.entries()) {
-    if (!part || part === "~" || part === "." || part === "..") continue;
-    compact[index] = Array.from(part).slice(0, part.startsWith(".") ? 2 : 1).join("");
-    const label = [...compact, suffix].join("/");
-    if (fits(label)) return label;
-  }
-  for (let start = 1; start <= parts.length; start++) {
-    const label = ["…", ...parts.slice(start), suffix].join("/");
-    if (fits(label)) return label;
-  }
-  return suffix;
-}
 
 interface Props {
   path: string;
