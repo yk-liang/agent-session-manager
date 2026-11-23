@@ -13,8 +13,10 @@ export type Tone = "dim" | "accent" | "success" | "warning" | "danger" | "violet
 const statusLabels: Record<string, string> = { pending: "等待中", running: "进行中", error: "失败" };
 
 /** 完成是常态，只标出等待、进行中和失败。 */
-export function Status({ status }: { status?: string }) {
-  return status && statusLabels[status] ? <span className={`tool-status ${status}`}>{statusLabels[status]}</span> : null;
+export function Status({ status, exit }: { status?: string; exit?: number }) {
+  return status && statusLabels[status] ? <span className={`tool-status ${status}`}>
+    {statusLabels[status]}{status === "error" && exit !== undefined ? ` exit ${exit}` : ""}
+  </span> : null;
 }
 
 export function TypeIcon({ icon, label, tone }: { icon: LucideIcon; label: string; tone?: Tone }) {
@@ -49,8 +51,11 @@ export function OpCard({ item, className, icon, label, tone, tag, open = false, 
 }) {
   const status = itemStatus(item);
   const failed = status === "error";
-  const exit = failed && item.op?.kind === "shell" ? item.op.exit_code : undefined;
-  const reason = failed && !exit ? errorSummary(item.part.result) : undefined;
+  const summary = failed ? errorSummary(item.part.result) : undefined;
+  const exitLine = summary?.match(/^(?:Exit code\s*[:：]?|Process exited with code|退出码\s*[:：]?)\s*(-?\d+)$/i);
+  const recordedExit = item.op?.kind === "shell" ? item.op.exit_code : undefined;
+  const exit = recordedExit || item.part.result?.exit_code || (exitLine && Number(exitLine[1])) || undefined;
+  const reason = exit === undefined ? summary : undefined;
   const shownTag = tag ?? item.part.content.name;
   const scriptResult = item.index === 0 ? item.part.content.script_result : undefined;
   return <Collapsible id={item.key} className={`tool op ${className}${failed ? " error" : ""}`} defaultOpen={open && !failed}
@@ -58,7 +63,7 @@ export function OpCard({ item, className, icon, label, tone, tag, open = false, 
       <TypeIcon icon={icon} label={label} tone={tone} />
       {head}
       <span className="collapsible-status">
-        {exit ? <span className="tool-status error">退出码 {exit}</span> : <Status status={status} />}
+        <Status status={status} exit={exit} />
         {shownTag && <span className="tool-tag">{shownTag}</span>}
       </span>
     </>}

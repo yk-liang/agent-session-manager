@@ -510,7 +510,12 @@ fn read_rollout(
                             }
                             block
                         } else {
-                            json!({"type":"tool_result","is_error":shallow.output.is_some_and(tool_output::raw_failed),"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token})
+                            let status = shallow.output.map(tool_output::raw_status).unwrap_or_default();
+                            let mut block = json!({"type":"tool_result","is_error":status.failed,"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
+                            if let Some(exit) = status.exit_code.filter(|_| shallow.kind.as_deref() == Some("function_call_output")) {
+                                block["exit_code"] = json!(exit);
+                            }
+                            block
                         };
                         let role = if call { "assistant" } else { "user" };
                         new_events.push(json!({"type":role,"timestamp":ts,"message":{"role":role,"content":[block]}}));

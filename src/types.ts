@@ -130,6 +130,7 @@ export interface ContentBlock {
   tool_use_id?: string;
   content?: unknown;
   is_error?: boolean;
+  exit_code?: number;
   script_result?: ContentBlock;
   /** 后端给出的操作描述；延迟加载时只带标题所需字段，正文随原始数据一起读取。 */
   ops?: ToolOp[];

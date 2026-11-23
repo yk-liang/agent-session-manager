@@ -216,6 +216,7 @@ pub(super) fn prepare(conn: &Connection, session: Option<&str>) -> rusqlite::Res
                     'error',CASE WHEN json_extract(data,'$.status')='timeout' THEN '终端命令超时'
                         WHEN json_extract(data,'$.status')='killed' THEN '终端命令已取消'
                         WHEN json_extract(data,'$.exit')!=0 THEN '退出码：' || json_extract(data,'$.exit') END,
+                    'metadata',json_object('exit',CASE WHEN json_extract(data,'$.status')='exited' THEN json_extract(data,'$.exit') END),
                     'content', json_extract(data,'$.output.output')))
         FROM temp._asm_v2_messages WHERE type='shell' AND json_valid(data)
         UNION ALL

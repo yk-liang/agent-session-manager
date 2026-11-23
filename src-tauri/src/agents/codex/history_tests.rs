@@ -605,7 +605,7 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     let call = json!({"type":"response_item","ordinal":2,"timestamp":"2099-12-31T00:00:02Z",
         "payload":{"id":"call","type":"function_call","name":"shell","call_id":"a","arguments":"{\"cmd\":\"hello\"}"}});
     let output = json!({"type":"response_item","ordinal":3,"timestamp":"2099-12-31T00:00:03Z",
-        "payload":{"id":"out","type":"function_call_output","call_id":"a","output":"{\"output\":\"FAILED\",\"metadata\":{\"status\":\"error\"}}"}});
+        "payload":{"id":"out","type":"function_call_output","call_id":"a","output":"{\"output\":\"FAILED\",\"metadata\":{\"status\":\"error\"},\"chunk_id\":\"test\",\"exit_code\":2}"}});
     let path = page(
         &root,
         "view-thread",
@@ -620,6 +620,7 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     assert_eq!(full.meta.assistant_count, view.meta.assistant_count);
     let result = &view.events[2]["message"]["content"][0];
     assert_eq!(result["is_error"], true);
+    assert_eq!(result["exit_code"], 2);
     assert!(result.get("content").is_none());
     let mut tokens = vec![];
     for (original, light) in full.events.iter().zip(&view.events) {

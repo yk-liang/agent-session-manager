@@ -13,7 +13,7 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
     if(blocked){Storage.prototype.getItem=()=>{throw Error('blocked')};Storage.prototype.setItem=()=>{throw Error('blocked')};}
     const user=(id,text)=>({type:'user',uuid:id,message:{content:text}});
     const assistant=(id,text)=>({type:'assistant',uuid:id,message:{content:text}});
-    const standaloneOutput=Array.from({length:30},(_,i)=>`output line ${i+1}`).join('\n');
+    const standaloneOutput=['Exit code 2',...Array.from({length:30},(_,i)=>`output line ${i+1}`)].join('\n');
     const longPreview='超长消息正文 '.repeat(500);
     const markdown='# 汇总标题\n\n这是 **加粗重点** 和 *斜体*、~~删除文字~~、`inlineCode`。\n\n- 列表甲\n- 列表乙\n\n1. 第一步\n2. 第二步\n\n> 引用内容\n\n| 项目 | 状态 |\n| --- | --- |\n| Markdown | 完成 |\n\n- [x] 已完成事项\n- [ ] 待办事项\n\n```ts\nconst codeNeedle = "'+ 'x'.repeat(240)+'";\n```\n\n[参考资料](https://example.com/guide)';
     const messages={
@@ -29,6 +29,7 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
         {type:'tool_use',id:'skill',name:'Skill',input:{skill:'fixture',args:'--brief'},ops:[{kind:'skill',name:'fixture',args:'--brief',body:'# 技能标题\n**技能正文**'}]},
         {type:'tool_use',id:'ask',name:'AskUserQuestion',deferred:'ask-input',ops:[{kind:'ask',questions:[{question:'使用哪个布局？',options:[{label:'紧凑'},{label:'宽松'}],answer:'紧凑'}]}]},
         {type:'tool_use',id:'search',name:'Grep',ops:[{kind:'search',pattern:'^(a+)+$',matches:1,files:1,hits:[{path:'fixture.txt',lines:[{line:1,text:'a'.repeat(32)+'b'}]}]}]},
+        {type:'tool_use',id:'recorded-exit',name:'bash',ops:[{kind:'shell',intent:'run',head:'python3 --version',command:'python3 --version'}]},
         ...[
           ['write','printf x > output.txt','write'],
           ['append','printf x >> output.txt','write'],
@@ -37,6 +38,7 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
       ]}},{type:'user',message:{content:[
         {type:'tool_result',tool_use_id:'skill',content:'---\nname: fixture\n---\n# 技能标题\n**技能正文**'},
         {type:'tool_result',tool_use_id:'ask',content:'**紧凑**'},
+        {type:'tool_result',tool_use_id:'recorded-exit',is_error:true,exit_code:7,content:'Exit code 2\n退出码：7'},
       ]}}],
       safe:[assistant('a-safe','## 安全样例\n\n<script>window.__PWNED__=true</script>\n\n![图片说明](https://markdown-image.invalid/pixel.png)\n\n[危险](javascript:alert(1))\n\n<img src="https://markdown-image.invalid/html.png" onerror="window.__PWNED__=true">')],
     };
@@ -123,14 +125,17 @@ try{
   assert.equal(await page.locator('.collapsible .markdown-body').count(),1);
   assert.equal(await page.evaluate(()=>window.__MD__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
   const standalone=page.locator('.event-group > .collapsible.command').filter({hasText:'Bash'});
-  await standalone.getByRole('button',{name:/^Git\s*git status --short\s*失败\s*Bash$/}).click();
+  const failedCommand=standalone.getByRole('button',{name:/^Git\s*git status --short\s*失败 exit 2\s*Bash$/});
+  await failedCommand.waitFor();
+  assert.equal(await standalone.locator('.op-error').count(),0);
+  await failedCommand.click();
   assert.deepEqual(await standalone.locator(':scope > .collapsible-body > .tool-payload').evaluateAll(sections=>
     sections.map(section=>section.dataset.kind)),['input','error']);
   assert.equal(await standalone.locator('.tool-command .code').textContent(),'git status --short');
   await standalone.getByRole('button',{name:'复制命令',exact:true}).click();
   await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&call.args.text==='git status --short'));
   assert.equal(await standalone.locator('.tool-line-numbers').count(),0);
-  const expandOutput=standalone.getByRole('button',{name:'展开全部 30 行',exact:true});
+  const expandOutput=standalone.getByRole('button',{name:'展开全部 31 行',exact:true});
   const expandStyle=button=>button.evaluate(el=>{
     const style=getComputedStyle(el), parentStyle=getComputedStyle(el.parentElement);
     const bounds=el.getBoundingClientRect(), parent=el.parentElement.getBoundingClientRect();
@@ -152,7 +157,7 @@ try{
   assert.equal(await standalone.locator('.tool-output').getAttribute('data-expanded'),'true');
   await standalone.getByRole('button',{name:'复制输出',exact:true}).click();
   await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&
-    call.args.text===Array.from({length:30},(_,i)=>`output line ${i+1}`).join('\n')));
+    call.args.text===['Exit code 2',...Array.from({length:30},(_,i)=>`output line ${i+1}`)].join('\n')));
   const runCommand=page.locator('.event-group > .collapsible.command').filter({hasText:'run_command'});
   await runCommand.getByRole('button',{name:/^Git 查看改动\s*git diff --stat\s*\+1 步\s*检查仓库变更\s*run_command$/}).click();
   await runCommand.locator('.tool-command .code').waitFor();
@@ -189,6 +194,7 @@ try{
   const grep=page.locator('.collapsible.search');
   await grep.locator('.collapsible-head').click();
   assert.equal(await grep.locator('.search-text').textContent(),'a'.repeat(32)+'b');
+  await page.getByRole('button',{name:/python3 --version\s*失败 exit 7/}).waitFor();
   assert.deepEqual(await page.locator('.collapsible.command .op-chip').allTextContents(),['写入','追加','原地修改']);
   console.log(`PASS: Skill and semantic cards switch to raw data; redirect labels distinguish write and append (${engine})`);
 

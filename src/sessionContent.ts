@@ -29,6 +29,7 @@ function blocks(content: unknown, row: number): SessionBlock[] {
       name: string("name"), description: string("description"), id: string("id"),
       tool_use_id: string("tool_use_id"), input: block.input, content: block.content,
       is_error: typeof block.is_error === "boolean" ? block.is_error : undefined,
+      exit_code: typeof block.exit_code === "number" ? block.exit_code : undefined,
       script_result: typeof block.script_result === "object" && block.script_result !== null ? block.script_result as ContentBlock : undefined,
       source: block.source, url: string("url"), image_url: string("image_url"), filename: string("filename"),
       ops: Array.isArray(block.ops) ? block.ops as ToolOp[] : undefined,

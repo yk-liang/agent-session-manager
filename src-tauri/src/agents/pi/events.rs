@@ -151,9 +151,13 @@ pub(super) fn entry(v: &Value, cwd: Option<&str>, detail: bool) -> Vec<Value> {
                 }
                 output.push_str(status);
             }
+            let mut result = json!({"type":"tool_result","tool_use_id":id,"is_error":status.is_some(),"content":output});
+            if let Some(exit) = exit.filter(|_| !cancelled) {
+                result["exit_code"] = json!(exit);
+            }
             vec![message_event(v, cwd, "assistant", json!([
                 {"type":"tool_use","id":id,"name":"bash","input":{"command":message["command"]}},
-                {"type":"tool_result","tool_use_id":id,"is_error":status.is_some(),"content":output}
+                result
             ]))]
         }
         _ => Vec::new(),

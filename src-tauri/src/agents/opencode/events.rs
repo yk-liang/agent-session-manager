@@ -62,6 +62,14 @@ pub(super) fn tool_blocks(
         .into_iter().find_map(|key| state.get(key).filter(|value| !value.is_null()));
     let result = if matches!(status, Some("completed" | "error")) || output.is_some() || failed {
         let mut result = json!({"type":"tool_result", "tool_use_id":identity, "is_error":failed});
+        if failed && matches!(name, "bash" | "shell") {
+            let exit = state["metadata"]["exit"].as_i64().or_else(|| {
+                error_text(&state["error"])?.trim().strip_prefix("Exit code ")?.parse::<i64>().ok()
+            });
+            if let Some(exit) = exit {
+                result["exit_code"] = json!(exit);
+            }
+        }
         if include_content {
             result["content"] = if let Some(error) = error_text(&state["error"]) {
                 with_error(error, output)

@@ -72,7 +72,7 @@ try {
   console.log(`PASS: file reads show the path up front and load only their content on expansion; stored reasoning expands (${engine})`);
 
   await page.locator('.detail-body').evaluate(el=>el.scrollTo(0,el.scrollHeight));
-  await page.getByRole('button',{name:/^工具调用 bash.*失败$/}).click();
+  await page.getByRole('button',{name:/^工具调用 bash.*失败 exit 1$/}).click();
   await page.getByText('Exit code 1',{exact:true}).waitFor();
   assert.ok(await page.getByRole('button',{name:/^工具调用 queued.*等待中$/}).count());
   await page.getByRole('button',{name:/^工具调用 streaming.*进行中$/}).click();
