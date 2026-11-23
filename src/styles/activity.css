@@ -67,21 +67,6 @@
 
 .collapsible.thinking .collapsible-type { color: #a99ff0; }
 
-.collapsible-name {
-  color: var(--accent);
-  flex: 0 1 auto;
-  max-width: 45%;
-  font-size: var(--text-meta);
-  font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  background: var(--accent-soft);
-}
-
 .caret { color: var(--text-dim); }
 
 .collapsible-body {
@@ -103,8 +88,8 @@
 }
 
 .tool-status.running::before { background: var(--accent); }
-.tool-status.error { color: var(--danger); }
-.tool-status.error::before { background: currentColor; }
+.tool-status:is(.error, .denied) { color: var(--danger); }
+.tool-status:is(.error, .denied)::before { background: currentColor; }
 
 .tool-payload {
   --tool-section-accent: var(--accent);
@@ -136,6 +121,17 @@
 
 .tool-payload-header { min-height: 26px; padding-bottom: 5px; }
 .tool-payload-title { color: var(--tool-section-accent); font-size: var(--text-meta); font-weight: 600; }
+.tool-payload-note { min-width: 0; color: var(--text-muted); font-size: var(--text-meta); }
+
+/* 小节的展示方式切换器：比工具栏里的小一号，选中项用小节自己的强调色。 */
+.segmented.section-views { height: 22px; gap: 1px; border-radius: var(--radius-sm); background: var(--bg); }
+.segmented.section-views > button { padding: 0 8px; border-radius: 4px; color: var(--text-muted); font-size: 11.5px; }
+
+.segmented.section-views > button:is([aria-pressed="true"], [aria-selected="true"]),
+.segmented.section-views > button:is([aria-pressed="true"], [aria-selected="true"]):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--tool-section-accent) 16%, transparent);
+  color: var(--tool-section-accent);
+}
 
 .tool-payload-actions {
   margin-left: auto;
@@ -207,11 +203,20 @@
 .op-icon.violet { color: #a99ff0; }
 .op-icon.danger, .collapsible.error .op-icon { color: var(--danger); }
 
-/* 目标不收缩，超过上限才截断；目录和说明先收缩。 */
+/* 标题内容区占满状态区左侧的空间，放不下的部分在这里裁掉，状态和工具名不会被挤出卡片。 */
+.op-main {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 目标在末尾截断；目录和说明先收缩，统计标签完整显示。 */
 .op-name, .op-title {
-  flex: 0 0 auto;
-  max-width: 62%;
-  min-width: 2em;
+  flex: 0 1 auto;
+  min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -221,11 +226,10 @@
 .op-name { font: 600 12px var(--font-mono); }
 .op-name.pattern { color: var(--info); font-weight: 500; }
 .op-name.cmd { color: #cfd3da; font-weight: 400; }
-.op-name.multi { max-width: 38%; }
 .op-title { font-weight: 600; }
 .op-namespace { color: var(--text-muted); font-weight: 400; }
 
-.op-dir, .op-detail, .op-cwd {
+.op-dir, .op-detail {
   flex: 0 1000 auto;
   min-width: 0;
   overflow: hidden;
@@ -235,13 +239,10 @@
 }
 
 .op-dir, .op-detail.code-detail { font: 11.5px var(--font-mono); }
-.op-cwd { display: inline-flex; align-items: center; gap: 3px; font: 11px var(--font-mono); }
-.op-cwd .ui-icon { flex: none; }
 
 .op-meta {
   display: inline-flex;
-  flex: 0 1 auto;
-  min-width: min-content;
+  flex: none;
   align-items: center;
   gap: 6px;
   color: var(--text-dim);
@@ -260,42 +261,29 @@
   white-space: nowrap;
 }
 
-.op-chip:is(.shrink, .answer, .kind) { flex: 0 1 auto; min-width: 4.5em; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.op-chip:is(.answer, .kind) { flex: 0 1 auto; min-width: 4.5em; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
 .op-chip:is(.sans, .created, .removed, .answer, .kind) { font-family: var(--font-sans); }
 .op-chip:is(.created, .answer) { background: var(--success-soft); color: var(--success); }
 .op-chip.removed { background: var(--danger-soft); color: var(--danger); }
 .op-chip.kind { background: var(--accent-soft); color: var(--info); }
 .op-added { color: var(--success); }
 .op-removed { color: var(--danger); }
-.tool-tag { color: var(--text-muted); font: 11px var(--font-mono); }
-
-/* 多步命令的后续步骤：每步带自己的图标，空间不够时整体收缩。 */
-.op-step {
-  display: inline-flex;
-  flex: 0 2 auto;
-  align-items: center;
-  gap: 4px;
-  min-width: 5.5em;
-  overflow: hidden;
-  padding-left: 8px;
-  border-left: 1px solid var(--border-raised);
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
-.op-step code { overflow: hidden; text-overflow: ellipsis; color: #cfd3da; font: 11.5px var(--font-mono); }
-.op-step code.pattern { color: var(--info); }
-.op-more { flex: none; color: var(--text-muted); font: 11px var(--font-mono); }
-
-.op-error {
-  padding: 0 12px 7px 56px;
-  margin-top: -2px;
+.collapsible.tool .collapsible-status { max-width: 55%; min-width: 0; }
+.collapsible.tool .tool-status { flex: none; }
+.collapsible.tool.generic .tool-tag { color: var(--info); }
+.tool-tag {
+  color: var(--text-muted);
+  font: 11px var(--font-mono);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  color: color-mix(in srgb, var(--danger) 80%, var(--text));
-  font-size: var(--text-meta);
 }
+
+.tool-arguments { display: grid; gap: 6px; margin: 0; }
+.tool-arguments > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 3fr); gap: 8px; }
+.tool-arguments dt { overflow-wrap: anywhere; color: var(--text-dim); }
+.tool-arguments dd { min-width: 0; margin: 0; }
+.tool-arguments pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .browse-title { flex: none; color: var(--text); font-weight: 600; white-space: nowrap; }
 
@@ -322,7 +310,6 @@
 .collapsible.browse > .collapsible-body > .collapsible { border: 0; border-radius: 0; background: transparent; }
 .collapsible.browse > .collapsible-body > .collapsible + .collapsible { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
 .collapsible.browse > .collapsible-body > .collapsible > .collapsible-head { min-height: var(--control-compact); padding-left: 24px; }
-.collapsible.browse > .collapsible-body > .collapsible > .op-error { padding-left: 70px; }
 
 .tool-diff { min-width: max-content; font: 11.5px/1.6 var(--font-mono); }
 
@@ -398,10 +385,7 @@
 .todo-list li[data-status="completed"]::before { content: "●"; color: var(--success); text-decoration: none; }
 
 @container (max-width: 560px) {
-  .tool-tag, .browse-names, .op-chip.shrink { display: none; }
-  .op-name, .op-title { max-width: 46%; }
-  .op-name.multi { max-width: 30%; }
-  .op-error { padding-left: 12px; }
+  .browse-names { display: none; }
 }
 
 .tool-result-parts { display: grid; gap: 6px; }

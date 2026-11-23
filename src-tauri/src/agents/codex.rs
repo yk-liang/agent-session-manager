@@ -534,16 +534,15 @@ fn read_rollout(
                                 (None, Some(input)) => serde_json::from_str::<Value>(input.get()).ok(),
                                 _ => None,
                             };
-                            if let Some(op) = input.and_then(|input| tools::describe(&name, &input)) {
-                                block["ops"] = json!([op.summary()]);
+                            let ops = input.map(|input| tools::describe(&name, &input)).unwrap_or_default();
+                            if !ops.is_empty() {
+                                block["ops"] = json!(ops.into_iter().map(super::tool_ops::Op::summary).collect::<Vec<_>>());
                             }
                             block
                         } else {
                             let status = shallow.output.map(tool_output::raw_status).unwrap_or_default();
-                            let mut block = json!({"type":"tool_result","is_error":status.failed,"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
-                            if let Some(exit) = status.exit_code.filter(|_| shallow.kind.as_deref() == Some("function_call_output")) {
-                                block["exit_code"] = json!(exit);
-                            }
+                            let mut block = json!({"type":"tool_result","tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
+                            status.annotate(&mut block, shallow.kind.as_deref() == Some("function_call_output"));
                             block
                         };
                         let role = if call { "assistant" } else { "user" };

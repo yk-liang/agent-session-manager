@@ -29,6 +29,9 @@ function blocks(content: unknown, row: number): SessionBlock[] {
       name: string("name"), description: string("description"), id: string("id"),
       tool_use_id: string("tool_use_id"), input: block.input, content: block.content,
       is_error: typeof block.is_error === "boolean" ? block.is_error : undefined,
+      error_summary: string("error_summary"),
+      empty_command_output: block.empty_command_output === true || undefined,
+      command_output: string("command_output"),
       exit_code: typeof block.exit_code === "number" ? block.exit_code : undefined,
       script_result: typeof block.script_result === "object" && block.script_result !== null ? block.script_result as ContentBlock : undefined,
       source: block.source, url: string("url"), image_url: string("image_url"), filename: string("filename"),
@@ -68,7 +71,7 @@ function hasActivity(part: SessionBlock): Activity | undefined {
   if (part.content.type === "tool_use" || part.content.type === "tool_result" && !part.linked) return "tool";
 }
 
-const DESCRIPTION_FIELDS = ["description", "toolsummary", "query"] as const;
+const DESCRIPTION_FIELDS = ["description", "toolsummary", "query", "completionsummary", "message", "action"] as const;
 
 export function toolStatus(block: ContentBlock, result?: ContentBlock) {
   if (block.status === "error" || result?.status === "error" || result?.is_error) return "error";

@@ -3,7 +3,7 @@ mod classify;
 mod syntax;
 
 use super::{browse, line_count, Op, Script};
-use classify::{classify, filter, is_pure_filter, option, script_lang, Segment};
+use classify::{classify, filter, is_pure_filter, Segment};
 use serde::Serialize;
 use std::ops::Not;
 use syntax::{heredocs, pipelines};
@@ -19,15 +19,12 @@ pub(crate) struct Shell {
     exit_code: Option<i64>,
     #[serde(skip_serializing_if = "Not::not")]
     no_match: bool,
-    /// 开头的 `cd` 或 `git -C` 指定的目录。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cwd: Option<String>,
+    #[serde(skip_serializing_if = "Not::not")]
+    search_exit_one: bool,
     /// 第一步的意图和原文（去掉环境变量、无关重定向）；循环取首行。
     intent: Intent,
     #[serde(skip_serializing_if = "String::is_empty")]
     head: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    filters: Vec<Filter>,
     /// 第一步之后还有几步。
     #[serde(skip_serializing_if = "is_zero")]
     more: usize,
@@ -59,8 +56,8 @@ pub(crate) struct Step {
 pub(crate) enum Intent {
     Read, Search, Find, List, Write, Modify, Script, Run,
     GitDiff, GitLog, GitCommit, Git, Github,
-    Test, Build, Install, Remote, Http, Browser, Database,
-    Mkdir, Remove, Copy, Move, Process, Kill, Wait, Open, Count, Other,
+    Test, Build, Install, Remote, Http, Browser, Database, Agent,
+    Mkdir, Remove, Copy, Move, Process, Kill, Wait, Open, Count, Inspect, Transform, Other,
 }
 
 /// 管道后段：截取行数、筛选和计数。
@@ -101,19 +98,20 @@ impl Shell {
 pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<i64>, output: Option<&str>) -> Op {
     let (head, bodies) = heredocs(command);
     let mut bodies = bodies.into_iter();
-    let mut cwd = None;
     let mut parsed: Vec<Parsed> = Vec::new();
     let mut vars = Vec::new();
-    let mut no_match = false;
     // 循环从哪里开始；循环体里的路径多半是循环变量，不按文件操作展示。
     let mut looped = None;
-    let pipelines = pipelines(&head);
-    let no_match_output = pipelines.len() == 1 && exit_code == Some(1) && output.is_some_and(|text| text.trim().is_empty());
-    for pipeline in pipelines {
+    for pipeline in pipelines(&head) {
         let segment = Segment::parse(pipeline[0], &vars);
         let rest: Vec<_> = pipeline[1..].iter().map(|text| Segment::parse(text, &vars)).collect();
-        let body = segment.heredoc.then(|| bodies.next()).flatten();
-        let mut action = classify(&segment, body.is_some());
+        let mut stages = std::iter::once(&segment).chain(&rest).map(|stage| (stage, (0..stage.heredocs).filter_map(|_| bodies.next()).last()));
+        let first_stage = stages.next().expect("pipeline has a head");
+        let mut action = classify(&segment, first_stage.1.is_some());
+        let script = std::iter::once(first_stage).chain(stages).fold(None, |script, (stage, body)| {
+            script.or_else(|| body.as_deref().or_else(|| stage.inline_code())
+                .map(|body| Script::new(stage.script_language(), body)))
+        });
         // 只读要求后续管道段只做筛选、结果不写进文件；`tee` 和重定向等于写文件。
         if matches!(action, Action::Browse(_)) {
             if segment.target.is_some() || rest.iter().any(|s| s.program() == "tee" || s.target.is_some()) {
@@ -122,11 +120,7 @@ pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<
                 action = Action::Run(Intent::Other);
             }
         }
-        if no_match_output && matches!(action, Action::Browse(_)) {
-            no_match = matches!(rest.last().unwrap_or(&segment).program(), "grep" | "egrep" | "fgrep" | "rg");
-        }
         match action {
-            Action::Noise if parsed.is_empty() && segment.program() == "cd" => cwd = segment.args.get(1).cloned(),
             Action::Noise => vars.extend(segment.assignments()),
             Action::Control => {
                 if looped.is_none() && matches!(segment.program(), "for" | "while" | "until" | "if") {
@@ -134,26 +128,34 @@ pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<
                 }
             }
             _ => parsed.push(Parsed {
+                ends_in_search: std::iter::once(&segment).chain(&rest).rev()
+                    .find(|stage| !matches!(stage.program(), "head" | "tail"))
+                    .is_some_and(Segment::is_search),
                 target: matches!(action, Action::Run(Intent::Write | Intent::Modify)).then(|| written(&segment, &rest)).flatten(),
                 filters: rest.iter().filter_map(filter).collect(),
                 text: pipeline[0],
                 segment,
                 action,
-                body,
+                script,
             }),
         }
     }
 
-    let browse = looped.is_none() && !parsed.is_empty() && parsed.iter().all(|p| matches!(p.action, Action::Browse(_)));
+    let read_only = !parsed.is_empty() && parsed.iter().all(|p| matches!(p.action, Action::Browse(_)));
+    let browse = looped.is_none() && read_only;
+    // 只读命令里有 grep/rg、退出码 1 且没有输出：没有匹配，不是失败。
+    let search_exit_one = browse && parsed.last().is_some_and(|p| p.ends_in_search);
+    let no_match = search_exit_one && exit_code == Some(1) && output.is_some_and(|text| text.trim().is_empty());
+    // 标题和意图取第一个真正做事的步骤；`X=$(…)` 只在没有别的步骤时才当标题。
+    let lead = parsed.iter().position(|p| !p.segment.substituted).unwrap_or(0);
     let mut shell = Shell {
         command: Some(command.into()),
         description: description.map(str::trim).filter(|d| !d.is_empty()).map(Into::into),
         exit_code,
         no_match,
-        cwd,
-        intent: parsed.first().map_or(Intent::Other, |p| p.action.intent()),
+        search_exit_one: search_exit_one && exit_code.is_none() && output.is_none(),
+        intent: parsed.get(lead).map_or(Intent::Other, |p| p.action.intent()),
         head: String::new(),
-        filters: Vec::new(),
         more: parsed.len().saturating_sub(1),
         looped: looped.is_some(),
         target: None,
@@ -177,41 +179,32 @@ pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<
         }
         return Op::Shell(shell);
     }
-    let Some(first) = parsed.first() else {
+    let Some(first) = parsed.get(lead) else {
         shell.head = command.lines().next().unwrap_or_default().trim().into();
         return Op::Shell(shell);
     };
-    shell.filters = first.filters.clone();
     shell.head = match looped {
         Some(start) => head[start..].lines().next().unwrap_or_default().trim().into(),
         None => first.segment.head(first.text),
     };
-    if first.segment.program() == "git" {
-        shell.cwd = shell.cwd.take().or_else(|| option(&first.segment.args, "-C").map(Into::into));
-    }
     if let Some((target, append)) = parsed.iter().find_map(|p| p.target.clone()) {
         shell.target = Some(target);
         shell.append = append;
     }
-    shell.script = parsed.iter().find_map(|p| {
-        let lang = script_lang(p.segment.program());
-        match (&p.body, p.segment.inline_code()) {
-            (Some(body), _) => Some(Script::new(lang, body)),
-            (None, Some(code)) => Some(Script::new(lang, code)),
-            _ => None,
-        }
-    });
+    shell.script = parsed.into_iter().find_map(|step| step.script);
     Op::Shell(shell)
 }
 
 struct Parsed<'a> {
     text: &'a str,
+    /// 管道最后的实质操作是 grep/rg；后面只能跟截取行数的过滤。
+    ends_in_search: bool,
     /// 写入或原地修改的文件，以及是否追加。
     target: Option<(String, bool)>,
     segment: Segment,
     action: Action,
     filters: Vec<Filter>,
-    body: Option<String>,
+    script: Option<Script>,
 }
 
 enum Action {
@@ -291,7 +284,6 @@ mod tests {
     #[test]
     fn browse_commands_become_file_steps() {
         let search = parse(r#"cd /repo && grep -rn "A\|B" src-tauri/src 2>/dev/null | grep -v "tests.rs" | head -20"#, Some("src-tauri/src/a.rs:3:A\n"));
-        assert_eq!(search["cwd"], "/repo");
         assert_eq!(search["steps"], json!([{"kind":"search","pattern":"A\\|B","paths":["src-tauri/src"],"matches":1,"files":1,
             "hits":[{"path":"src-tauri/src/a.rs","lines":[{"line":3,"text":"A"}]}],"program":"grep",
             "filters":[{"kind":"exclude","value":"tests.rs"},{"kind":"head","value":20}]}]));
@@ -311,10 +303,9 @@ mod tests {
     fn other_commands_keep_a_clean_head() {
         let test = parse(r#"export PATH="$HOME/.cargo/bin:$PATH" && cargo test --offline 2>&1 | grep -E "FAILED|result" | tail -40"#, None);
         assert_eq!((test["intent"].clone(), test["head"].clone()), (json!("test"), json!("cargo test --offline")));
-        assert_eq!(test["filters"], json!([{"kind":"include","value":"FAILED|result"},{"kind":"tail","value":40}]));
 
         let git = parse("git -C /Users/me/repo diff --stat HEAD && wc -l a.rs", None);
-        assert_eq!((git["intent"].clone(), git["head"].clone(), git["cwd"].clone(), git["more"].clone()), (json!("git_diff"), json!("git diff --stat HEAD"), json!("/Users/me/repo"), json!(1)));
+        assert_eq!((git["intent"].clone(), git["head"].clone(), git["more"].clone()), (json!("git_diff"), json!("git diff --stat HEAD"), json!(1)));
 
         let script = parse("cd ~/p && python3 -I - \"$F\" <<'EOF'\nimport json\n# 统计\nrows = load()\nEOF", None);
         assert_eq!((script["intent"].clone(), script["head"].clone()), (json!("script"), json!(r#"python3 -I - "$F""#)));
@@ -335,7 +326,31 @@ mod tests {
         assert_eq!((redirected["target"].clone(), redirected["append"].clone()), (json!("output.txt"), json!(true)));
         assert_eq!(parse("cat input.txt |& sort >> output.txt", None)["target"], "output.txt");
         assert_eq!(json!(shell("rg -n x fixture.txt", None, Some(1), Some("")))["no_match"], true);
+        assert_eq!(json!(shell("cd /repo && rg --files -g '*.txt' | head -5", None, Some(1), Some("\n")))["no_match"], true);
+        assert!(json!(shell("rg -n x fixture.txt; cat other.txt", None, Some(1), Some(""))).get("no_match").is_none());
         assert!(json!(shell("rg -n x fixture.txt | awk 'BEGIN { exit 1 }'", None, Some(1), Some(""))).get("no_match").is_none());
+        assert_eq!(parse("uv run pytest -q", None)["intent"], "test");
+        assert_eq!(parse("sed -n -e '2,4p' src/main.rs", None)["steps"][0]["start"], 2);
+        assert_eq!(parse("sed 's/a/b/' file.txt", Some("b"))["intent"], "transform");
+        assert_eq!(parse("sed -n -e '1p' -e '3p' file.txt", Some("a\nc"))["intent"], "transform");
+        assert_eq!(parse("sed -n -f '1p' file.txt", None)["intent"], "transform");
+        assert_eq!(parse("bun test", None)["intent"], "test");
+        assert_eq!(parse("bun add zod", None)["intent"], "install");
+        assert_eq!(parse("bun src/run.ts", None)["intent"], "run");
+        let git_grep = parse("git -c color.ui=false grep -e needle -- src", Some("src/a.rs:needle\n"));
+        assert_eq!(git_grep["steps"][0]["pattern"], "needle");
+        assert_eq!(git_grep["steps"][0]["paths"], json!(["src"]));
+        assert_eq!(parse("git grep -c needle src", None)["steps"][0]["pattern"], "needle");
+        assert_eq!(json!(shell("git grep needle", None, Some(1), Some("")))["no_match"], true);
+        assert_eq!(parse("tail -n +20 file.txt", None)["steps"][0]["start"], 20);
+        assert_eq!(parse("cat <<'EOF' > out.txt\nhello\nEOF", None)["target"], "out.txt");
+        let script = parse("uv run python -c 'print(1)'", None);
+        assert_eq!(script["head"], "uv run python -c");
+        assert_eq!(script["script"]["lang"], "Python");
+        assert_eq!(script["script"]["body"], "print(1)");
+        let script = parse("printf x | cat <<A\none\nA\nuv run python <<B\nprint(2)\nB", None);
+        assert_eq!(script["script"]["body"], "print(2)");
+        assert_eq!(parse("ssh -o BatchMode=yes host.example uname -a", None)["head"], "ssh host.example uname -a");
         assert_eq!(parse("printf '%s\\n' '<<EOF'\nls src", None)["steps"][0]["paths"], json!(["src"]));
         assert_eq!(parse("P=a.txt; cat '${P}' ${P} $(printf '%s' b.txt)", None)["steps"].as_array().unwrap().iter()
             .map(|step| step["path"].as_str().unwrap()).collect::<Vec<_>>(), ["${P}", "a.txt", "$(printf %s b.txt)"]);

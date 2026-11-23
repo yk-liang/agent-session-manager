@@ -1,6 +1,6 @@
 import type { BrowseOp, ContentBlock, ToolOp } from "./types";
 import { toolStatus, type SessionBlock } from "./sessionContent.ts";
-import { fitPath, shortPath } from "./utils.ts";
+import { shortPath } from "./utils.ts";
 
 /** 一次工具调用可包含多个操作（如一个补丁改多个文件），每个操作单独成卡。 */
 export type ToolItem = { key: string; part: SessionBlock; op?: ToolOp; index: number };
@@ -32,7 +32,10 @@ export function activityItems(parts: SessionBlock[]): ActivityItem[] {
       const ops: (ToolOp | undefined)[] = content.ops?.length ? content.ops : [undefined];
       ops.forEach((op, i) => {
         const item = { key: ops.length > 1 ? `${part.key}.${i}` : part.key, part, op, index: i };
-        if (browseSteps(op)) run.push(item);
+        if (browseSteps(op) && itemStatus(item) !== "error") {
+          if (run.length === 20) flush();
+          run.push(item);
+        }
         else {
           flush();
           items.push({ type: "tool", item });
@@ -47,11 +50,16 @@ export function activityItems(parts: SessionBlock[]): ActivityItem[] {
   return items;
 }
 
-/** 命令以退出码为准；`grep`、`rg` 没有匹配时退出码为 1，不算失败。 */
-export function itemStatus({ part, op }: ToolItem) {
+export function noMatch({ part, op }: ToolItem) {
+  const { result } = part;
+  return op?.kind === "shell" && (op.no_match || op.search_exit_one && result?.exit_code === 1 && result.empty_command_output) && !isDenied(result);
+}
+
+export function itemStatus(item: ToolItem) {
+  if (noMatch(item)) return "completed";
+  const { part, op } = item;
   if (op?.kind === "shell" && op.exit_code !== undefined) {
     if (part.content.status === "error" || part.result?.status === "error") return "error";
-    if (op.no_match) return "completed";
     if (op.exit_code !== 0) return "error";
   }
   return toolStatus(part.content, part.result);
@@ -60,11 +68,22 @@ export function itemStatus({ part, op }: ToolItem) {
 /** 失败原因取结果的首个非空行，去掉工具自带的标签。 */
 export function errorSummary(result?: ContentBlock) {
   const content = result?.content;
-  const text = typeof content === "string" ? content
-    : Array.isArray(content) ? content.find(part => typeof part?.text === "string")?.text : undefined;
-  return typeof text === "string"
-    ? text.replace(/<\/?[\w-]+>/g, "").split("\n").map(line => line.trim()).find(Boolean)?.slice(0, 240)
-    : undefined;
+  const texts: unknown[] = Array.isArray(content) ? content.map(part => part?.text) : [content];
+  for (const text of [result?.error_summary, ...texts]) {
+    if (typeof text !== "string") continue;
+    for (const line of text.slice(0, 4096).split("\n")) {
+      const summary = line.replace(/^\s*<\/?[\w-]+>\s*/, "").trim();
+      if (summary) return summary.slice(0, 240);
+    }
+  }
+}
+
+/** 拒绝执行时的固定文案（Claude Code 系的权限与分类器、Antigravity 的沙箱检查）：被拒绝的调用没有执行。 */
+const DENIAL = /^(?:Permission to use .+?\bdenied\b|Permission for this action was denied|The user doesn't want to proceed with this tool use|permission check failed for unsandboxed|hook denied)|was blocked by a deny rule/i;
+
+export function isDenied(result?: ContentBlock) {
+  const summary = errorSummary(result);
+  return !!summary && DENIAL.test(summary);
 }
 
 /** 项目内的路径显示为相对路径，其余缩写用户目录。 */
@@ -80,13 +99,22 @@ export function splitPath(path: string) {
   return slash < 0 ? { dir: "", name: path } : { dir: path.slice(0, slash), name: path.slice(slash + 1) };
 }
 
+/** 卡片标题里的长路径只保留末尾放得下的几级，前面以 … 代替。 */
 export function compactPath(path: string, limit = 32) {
-  return fitPath(path, label => label.length <= limit);
+  if (path.length <= limit) return path;
+  const parts = path.replace(/\/$/, "").split("/");
+  for (let start = 1; start < parts.length - 1; start++) {
+    const label = ["…", ...parts.slice(start)].join("/");
+    if (label.length <= limit) return label;
+  }
+  return `…/${parts[parts.length - 1]}`;
 }
 
-/** 命令标题里的路径：项目内转为相对路径，其余长路径按 fish 风格缩写。 */
+/** 命令标题里的路径：项目内转为相对路径，其余长路径只保留末尾几级。 */
 export function titlePaths(text: string, cwd?: string | null) {
   const root = cwd?.replace(/\/$/, "");
-  const relative = root ? text.split(`${root}/`).join("") : text;
-  return relative.replace(/(?<![\w.~:/-])(?:~|\/)[^\s'"|;&<>()]{24,}/g, path => compactPath(shortPath(path)));
+  return text.replace(/(?<![\w.~:/-])(?:~\/|\/)[^\s'"|;&<>()]+/g, path => {
+    const relative = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : shortPath(path);
+    return compactPath(relative);
+  });
 }

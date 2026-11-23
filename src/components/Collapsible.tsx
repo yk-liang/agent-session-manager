@@ -4,12 +4,11 @@ import { DetailState } from "./DetailState";
 import UiIcon from "./UiIcon";
 
 /** 展开状态按 `id` 保存在会话阅读状态里，虚拟列表重新挂载后保持不变。 */
-export default function Collapsible({ id, className, defaultOpen = false, head, note, children }: {
+export default function Collapsible({ id, className, defaultOpen = false, head, children }: {
   id: string;
   className: string;
   defaultOpen?: boolean;
   head: ReactNode;
-  note?: ReactNode;
   children: ReactNode;
 }) {
   const { expanded } = useContext(DetailState);
@@ -23,7 +22,6 @@ export default function Collapsible({ id, className, defaultOpen = false, head, 
       <UiIcon icon={open ? ChevronDown : ChevronRight} className="caret" />
       {head}
     </button>
-    {note}
     {open && <div className="collapsible-body">{children}</div>}
   </div>;
 }

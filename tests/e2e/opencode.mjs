@@ -72,12 +72,12 @@ try {
   console.log(`PASS: file reads show the path up front and load only their content on expansion; stored reasoning expands (${engine})`);
 
   await page.locator('.detail-body').evaluate(el=>el.scrollTo(0,el.scrollHeight));
-  await page.getByRole('button',{name:/^工具调用 bash.*失败 exit 1$/}).click();
+  await page.getByRole('button',{name:/^工具调用.*失败 exit 1.*bash$/}).click();
   await page.getByText('Exit code 1',{exact:true}).waitFor();
-  assert.ok(await page.getByRole('button',{name:/^工具调用 queued.*等待中$/}).count());
-  await page.getByRole('button',{name:/^工具调用 streaming.*进行中$/}).click();
+  assert.ok(await page.getByRole('button',{name:/^工具调用.*等待中.*queued$/}).count());
+  await page.getByRole('button',{name:/^工具调用.*进行中.*streaming$/}).click();
   await page.getByText('partial output',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:/^工具调用 streaming.*已完成$/}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/^工具调用.*已完成.*streaming$/}).count(),0);
   await page.getByRole('checkbox',{name:'工具调用',exact:true}).uncheck();
   assert.equal(await page.locator('.collapsible.tool').count(),0);
   await page.getByRole('checkbox',{name:'思考过程',exact:true}).uncheck();

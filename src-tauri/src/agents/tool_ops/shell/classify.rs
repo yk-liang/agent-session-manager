@@ -11,7 +11,9 @@ pub(super) struct Segment {
     raw: Vec<Raw>,
     pub target: Option<String>,
     pub append: bool,
-    pub heredoc: bool,
+    pub heredocs: usize,
+    /// 整段是 `NAME=$(…)`：参数和标题都换成括号里的命令。
+    pub substituted: bool,
 }
 
 enum Raw {
@@ -22,7 +24,7 @@ enum Raw {
 
 impl Segment {
     pub fn parse(text: &str, vars: &[(String, String)]) -> Segment {
-        let mut segment = Segment { args: Vec::new(), assigned: Vec::new(), raw: Vec::new(), target: None, append: false, heredoc: false };
+        let mut segment = Segment { args: Vec::new(), assigned: Vec::new(), raw: Vec::new(), target: None, append: false, heredocs: 0, substituted: false };
         for token in tokens(text) {
             match token {
                 Token::Word(word) => {
@@ -37,7 +39,7 @@ impl Segment {
                         segment.append = op.contains(">>");
                         segment.target = target.clone();
                     }
-                    segment.heredoc |= heredoc;
+                    segment.heredocs += usize::from(heredoc && target.is_some());
                     let text = match &target {
                         Some(_) if !heredoc => format!("{op} {}", target.as_deref().unwrap_or_default()),
                         _ => op.to_string(),
@@ -58,22 +60,68 @@ impl Segment {
         });
         if let Some(inner) = segment.args.first().and_then(|arg| arg.split_once("=$(")).map(|(_, inner)| inner.trim_end_matches(')').to_owned()) {
             segment.args.splice(..1, words(&inner, vars));
-        }
-        loop {
-            match segment.args.first().map(String::as_str) {
-                Some("sudo" | "time" | "env" | "command" | "exec" | "nohup" | "caffeinate" | "do" | "then" | "else" | "{") => {
-                    segment.args.remove(0);
-                }
-                Some("timeout") if segment.args.len() > 2 => {
-                    segment.args.drain(..2);
-                }
-                Some(arg) if is_assignment(arg) => {
-                    segment.args.remove(0);
-                }
-                _ => break,
+            if let Some(Raw::Word(word)) = segment.raw.iter_mut().find(|raw| matches!(raw, Raw::Word(_))) {
+                *word = word.split_once("=$(").map_or_else(|| word.clone(), |(_, inner)| inner.trim_end_matches(')').to_owned());
             }
+            segment.substituted = true;
+        }
+        // 包装命令不改变要做的事，参数和标题里都去掉；`command -v` 是查询，不是包装。
+        let mut wrappers = 0;
+        loop {
+            let count = match segment.args.first().map(String::as_str) {
+                Some("command") if segment.args.get(1).is_some_and(|arg| arg.starts_with('-')) => break,
+                Some("sudo" | "time" | "env" | "command" | "exec" | "nohup" | "caffeinate" | "do" | "then" | "else" | "{") => 1,
+                Some("timeout") if segment.args.len() > 2 => 2,
+                Some(arg) if is_assignment(arg) => 1,
+                _ => break,
+            };
+            segment.args.drain(..count);
+            wrappers += count;
+        }
+        if !segment.substituted {
+            segment.raw.retain(|raw| match raw {
+                Raw::Word(_) if wrappers > 0 => {
+                    wrappers -= 1;
+                    false
+                }
+                _ => true,
+            });
         }
         segment
+    }
+
+    /// 去掉前 `skip` 个参数后的命令：`uv run`、`npx` 这类包装转交给的程序。
+    fn shifted(&self, skip: usize) -> Segment {
+        Segment {
+            args: self.args[skip..].to_vec(),
+            assigned: Vec::new(),
+            raw: Vec::new(),
+            target: self.target.clone(),
+            append: self.append,
+            heredocs: self.heredocs,
+            substituted: false,
+        }
+    }
+
+    /// 包装命令转交给的程序从第几个参数开始；跳过包装自己的选项。
+    fn runner_skip(&self) -> Option<usize> {
+        let args = &self.args;
+        let sub = args.get(1).map(String::as_str);
+        let (from, values): (usize, &[&str]) = match self.program() {
+            "uv" | "poetry" | "pdm" | "hatch" if sub == Some("run") => (2, &["--with", "-p", "--python", "--project", "--directory", "--from", "--extra", "--group", "--env-file", "--index"]),
+            "npm" | "pnpm" if matches!(sub, Some("exec" | "dlx")) => (2, &["--package", "-p"]),
+            "rustup" if sub == Some("run") => (3, &[]),
+            "npx" | "bunx" | "pnpx" | "uvx" => (1, &["--package", "-p", "--from", "--with", "--python"]),
+            _ => return None,
+        };
+        let mut index = from;
+        while let Some(arg) = args.get(index) {
+            if !arg.starts_with('-') {
+                return Some(index);
+            }
+            index += if values.contains(&arg.as_str()) { 2 } else { 1 };
+        }
+        None
     }
 
     /// 单独一段的变量赋值（含 `export`），后续步骤里的 `$NAME` 据此展开。
@@ -90,6 +138,22 @@ impl Segment {
 
     pub fn program(&self) -> &str {
         self.args.first().map_or("", |arg| arg.rsplit('/').next().unwrap_or(arg))
+    }
+
+    fn git_subcommand(&self) -> usize {
+        let mut index = 1;
+        while let Some(arg) = self.args.get(index) {
+            if !arg.starts_with('-') {
+                break;
+            }
+            index += if matches!(arg.as_str(), "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env") { 2 } else { 1 };
+        }
+        index.min(self.args.len())
+    }
+
+    pub fn is_search(&self) -> bool {
+        matches!(self.program(), "grep" | "egrep" | "fgrep" | "rg")
+            || self.program() == "git" && self.args.get(self.git_subcommand()).is_some_and(|arg| arg == "grep")
     }
 
     pub fn positional(&self, value_flags: &[&str]) -> Vec<&str> {
@@ -115,24 +179,55 @@ impl Segment {
 
     /// `-c`/`-e` 后的内联脚本。
     pub fn inline_code(&self) -> Option<&str> {
-        script_lang(self.program())?;
-        ["-c", "-e"].iter().find_map(|flag| option(&self.args, flag))
+        let (program, args) = self.interpreter_args();
+        script_lang(program)?;
+        ["-c", "-e"].iter().find_map(|flag| option(args, flag))
+    }
+
+    pub fn script_language(&self) -> Option<&'static str> {
+        script_lang(self.interpreter_args().0)
+    }
+
+    fn interpreter_args(&self) -> (&str, &[String]) {
+        let args = &self.args[self.runner_skip().unwrap_or(0)..];
+        (args.first().and_then(|arg| arg.rsplit('/').next()).unwrap_or_default(), args)
     }
 
     /// 标题用的原文：去掉前导环境变量、无关重定向、heredoc 标记、内联脚本和 `git -C`。
     pub fn head(&self, text: &str) -> String {
         let mut words = Vec::new();
         let mut raw = self.raw.iter().peekable();
+        let ssh = self.program() == "ssh";
+        let mut ssh_options = false;
+        let mut first_word = true;
+        let script_offset = self.runner_skip().unwrap_or(0);
+        let first_script_arg = self.inline_code().and_then(|_| self.args.iter().enumerate().skip(script_offset + 1)
+            .find_map(|(index, arg)| matches!(arg.as_str(), "-c" | "-e").then_some(index)));
+        let mut word_index = 0;
         while let Some(item) = raw.next() {
+            if matches!(item, Raw::Word(_)) {
+                word_index += 1;
+            }
             match item {
                 Raw::Word(word) if (word == "-C" && self.program() == "git") => {
                     raw.next();
                 }
-                Raw::Word(word) if (word == "-c" || word == "-e") && self.inline_code().is_some() => {
+                // `ssh` 的连接选项只是噪音，标题只留主机和远程命令。
+                Raw::Word(word) if ssh_options && word == "--" => ssh_options = false,
+                Raw::Word(word) if ssh_options && word.starts_with('-') => {
+                    if matches!(word.as_str(), "-o" | "-i" | "-p" | "-F" | "-J" | "-l" | "-L" | "-R" | "-D" | "-W" | "-b" | "-c" | "-E" | "-m" | "-S") {
+                        raw.next();
+                    }
+                }
+                Raw::Word(word) if Some(word_index - 1) == first_script_arg => {
                     words.push(word.clone());
                     break;
                 }
-                Raw::Word(word) => words.push(word.clone()),
+                Raw::Word(word) => {
+                    ssh_options = ssh && first_word;
+                    first_word = false;
+                    words.push(word.clone());
+                }
                 Raw::Redirect { text, noise: false } => words.push(text.clone()),
                 Raw::Redirect { .. } => {}
             }
@@ -232,46 +327,58 @@ pub(super) fn classify(segment: &Segment, has_body: bool) -> Action {
         }]),
         "sed" if segment.has_flag('i', "--in-place") => Action::Run(Intent::Modify),
         "sed" => {
-            let positional = segment.positional(&["-e", "-f"]);
-            let Some((script, files)) = positional.split_first().filter(|(_, files)| !files.is_empty()) else {
-                return Action::Run(Intent::Other);
+            let options = args.iter().skip(1).take_while(|arg| arg.as_str() != "--");
+            if !segment.has_flag('n', "--quiet") || options.clone().any(|arg| arg.starts_with("-f") || arg.starts_with("--file")) {
+                return Action::Run(Intent::Transform);
+            }
+            let positional = segment.positional(&["-e", "--expression"]);
+            let explicit = options.filter(|arg| matches!(arg.as_str(), "-e" | "--expression")).count();
+            let (script, files) = match explicit {
+                0 => (positional.first().copied(), positional.get(1..).unwrap_or_default()),
+                1 => (option(args, "-e").or_else(|| option(args, "--expression")), &positional[..]),
+                _ => return Action::Run(Intent::Transform),
             };
-            let range = segment.has_flag('n', "--quiet").then(|| sed_range(script)).flatten();
-            Action::Browse(files.iter().map(|path| match range {
-                Some((start, end)) => Spec::Read { path: path.to_string(), start: Some(start), end, tail: None, whole: false },
-                None => read(path),
-            }).collect())
+            let Some((start, end)) = script.and_then(sed_range).filter(|_| !files.is_empty()) else {
+                return Action::Run(Intent::Transform);
+            };
+            Action::Browse(files.iter().map(|path| Spec::Read { path: path.to_string(), start: Some(start), end, tail: None, whole: false }).collect())
         }
         "cat" | "bat" | "nl" | "less" | "more" | "head" | "tail" => {
             let files = segment.positional(if matches!(program, "head" | "tail") { &["-n", "-c"] } else { &[] });
             if files.is_empty() {
                 return Action::Run(Intent::Other);
             }
-            let count = option(args, "-n").and_then(|n| n.trim_start_matches(['-', '+']).parse().ok())
+            let lines = option(args, "-n");
+            let from_line = lines.and_then(|n| n.strip_prefix('+')).and_then(|n| n.parse().ok());
+            let count = lines.and_then(|n| n.trim_start_matches(['-', '+']).parse().ok())
                 .or_else(|| args.iter().find_map(|arg| arg.strip_prefix('-')?.parse().ok()));
             let single = files.len() == 1;
             Action::Browse(files.iter().map(|path| match program {
                 "head" => Spec::Read { path: path.to_string(), start: Some(1), end: Some(count.unwrap_or(10)), tail: None, whole: false },
-                "tail" => Spec::Read { path: path.to_string(), start: None, end: None, tail: Some(count.unwrap_or(10)), whole: false },
+                "tail" => Spec::Read { path: path.to_string(), start: from_line, end: None, tail: from_line.is_none().then_some(count.unwrap_or(10)), whole: false },
                 "cat" if single => Spec::Read { path: path.to_string(), start: Some(1), end: None, tail: None, whole: true },
                 _ => read(path),
             }).collect())
         }
         "wc" => Action::Run(Intent::Count),
         "git" => {
-            let subcommand = segment.positional(&["-C", "-c", "--git-dir", "--work-tree"]).first().copied().unwrap_or_default();
+            let index = segment.git_subcommand();
+            let subcommand = args.get(index).map(String::as_str).unwrap_or_default();
             if subcommand == "grep" {
-                let positional = segment.positional(&["-C", "-c", "-e", "-f", "-A", "-B", "--max-count", "-m"]);
-                let paths = positional.iter().skip(2).filter(|p| **p != "--").map(|p| p.to_string()).collect();
-                return match positional.get(1) {
-                    Some(pattern) => Action::Browse(vec![Spec::Search {
-                        pattern: pattern.to_string(),
-                        paths,
-                        files_only: segment.has_flag('l', "--files-with-matches") || segment.has_flag('L', "--files-without-match"),
-                        counted: segment.has_flag('c', "--count"),
-                    }]),
-                    None => Action::Run(Intent::Git),
+                let grep = segment.shifted(index);
+                let positional = grep.positional(GREP_VALUES);
+                let (pattern, paths) = if let Some(pattern) = option(&grep.args, "-e") {
+                    (Some(pattern), &positional[..])
+                } else {
+                    (positional.first().copied(), positional.get(1..).unwrap_or_default())
                 };
+                if let Some(pattern) = pattern {
+                    return Action::Browse(vec![Spec::Search {
+                        pattern: pattern.into(), paths: paths.iter().map(|path| (*path).into()).collect(),
+                        files_only: grep.has_flag('l', "--files-with-matches") || grep.has_flag('L', "--files-without-match"),
+                        counted: grep.has_flag('c', "--count"),
+                    }]);
+                }
             }
             Action::Run(match subcommand {
                 "diff" | "show" => Intent::GitDiff,
@@ -293,11 +400,21 @@ pub(super) fn classify(segment: &Segment, has_body: bool) -> Action {
         "kill" | "pkill" | "killall" => Action::Run(Intent::Kill),
         "sleep" | "wait" => Action::Run(Intent::Wait),
         "open" => Action::Run(Intent::Open),
+        "which" | "whereis" | "type" | "command" | "stat" | "file" | "du" | "df" | "strings" | "objdump" | "otool" | "nm"
+        | "shasum" | "sha256sum" | "sha1sum" | "md5" | "md5sum" | "cksum" | "uname" | "sw_vers" | "hostname" | "whoami" | "id"
+        | "date" | "printenv" | "mdls" | "xattr" | "dig" | "nslookup" | "host" => Action::Run(Intent::Inspect),
+        "jq" | "yq" | "awk" | "gawk" | "cut" | "tr" | "sort" | "uniq" | "column" | "iconv" | "base64" | "xxd" | "od" => {
+            Action::Run(Intent::Transform)
+        }
+        "codex" | "claude" | "opencode" | "agy" | "pi" | "gemini" | "qoder" | "aider" | "cursor-agent" | "amp" => Action::Run(Intent::Agent),
         _ if script_lang(program).is_some() && (has_body || segment.inline_code().is_some() || args.iter().any(|arg| arg == "-")) => {
             Action::Run(Intent::Script)
         }
-        "python" | "python3" | "node" | "deno" | "bun" | "ruby" | "perl" | "bash" | "sh" | "zsh" => Action::Run(Intent::Run),
-        _ => Action::Run(build_intent(program, &segment.positional(&[])).unwrap_or(Intent::Other)),
+        "python" | "python3" | "node" | "deno" | "ruby" | "perl" | "bash" | "sh" | "zsh" => Action::Run(Intent::Run),
+        _ => match segment.runner_skip() {
+            Some(skip) => classify(&segment.shifted(skip), has_body),
+            None => Action::Run(build_intent(program, &segment.positional(&[])).unwrap_or(Intent::Other)),
+        },
     }
 }
 
@@ -311,8 +428,10 @@ fn build_intent(program: &str, positional: &[&str]) -> Option<Intent> {
     }.to_ascii_lowercase();
     match program {
         "pytest" | "vitest" | "jest" => Some(Intent::Test),
+        "playwright" if task == "install" => Some(Intent::Install),
+        "playwright" => Some(Intent::Test),
         "tsc" | "make" | "xcodebuild" | "gradle" | "mvn" | "gofmt" | "rustfmt" | "prettier" | "eslint" => Some(Intent::Build),
-        "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "go" | "swift" | "npx" | "uv" | "uvx" => Some(
+        "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "go" | "swift" | "npx" | "uv" | "uvx" | "vite" | "next" | "astro" | "tauri" => Some(
             if task.contains("test") || matches!(task.as_str(), "vitest" | "jest" | "playwright") {
                 Intent::Test
             } else if matches!(task.as_str(), "install" | "ci" | "i" | "add" | "fetch" | "get" | "sync" | "mod") {
@@ -322,6 +441,8 @@ fn build_intent(program: &str, positional: &[&str]) -> Option<Intent> {
             } else if ["build", "check", "lint", "tsc", "vet", "fmt", "format", "clippy", "prettier", "eslint", "bundle", "pack", "compile", "tauri"]
                 .iter().any(|word| task.contains(word)) {
                 Intent::Build
+            } else if program == "bun" {
+                Intent::Run
             } else {
                 Intent::Other
             },
@@ -334,7 +455,8 @@ fn build_intent(program: &str, positional: &[&str]) -> Option<Intent> {
 fn sed_range(script: &str) -> Option<(u64, Option<u64>)> {
     let range = script.strip_suffix('p')?;
     let (start, end) = range.split_once(',').unwrap_or((range, range));
-    Some((start.parse().ok()?, if end == "$" { None } else { Some(end.parse().ok()?) }))
+    let start = start.parse::<u64>().ok().filter(|&start| start > 0)?;
+    Some((start, if end == "$" { None } else { Some(end.parse::<u64>().ok()?.max(start)) }))
 }
 
 /// 只对输入做筛选、截取或变换、不产生其他副作用的管道段。

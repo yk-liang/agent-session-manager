@@ -134,6 +134,8 @@ pub(crate) enum Op {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    TaskStatus { task: String },
+    AgentList,
     Monitor {
         description: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -444,6 +446,11 @@ pub(crate) fn describe_tools(
 /// 工具参数里的非空字符串。
 pub(crate) fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input[key].as_str().filter(|value| !value.trim().is_empty())
+}
+
+/// 长文本的首行，用作标题里的摘要。
+pub(crate) fn first_line(text: &str) -> String {
+    text.trim_start().lines().next().unwrap_or_default().trim().into()
 }
 
 #[cfg(test)]

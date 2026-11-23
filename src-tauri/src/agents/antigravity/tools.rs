@@ -1,4 +1,4 @@
-use super::super::tool_ops::{self, numbered, text, Choice, Hunk, Op, Question, ToolResult};
+use super::super::tool_ops::{self, first_line, numbered, text, Choice, Hunk, Op, Question, ToolResult};
 use serde_json::{json, Value};
 
 /// 读取结果带有时间、范围说明和行号前缀，正文替换为原文后由卡片按范围编号。
@@ -39,17 +39,27 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
             answer: None,
         })).collect(), None)),
         (Some("invoke_subagent"), _) => Some(Op::Agent {
-            agent: text(input, "Model").filter(|model| *model != "inherit").map(Into::into),
+            agent: text(input, "Role").or_else(|| text(input, "Model").filter(|model| *model != "inherit")).map(Into::into),
             task: text(input, "toolSummary").or_else(|| text(input, "Prompt").and_then(|prompt| prompt.lines().next())).unwrap_or("子任务").into(),
             background: false,
             encrypted: false,
         }),
-        (Some("send_message"), _) => Some(Op::Message { to: text(input, "Recipient").unwrap_or("主任务").into(), summary: text(input, "toolSummary").map(Into::into), encrypted: false }),
-        (Some("schedule"), _) => input["DurationSeconds"].as_f64().map(|seconds| Op::Wake { seconds, reason: text(input, "Prompt").map(Into::into) }),
+        (Some("send_message"), _) => Some(Op::Message {
+            to: text(input, "Recipient").unwrap_or("主任务").into(),
+            summary: text(input, "toolSummary").map(Into::into).or_else(|| text(input, "Message").map(first_line)),
+            encrypted: false,
+        }),
+        // 秒数有时以字符串记录（`"180"`）。
+        (Some("schedule"), _) => input["DurationSeconds"].as_f64().or_else(|| text(input, "DurationSeconds")?.trim().parse().ok())
+            .map(|seconds| Op::Wake { seconds, reason: text(input, "Prompt").map(Into::into) }),
         (Some("manage_task"), _) if text(input, "Action") == Some("kill") => text(input, "TaskId").map(|task| Op::Stop {
             task: task.rsplit('/').next().unwrap_or(task).into(),
             detail: output.lines().last().map(Into::into),
         }),
+        (Some("manage_task"), _) if text(input, "Action") == Some("status") => text(input, "TaskId")
+            .map(|task| Op::TaskStatus { task: task.rsplit('/').next().unwrap_or(task).into() }),
+        (Some("manage_subagents"), _) if text(input, "Action") == Some("list") => Some(Op::AgentList),
+        (Some("manage_subagents"), _) if text(input, "Action") == Some("kill_all") => Some(Op::Stop { task: "全部子智能体".into(), detail: None }),
         _ => None,
     };
     if let Some(result) = result {

@@ -30,6 +30,11 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
         {type:'tool_use',id:'ask',name:'AskUserQuestion',deferred:'ask-input',ops:[{kind:'ask',questions:[{question:'使用哪个布局？',options:[{label:'紧凑'},{label:'宽松'}],answer:'紧凑'}]}]},
         {type:'tool_use',id:'search',name:'Grep',ops:[{kind:'search',pattern:'^(a+)+$',matches:1,files:1,hits:[{path:'fixture.txt',lines:[{line:1,text:'a'.repeat(32)+'b'}]}]}]},
         {type:'tool_use',id:'recorded-exit',name:'bash',ops:[{kind:'shell',intent:'run',head:'python3 --version',command:'python3 --version'}]},
+        {type:'tool_use',id:'no-matches',name:'exec_command',ops:[{kind:'shell',intent:'search',search_exit_one:true,steps:[{kind:'search',pattern:'needle'}]}]},
+        {type:'tool_use',id:'script',name:'Bash',input:{command:"python3 - <<'PY'\nprint(42)\nPY"},ops:[{kind:'shell',intent:'script',head:'python3 -',command:"python3 - <<'PY'\nprint(42)\nPY",script:{lang:'Python',lines:1,first:'print(42)',body:'print(42)'}}]},
+        {type:'tool_use',id:'denied',name:'Bash',ops:[{kind:'shell',intent:'run',head:`python3 ${'long-argument '.repeat(60)}`}]},
+        {type:'tool_use',id:'mcp',name:'mcp__fixture__inspect',input:{query:'example',limit:10},ops:[{kind:'mcp',server:'fixture',tool:'inspect'}]},
+        {type:'tool_use',id:'find',name:'Glob',input:{pattern:'*.md'},ops:[{kind:'find',pattern:'*.md'}]},
         ...[
           ['write','printf x > output.txt','write'],
           ['append','printf x >> output.txt','write'],
@@ -39,6 +44,11 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
         {type:'tool_result',tool_use_id:'skill',content:'---\nname: fixture\n---\n# 技能标题\n**技能正文**'},
         {type:'tool_result',tool_use_id:'ask',content:'**紧凑**'},
         {type:'tool_result',tool_use_id:'recorded-exit',is_error:true,exit_code:7,content:'Exit code 2\n退出码：7'},
+        {type:'tool_result',tool_use_id:'no-matches',is_error:true,exit_code:1,empty_command_output:true},
+        {type:'tool_result',tool_use_id:'script',content:'42'},
+        {type:'tool_result',tool_use_id:'denied',is_error:true,deferred:'denied-output',error_summary:"The user doesn't want to proceed with this tool use."},
+        {type:'tool_result',tool_use_id:'mcp',content:'Example result'},
+        {type:'tool_result',tool_use_id:'find',deferred:'find-output'},
       ]}}],
       safe:[assistant('a-safe','## 安全样例\n\n<script>window.__PWNED__=true</script>\n\n![图片说明](https://markdown-image.invalid/pixel.png)\n\n[危险](javascript:alert(1))\n\n<img src="https://markdown-image.invalid/html.png" onerror="window.__PWNED__=true">')],
     };
@@ -52,6 +62,8 @@ const init=({long=false,enabled=false,blocked=false}={})=>async(page)=>{
       if(cmd==='catalog')return{sessions:records,projects:[{dirName:'p',displayPath:'/tmp/md',sessionCount:records.length,lastActivity:null}],warnings:[]};
       if(cmd==='read_session')return{meta:records.find(s=>s.sessionId===args.sessionId),events:messages[args.sessionId]};
       if(cmd==='read_tool_payload'){
+        if(args.token==='find-output')return await new Promise(resolve => { state.finishFind = () => resolve({type:'tool_result',content:'Chunk ID: test\nWall time: 1s\nOutput:\ndocs/example.md',command_output:'docs/example.md'}); });
+        if(args.token==='denied-output')return {type:'tool_result',tool_use_id:'denied',content:"The user doesn't want to proceed with this tool use."};
         if(args.token==='ask-input')return {type:'tool_use',id:'ask',name:'AskUserQuestion',input:{context:'完整提问参数'}};
         return args.token==='tool-input'?{type:'tool_use',id:'call',name:'fixture',input:{value:'**原样**',command:'git status --short'}}:{type:'tool_result',tool_use_id:'call',content:'# 结果标题\n**保持原文**'};
       }
@@ -90,7 +102,7 @@ try{
   assert.equal(await page.locator('.msg.user .msg-text').textContent(),'普通文本\n下一行    多个空格\n数量：2 * 3 = 6');
   assert.ok((await page.locator('.detail-body').textContent()).includes('**不要格式化**'));
   await page.locator('.session-card',{hasText:'工具与思考'}).click();
-  const tool = page.getByRole('button',{name:/^工具调用 fixture.*查看运行日志$/});
+  const tool = page.getByRole('button',{name:/^工具调用\s*查看运行日志\s*fixture$/});
   await tool.waitFor();
   assert.equal(await tool.locator('.collapsible-type[title="工具调用"] svg.lucide-wrench').count(),1);
   const thinking = page.getByRole('button',{name:/思考过程.*思考标题/});
@@ -127,7 +139,6 @@ try{
   const standalone=page.locator('.event-group > .collapsible.command').filter({hasText:'Bash'});
   const failedCommand=standalone.getByRole('button',{name:/^Git\s*git status --short\s*失败 exit 2\s*Bash$/});
   await failedCommand.waitFor();
-  assert.equal(await standalone.locator('.op-error').count(),0);
   await failedCommand.click();
   assert.deepEqual(await standalone.locator(':scope > .collapsible-body > .tool-payload').evaluateAll(sections=>
     sections.map(section=>section.dataset.kind)),['input','error']);
@@ -155,47 +166,88 @@ try{
   }
   await expandOutput.click();
   assert.equal(await standalone.locator('.tool-output').getAttribute('data-expanded'),'true');
-  await standalone.getByRole('button',{name:'复制输出',exact:true}).click();
+  await standalone.getByRole('button',{name:'复制错误输出',exact:true}).click();
   await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&
     call.args.text===['Exit code 2',...Array.from({length:30},(_,i)=>`output line ${i+1}`)].join('\n')));
   const runCommand=page.locator('.event-group > .collapsible.command').filter({hasText:'run_command'});
-  await runCommand.getByRole('button',{name:/^Git 查看改动\s*git diff --stat\s*\+1 步\s*检查仓库变更\s*run_command$/}).click();
+  await runCommand.getByRole('button',{name:/^Git 查看改动\s*git diff --stat\s*\+1 步\s*run_command$/}).click();
   await runCommand.locator('.tool-command .code').waitFor();
-  assert.equal(await runCommand.locator('.tool-payload[data-kind="input"] .tool-payload-title').textContent(),'命令');
+  assert.equal(await runCommand.locator('.tool-payload[data-kind="input"] .tool-payload-title').textContent(),'输入');
+  assert.equal(await runCommand.locator('.tool-payload-note').textContent(),'检查仓库变更');
   assert.equal(await runCommand.locator('.tool-command .code').textContent(),'git diff --stat && ls -la');
   assert.equal(await runCommand.locator('.tool-command .tool-token-operator').textContent(),'&&');
   await runCommand.getByRole('button',{name:'复制命令',exact:true}).click();
   await page.waitForFunction(()=>window.__MD__.calls.some(call=>call.cmd==='plugin:clipboard-manager|write_text'&&call.args.text==='git diff --stat && ls -la'));
-  await runCommand.getByRole('button',{name:'原始 JSON',exact:true}).click();
+  await runCommand.getByRole('tab',{name:'JSON',exact:true}).click();
   assert.ok((await runCommand.locator('.tool-input-code').textContent()).includes('"CommandLine"'));
   console.log(`PASS: Markdown only for thinking, tool output stays plain; command cards with unnumbered output, raw input and full copy (${engine})`);
 
   await page.locator('.session-card',{hasText:'语义工具示例'}).click();
   const skill=page.locator('.collapsible.skill');
   await skill.locator('.collapsible-head').click();
-  const skillRaw=skill.getByRole('button',{name:'原始数据',exact:true});
+  const skillRaw=skill.getByRole('tab',{name:'原文',exact:true});
   await skill.getByRole('heading',{name:'技能标题'}).waitFor();
   await skillRaw.click();
-  assert.equal(await skillRaw.getAttribute('aria-pressed'),'true');
+  assert.equal(await skillRaw.getAttribute('aria-selected'),'true');
   assert.equal(await skill.locator('.tool-payload[data-kind="output"] pre.code').textContent(),'---\nname: fixture\n---\n# 技能标题\n**技能正文**');
+  await skill.getByRole('tab',{name:'JSON',exact:true}).click();
   assert.equal(JSON.parse(await skill.locator('.tool-input-code').textContent()).args,'--brief');
-  await skillRaw.click();
+  await skill.getByRole('tab',{name:'说明',exact:true}).click();
   await skill.getByRole('heading',{name:'技能标题'}).waitFor();
   const ask=page.locator('.collapsible.ask');
   await ask.locator('.collapsible-head').click();
   assert.equal(await ask.locator('.ask-question .chosen').textContent(),'紧凑');
   assert.equal(await page.evaluate(()=>window.__MD__.calls.some(call=>call.args.token==='ask-input')),false);
-  await ask.getByRole('button',{name:'原始数据',exact:true}).click();
+  await ask.getByRole('tab',{name:'JSON',exact:true}).click();
   await ask.locator('.tool-input-code').waitFor();
   assert.equal(JSON.parse(await ask.locator('.tool-input-code').textContent()).context,'完整提问参数');
   assert.equal(await ask.locator('.tool-payload[data-kind="output"] pre.code').textContent(),'**紧凑**');
-  await ask.getByRole('button',{name:'原始数据',exact:true}).click();
+  await ask.getByRole('tab',{name:'问题',exact:true}).click();
   assert.equal(await ask.locator('.ask-question .chosen').textContent(),'紧凑');
-  const grep=page.locator('.collapsible.search');
+  const grep=page.locator('.collapsible.search').filter({hasText:'Grep'});
   await grep.locator('.collapsible-head').click();
   assert.equal(await grep.locator('.search-text').textContent(),'a'.repeat(32)+'b');
+  const noMatches=page.locator('.collapsible.search').filter({hasText:'exec_command'});
+  assert.equal(await noMatches.locator('.op-chip').textContent(),'无匹配');
+  assert.equal(await noMatches.locator('.tool-status').count(),0);
   await page.getByRole('button',{name:/python3 --version\s*失败 exit 7/}).waitFor();
-  assert.deepEqual(await page.locator('.collapsible.command .op-chip').allTextContents(),['写入','追加','原地修改']);
+  assert.deepEqual(await page.locator('.collapsible.command:is(.write, .modify) .op-chip').allTextContents(),['写入','追加','原地修改']);
+  const script = page.locator('.collapsible.command.script');
+  await script.locator('.collapsible-head').click();
+  assert.equal(await script.locator(':scope > .collapsible-body > section').count(), 2);
+  assert.equal(await script.getByRole('tabpanel',{name:'Python'}).locator('pre.code').textContent(),'print(42)');
+  await script.getByRole('tab',{name:'Python'}).press('ArrowRight');
+  assert.equal(await script.getByRole('tabpanel',{name:'命令'}).locator('pre.code').textContent(),"python3 - <<'PY'\nprint(42)\nPY");
+  await script.getByRole('tab',{name:'命令'}).press('End');
+  assert.equal(JSON.parse(await script.getByRole('tabpanel',{name:'JSON'}).locator('pre.code').textContent()).command,"python3 - <<'PY'\nprint(42)\nPY");
+  assert.equal(await script.locator('[data-kind="output"] pre.code').textContent(),'42');
+  const mcp = page.locator('.collapsible.mcp');
+  await mcp.locator('.collapsible-head').click();
+  assert.deepEqual(await mcp.locator('.tool-arguments dt').allTextContents(),['query','limit']);
+  await mcp.getByRole('tab',{name:'JSON'}).click();
+  assert.equal(JSON.parse(await mcp.locator('.tool-input-code').textContent()).limit, 10);
+  const find=page.locator('.collapsible.find');
+  assert.equal(await page.evaluate(()=>window.__MD__.calls.some(call=>call.args.token==='find-output')),false);
+  await find.locator('.collapsible-head').click();
+  assert.equal(await find.locator('[data-kind="output"] [role="status"]').textContent(),'正在读取…');
+  await page.evaluate(()=>window.__MD__.finishFind());
+  await find.getByRole('tabpanel',{name:'路径'}).getByText('docs/example.md').waitFor();
+  await find.getByRole('tab',{name:'原文'}).click();
+  assert.match(await find.getByRole('tabpanel',{name:'原文'}).locator('pre.code').textContent(),/^Chunk ID: test/);
+  const rejected = page.locator('.collapsible.command').filter({hasText:'已拒绝'});
+  const rejectHead = rejected.locator('.collapsible-head');
+  assert.match(await rejected.locator('.tool-status').getAttribute('title'), /doesn't want to proceed/);
+  for (const width of [960, 620, 520]) {
+    await rejectHead.evaluate((head, width) => { head.closest('.collapsible').style.width = `${width}px`; }, width);
+    assert.ok(await rejectHead.evaluate(head => {
+      const tool = head.querySelector('.tool-tag');
+      return tool.getBoundingClientRect().width > 0 && tool.getBoundingClientRect().right <= head.getBoundingClientRect().right && head.scrollHeight <= head.clientHeight;
+    }));
+  }
+  await rejectHead.evaluate(head => { head.closest('.collapsible').style.removeProperty('width'); });
+  await rejectHead.click();
+  await rejected.locator('[data-kind="error"] pre.code').waitFor();
+  assert.equal(await rejected.locator('[data-kind="error"] pre.code').textContent(),"The user doesn't want to proceed with this tool use.");
   console.log(`PASS: Skill and semantic cards switch to raw data; redirect labels distinguish write and append (${engine})`);
 
   await page.locator('.session-card',{hasText:'安全渲染示例'}).click();await page.locator('.markdown-body h2').waitFor();

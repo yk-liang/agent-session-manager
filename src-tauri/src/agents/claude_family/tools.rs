@@ -1,4 +1,4 @@
-use super::super::tool_ops::{self, text, Choice, Hunk, Op, Question, ToolResult};
+use super::super::tool_ops::{self, first_line, text, Choice, Hunk, Op, Question, ToolResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -48,6 +48,8 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
     let paths = || path.into_iter().map(Into::into).collect::<Vec<_>>();
     let name = call["name"].as_str().unwrap_or_default();
     let op = match (name, path) {
+        ("Read", Some(path)) if outcome["type"] == "image" || result.as_ref().is_some_and(|result|
+            result.block["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "image"))) => Op::Image { path: path.into() },
         ("Read", Some(path)) => {
             let file = &outcome["file"];
             match (file["content"].as_str(), file["startLine"].as_u64(), file["numLines"].as_u64()) {
@@ -85,7 +87,10 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
         ("Glob", _) => tool_ops::find(text(input, "pattern"), paths(), output),
         ("LS", _) => tool_ops::list(paths(), output),
         ("Bash", _) => match text(input, "command") {
-            Some(command) => tool_ops::shell(command, text(input, "description"), None, output),
+            Some(command) => {
+                let (exit_code, output) = if result.as_ref().is_some_and(ToolResult::failed) { exit_status(output) } else { (None, output) };
+                tool_ops::shell(command, text(input, "description"), exit_code, output)
+            }
             None => return Vec::new(),
         },
         ("WebSearch", _) => match text(input, "query") {
@@ -111,8 +116,14 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
             background: input["run_in_background"] == true || outcome["isAsync"] == true,
             encrypted: false,
         },
+        ("SubagentHandback", _) => Op::Message {
+            to: "主任务".into(),
+            summary: text(input, "message").map(first_line),
+            encrypted: false,
+        },
+        ("ListAgents", _) => Op::AgentList,
         ("SendMessage", _) => match text(input, "to") {
-            Some(to) => Op::Message { to: to.into(), summary: text(input, "summary").map(Into::into), encrypted: false },
+            Some(to) => Op::Message { to: to.into(), summary: text(input, "summary").or_else(|| text(input, "message")).map(first_line), encrypted: false },
             None => return Vec::new(),
         },
         ("ToolSearch", _) => match text(input, "query") {
@@ -153,4 +164,16 @@ fn patch(outcome: &Value) -> Option<Vec<Hunk>> {
         lines: hunk["lines"].as_array().into_iter().flatten()
             .filter_map(|line| line.as_str().map(str::to_owned)).collect(),
     }).collect())
+}
+
+/// 失败的命令结果首行是 `Exit code N`，其后才是命令自己的输出。
+fn exit_status(output: Option<&str>) -> (Option<i64>, Option<&str>) {
+    let parsed = output.and_then(|output| output.strip_prefix("Exit code ")).and_then(|rest| {
+        let (code, rest) = rest.split_once('\n').unwrap_or((rest, ""));
+        Some((code.trim().parse().ok()?, rest))
+    });
+    match parsed {
+        Some((code, rest)) => (Some(code), Some(rest)),
+        None => (None, output),
+    }
 }

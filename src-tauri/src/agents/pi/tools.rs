@@ -1,4 +1,4 @@
-use super::super::tool_ops::{self, line_count, text, Hunk, Op, ToolResult};
+use super::super::tool_ops::{self, first_line, line_count, text, Hunk, Op, ToolResult};
 use serde_json::{json, Value};
 
 /// 结果事件上的 `details` 由转换时保留，带有补丁；用完即移除。
@@ -39,6 +39,13 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
         (Some("bash"), _) => match text(input, "command") {
             Some(command) => tool_ops::shell(command, None, None, output),
             None => return Vec::new(),
+        },
+        // pi-subagents 扩展：`label` 是任务的短名。
+        (Some("subagent"), _) => Op::Agent {
+            agent: text(input, "agent").map(Into::into),
+            task: text(input, "label").map(Into::into).or_else(|| text(input, "task").map(first_line)).unwrap_or_else(|| "子任务".into()),
+            background: input["async"] == true,
+            encrypted: false,
         },
         _ => return Vec::new(),
     };

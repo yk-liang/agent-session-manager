@@ -162,6 +162,9 @@ export interface ContentBlock {
   tool_use_id?: string;
   content?: unknown;
   is_error?: boolean;
+  error_summary?: string;
+  empty_command_output?: boolean;
+  command_output?: string;
   exit_code?: number;
   script_result?: ContentBlock;
   /** 后端给出的操作描述；延迟加载时只带标题所需字段，正文随原始数据一起读取。 */
@@ -200,8 +203,8 @@ export type ShellFilter =
 export type ShellIntent =
   | "read" | "search" | "find" | "list" | "write" | "modify" | "script" | "run"
   | "git_diff" | "git_log" | "git_commit" | "git" | "github"
-  | "test" | "build" | "install" | "remote" | "http" | "browser" | "database"
-  | "mkdir" | "remove" | "copy" | "move" | "process" | "kill" | "wait" | "open" | "count" | "other";
+  | "test" | "build" | "install" | "remote" | "http" | "browser" | "database" | "agent"
+  | "mkdir" | "remove" | "copy" | "move" | "process" | "kill" | "wait" | "open" | "count" | "inspect" | "transform" | "other";
 
 /** heredoc、`-c`/`-e` 参数或脚本工具的代码；`first` 是第一行有意义的代码。 */
 export interface ScriptInfo {
@@ -219,10 +222,9 @@ export interface ShellOp {
   description?: string;
   exit_code?: number;
   no_match?: boolean;
-  cwd?: string;
+  search_exit_one?: boolean;
   intent: ShellIntent;
   head?: string;
-  filters?: ShellFilter[];
   more?: number;
   looped?: boolean;
   target?: string;
@@ -252,6 +254,8 @@ export type ToolOp =
   | { kind: "wait"; seconds?: number; target?: string }
   | { kind: "wake"; seconds: number; reason?: string }
   | { kind: "stop"; task: string; detail?: string }
+  | { kind: "task_status"; task: string }
+  | { kind: "agent_list" }
   | { kind: "monitor"; description: string; minutes?: number }
   | { kind: "load_tools"; names: string[] }
   | { kind: "todo"; items: { text: string; status: string }[] }

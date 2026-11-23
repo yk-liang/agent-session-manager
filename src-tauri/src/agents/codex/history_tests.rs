@@ -606,13 +606,17 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
         "payload":{"id":"call","type":"function_call","name":"shell","call_id":"a","arguments":"{\"cmd\":\"hello\"}"}});
     let output = json!({"type":"response_item","ordinal":3,"timestamp":"2099-12-31T00:00:03Z",
         "payload":{"id":"out","type":"function_call_output","call_id":"a","output":"{\"output\":\"FAILED\",\"metadata\":{\"status\":\"error\"},\"chunk_id\":\"test\",\"exit_code\":2}"}});
+    let search = json!({"type":"response_item","ordinal":4,"timestamp":"2099-12-31T00:00:04Z",
+        "payload":{"type":"function_call","name":"exec_command","call_id":"search","arguments":"{\"cmd\":\"rg -n needle src\"}"}});
+    let no_matches = json!({"type":"response_item","ordinal":5,"timestamp":"2099-12-31T00:00:05Z",
+        "payload":{"type":"function_call_output","call_id":"search","output":"Chunk ID: test\nWall time: 0.01 seconds\nProcess exited with code 1\nFinal output:\n"}});
     let path = page(
         &root,
         "view-thread",
         "view-thread",
         0,
         None,
-        vec![message(1, "user", "hello"), call, output],
+        vec![message(1, "user", "hello"), call, output, search, no_matches],
     );
     let full = read_session_in(&root, "view-thread").unwrap();
     let view = read_session_mode(&root, "view-thread", ReadMode::View).unwrap();
@@ -621,7 +625,14 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     let result = &view.events[2]["message"]["content"][0];
     assert_eq!(result["is_error"], true);
     assert_eq!(result["exit_code"], 2);
+    assert!(result.get("empty_command_output").is_none());
     assert!(result.get("content").is_none());
+    let search = &view.events[3]["message"]["content"][0];
+    assert_eq!(search["ops"][0]["search_exit_one"], true);
+    let no_matches = &view.events[4]["message"]["content"][0];
+    assert_eq!(no_matches["exit_code"], 1);
+    assert_eq!(no_matches["empty_command_output"], true);
+    assert!(no_matches.get("content").is_none());
     let mut tokens = vec![];
     for (original, light) in full.events.iter().zip(&view.events) {
         assert_eq!(original["uuid"], light["uuid"]);
@@ -638,11 +649,11 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
             assert_eq!(original, light);
         }
     }
-    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens.len(), 4);
     writeln!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
         "{}",
-        message(4, "assistant", "later")
+        message(6, "assistant", "later")
     )
     .unwrap();
     assert!(
@@ -676,11 +687,14 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
         "type":"item_completed","turn_id":"two","started_at_ms":origin+5500,"item":{"type":"ImageView", "id":"image", "path":"/tmp/fixture.png"}}});
     let failed = json!({"type":"event_msg", "ordinal":9, "timestamp":"2099-12-31T00:00:09Z", "payload":{
         "type":"item_completed","turn_id":"four","started_at_ms":origin+8500,"item":{"type":"ImageView", "id":"failed-child", "path":"/tmp/fixture.png"}}});
+    let mixed = json!({"type":"event_msg", "ordinal":12, "timestamp":"2099-12-31T00:00:12Z", "payload":{
+        "type":"item_completed","turn_id":"mixed","started_at_ms":origin+11500,"item":{"type":"CommandExecution", "id":"mixed-child", "command":"false", "status":"completed", "exit_code":2, "aggregated_output":"fixture failure"}}});
     page(&root, "script-thread_followup", "script-thread", 1, Some(json!({"thread_id":"script-thread",
         "end_byte_offset":first.metadata().unwrap().len(), "end_ordinal_exclusive":3})), vec![
         command, output("parent", 4, "Script completed\nOutput:\nextra log"),
         script("unrelated", "two", 5, "text('standalone log')"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
         script("failed", "four", 8, "await tools.view_image({path:'/tmp/fixture.png'})"), failed, output("failed", 10, "Script failed: fixture"),
+        script("mixed", "mixed", 11, "await tools.exec_command({cmd:'false'}); await tools.update_plan({})"), mixed, output("mixed", 13, "Script completed"),
     ]);
     let view = read_session_mode(&root, "script-thread", ReadMode::View).unwrap();
     let blocks: Vec<_> = view.events.iter().filter_map(|event| event.pointer("/message/content/0")).collect();
@@ -693,4 +707,7 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
     assert_eq!(load(stdout)["content"], "child");
     assert!(blocks.iter().any(|block| block["id"] == "unrelated"));
     assert!(blocks.iter().any(|block| block["tool_use_id"] == "failed" && block["is_error"] == true));
+    assert!(blocks.iter().any(|block| block["id"] == "mixed" && block["name"] == "exec"));
+    let mixed_result = blocks.iter().find(|block| block["tool_use_id"] == "mixed-child").unwrap();
+    assert_eq!(mixed_result["error_summary"], "fixture failure");
 }

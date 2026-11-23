@@ -43,7 +43,7 @@ try {
   assert.equal(await page.locator('#ev-1').getAttribute('title'), '模型：earlier-codex-model');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
-  const tool = page.getByRole('button',{name:/^工具调用 shell.*失败$/});
+  const tool = page.getByRole('button',{name:/^工具调用.*失败.*shell$/});
   assert.equal(await tool.getAttribute('aria-expanded'), 'false');
   await tool.click();
   await page.getByText('result on demand',{exact:true}).waitFor();

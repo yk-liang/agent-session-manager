@@ -1,12 +1,13 @@
 import { useContext, useMemo, type ReactNode } from "react";
 import { FileMinus, FilePen, FilePlus, FileSearchCorner, FileText, FolderOpen, FolderSearch, ScanSearch, type LucideIcon } from "lucide-react";
-import { browseSteps, compactPath, displayPath, itemStatus, splitPath, type ToolItem } from "../activity";
+import { browseSteps, compactPath, displayPath, itemStatus, noMatch, splitPath, type ToolItem } from "../activity";
 import { foldUnchanged, hunkRows, type DiffRow } from "../diff";
-import type { BrowseOp, ChangeOp, ContentBlock, SearchHits, ShellFilter, ShellOp } from "../types";
+import type { BrowseOp, ChangeOp, DiffHunk, SearchHits, ShellFilter, ShellOp } from "../types";
 import CopyButton from "./CopyButton";
 import { DetailState } from "./DetailState";
-import { Chip, CwdTag, FullOp, OpCard, ResultOutput, ToolBody, useRawView } from "./OpCard";
-import { ExpandableFrame, Payload, resultText, ToolInput, ToolOutput, ToolResult, ToolSection } from "./ToolPayload";
+import { Chip, OpCard, Stats } from "./OpCard";
+import { commandView, ExpandableFrame, resultText, textView } from "./ToolContent";
+import { ToolSections } from "./ToolSections";
 import UiIcon from "./UiIcon";
 
 type Step = BrowseOp & { program?: string; filters?: ShellFilter[] };
@@ -69,85 +70,65 @@ function filterLabel(filter: ShellFilter) {
   }
 }
 
-/** 统计标签不收缩；管道筛选可被截断，截取行数这类短标签保持完整。 */
-export function OpMeta({ meta, filters }: { meta?: ReactNode; filters?: ShellFilter[] }) {
-  if (!meta && !filters?.length) return null;
-  return <span className="op-meta">
-    {meta && <Chip tone="sans">{meta}</Chip>}
-    {filters?.map((filter, i) => <span key={i} className={`op-chip${filter.kind === "include" || filter.kind === "exclude" ? " shrink" : ""}`}
-      title={filterLabel(filter)}>{filterLabel(filter)}</span>)}
-  </span>;
-}
-
 /** 读取、搜索、查找、列目录；只做这些事的命令按步骤展示，同一张卡片。 */
-export function BrowseCard({ item, shell }: { item: ToolItem; shell?: ShellOp }) {
+export function BrowseCard({ item }: { item: ToolItem }) {
   const { cwd } = useContext(DetailState);
-  const [first, ...rest] = browseSteps(item.op) as Step[];
+  const steps = browseSteps(item.op) as Step[];
+  const [first] = steps;
   const [icon, label] = browseIcon(first);
   const target = browseTarget(first, cwd);
-  const programs = shell && [...new Set(shell.steps!.map(step => step.program))].join(" · ");
-  return <OpCard item={item} className={first.kind} icon={icon} label={label} tone="dim" tag={programs}
+  return <OpCard item={item} className={first.kind} icon={icon} label={label} tone="dim"
     head={<>
-      <code className={`op-name${target.pattern ? " pattern" : ""}${rest.length ? " multi" : ""}`} title={target.title}>{target.name}</code>
+      <code className={`op-name${target.pattern ? " pattern" : ""}`} title={target.title}>{target.name}</code>
       {target.dir && <span className="op-dir" title={target.dir}>{compactPath(target.dir)}</span>}
-      <OpMeta meta={target.meta} filters={first.filters} />
-      {rest.slice(0, 2).map((step, i) => {
-        const [stepIcon, stepLabel] = browseIcon(step);
-        const { name, pattern } = browseTarget(step, cwd);
-        return <span key={i} className="op-step" title={stepLabel}>
-          <UiIcon icon={stepIcon} size={12} /><code className={pattern ? "pattern" : undefined}>{name}</code>
-        </span>;
-      })}
-      {rest.length > 2 && <span className="op-more">+{rest.length - 2}</span>}
-      <CwdTag dir={shell?.cwd} />
-      {shell?.description && <span className="op-detail" title={shell.description}>{shell.description}</span>}
+      <Stats items={[noMatch(item) ? "无匹配" : target.meta, steps.length > 1 && `+${steps.length - 1} 步`]} />
     </>}>
-    <BrowseBody item={item} />
+    <BrowseBody item={item} steps={steps} />
   </OpCard>;
 }
 
-/** 命令要显示完整命令、搜索要显示分组命中，这两种才读取调用正文；其余只读结果。 */
-function BrowseBody({ item }: { item: ToolItem }) {
-  const { raw, toggle } = useRawView();
-  if (raw) return <ToolBody item={item} actions={toggle} />;
-  if (item.op?.kind !== "shell" && item.op?.kind !== "search") return <BrowseView item={item} op={item.op as BrowseOp} toggle={toggle} />;
-  return <FullOp<BrowseOp | ShellOp> item={item}>{(op, call) => <BrowseView item={item} op={op} call={call} toggle={toggle} />}</FullOp>;
+function BrowseBody({ item, steps }: { item: ToolItem; steps: Step[] }) {
+  const shell = item.op?.kind === "shell" ? item.op : undefined;
+  const [step] = steps;
+  const targets = step.kind === "read" ? [step.path] : step.paths ?? [];
+  const pattern = step.kind === "search" || step.kind === "find" ? step.pattern : undefined;
+  const summary = [pattern, ...targets]
+    .filter(Boolean).join("\n");
+  const single = steps.length === 1 ? step : undefined;
+  return <ToolSections<BrowseOp | ShellOp> item={item} input={{
+    note: shell?.description ?? item.part.content.description,
+    preview: !shell && summary ? textView(step.kind === "read" ? "路径" : "目标", summary, null) : undefined,
+    loadOnExpand: single?.kind === "search",
+    views: full => [
+      (steps.length > 1 || !!step.filters?.length) && { label: "步骤", body: <StepList steps={steps} /> },
+      full.kind === "shell" && commandView(full.command),
+    ],
+  }} output={{
+    title: !single ? "合并输出" : single.kind === "read" ? "内容" : "结果",
+    start: single?.kind === "read" ? single.start : undefined,
+    views: (result, full) => {
+      if (single?.kind === "search") {
+        const [search] = browseSteps(full) ?? [];
+        return [search?.kind === "search" && !!search.hits?.length && { label: "命中", body: <HitList hits={search.hits} pattern={search.pattern} /> }];
+      }
+      if (single?.kind === "find" && result) {
+        const paths = (result.command_output ?? resultText(result)).split("\n").map(line => line.trim()).filter(Boolean);
+        return [paths.length > 0 && { label: "路径", body: <PathList paths={paths} />, meta: `${paths.length} 个` }];
+      }
+      return [];
+    },
+  }} />;
 }
 
-function BrowseView({ item, op, call, toggle }: { item: ToolItem; op: BrowseOp | ShellOp; call?: ContentBlock; toggle: ReactNode }) {
+function StepList({ steps }: { steps: Step[] }) {
   const { cwd } = useContext(DetailState);
-  const steps = (browseSteps(op) ?? []) as Step[];
-  const shell = op.kind === "shell";
-  const command = shell && <ToolInput value={call?.input} command={op.command} actions={toggle} />;
-  const actions = shell ? undefined : toggle;
-  const [step] = steps;
-  if (steps.length > 1) {
-    return <>
-      {command}
-      <ToolSection kind="output" title={`${steps.length} 步`}>
-        <ul className="op-steps">{steps.map((step, i) => {
-          const [icon, label] = browseIcon(step);
-          const target = browseTarget(step, cwd);
-          const detail = [target.dir, target.meta, ...(step.filters ?? []).map(filterLabel)].filter(Boolean).join(" · ");
-          return <li key={i} title={label}><UiIcon icon={icon} size={12} /><code className={target.pattern ? "pattern" : undefined}>{target.name}</code>
-            {detail && <span>{detail}</span>}</li>;
-        })}</ul>
-      </ToolSection>
-      <ResultOutput item={item} />
-    </>;
-  }
-  switch (step?.kind) {
-    case "search":
-      return <>{command}{step.hits
-        ? <ToolSection kind="output" title="结果" actions={actions}><HitList hits={step.hits} pattern={step.pattern} /></ToolSection>
-        : <ResultOutput item={item} title="结果" actions={actions} />}</>;
-    case "find":
-      return <>{command}<PathResult item={item} actions={actions} /></>;
-    case "read":
-      return <>{command}<ResultOutput item={item} title="内容" start={step.start ?? null} actions={actions} /></>;
-    default:
-      return <>{command}<ResultOutput item={item} title="结果" actions={actions} /></>;
-  }
+  return <ul className="op-steps">{steps.map((step, i) => {
+    const [icon, label] = browseIcon(step);
+    const target = browseTarget(step, cwd);
+    const detail = [target.dir, target.meta, ...(step.filters ?? []).map(filterLabel)].filter(Boolean).join(" · ");
+    return <li key={i} title={label}><UiIcon icon={icon} size={12} /><code className={target.pattern ? "pattern" : undefined}>{target.name}</code>
+      {detail && <span>{detail}</span>}</li>;
+  })}</ul>;
 }
 
 function literalHighlight(pattern: string) {
@@ -193,22 +174,12 @@ function HitList({ hits, pattern }: { hits: SearchHits[]; pattern: string }) {
 }
 
 /** 查找结果按路径列出：目录变淡，文件名突出。 */
-function PathResult({ item, actions }: { item: ToolItem; actions?: ReactNode }) {
+function PathList({ paths }: { paths: string[] }) {
   const { cwd } = useContext(DetailState);
-  const { result } = item.part;
-  if (!result) return <ResultOutput item={item} title="结果" actions={actions} />;
-  const failed = itemStatus(item) === "error";
-  return <Payload block={result} kind={failed ? "error" : "output"}>{loaded => {
-    const text = resultText(loaded);
-    const paths = text.split("\n").map(line => line.trim()).filter(Boolean);
-    if (failed || !paths.length) return <ToolResult result={loaded} failed={failed} title="结果" start={null} actions={actions} />;
-    return <ToolOutput text={text} title="结果" actions={actions}>
-      <ExpandableFrame lines={paths.length} label="结果">{() => <div className="path-list">{paths.map((path, i) => {
-        const { dir, name } = splitPath(displayPath(path, cwd));
-        return <div key={i}>{dir && <span className="search-dir">{dir}/</span>}{name}</div>;
-      })}</div>}</ExpandableFrame>
-    </ToolOutput>;
-  }}</Payload>;
+  return <ExpandableFrame lines={paths.length} label="路径">{() => <div className="path-list">{paths.map((path, i) => {
+    const { dir, name } = splitPath(displayPath(path, cwd));
+    return <div key={i}>{dir && <span className="search-dir">{dir}/</span>}{name}</div>;
+  })}</div>}</ExpandableFrame>;
 }
 
 const changeIcons: Record<ChangeOp["kind"], [LucideIcon, string, "warning" | "success" | "danger"]> = {
@@ -230,33 +201,27 @@ export function ChangeCard({ item, op }: { item: ToolItem; op: ChangeOp }) {
         {op.kind === "delete" && <Chip tone="removed">删除</Chip>}
       </span>
     </>}>
-    <ChangeBody item={item} />
+    <ChangeBody item={item} path={op.path} />
   </OpCard>;
 }
 
-function ChangeBody({ item }: { item: ToolItem }) {
+function ChangeBody({ item, path }: { item: ToolItem; path: string }) {
   const { onCopyError } = useContext(DetailState);
-  const { raw, toggle } = useRawView();
-  const failed = itemStatus(item) === "error";
-  const path = (item.op as ChangeOp).path;
-  const actions = <>
-    <CopyButton className="content-action btn-ghost btn-sm" label="复制路径" value={path} onError={onCopyError}>路径</CopyButton>
-    {toggle}
-  </>;
-  if (raw) return <ToolBody item={item} actions={actions} />;
-  return <>
-    <FullOp<ChangeOp> item={item}>{op => {
-      if (op.kind === "write") return <ToolOutput text={op.content ?? ""} title="内容" actions={actions} />;
-      if (op.kind === "delete") return <ToolSection kind="output" title="删除" actions={actions}><p className="tool-payload-message">文件已删除</p></ToolSection>;
-      const rows = hunkRows(op.hunks ?? []);
-      const folded = foldUnchanged(rows, 2);
-      const hasFolded = folded.length !== rows.length || folded.some((row, index) => row.kind !== rows[index].kind);
-      return <ToolSection kind="output" title="修改" actions={actions}>
-        <ExpandableFrame lines={rows.length} overflow={hasFolded} label="修改">{expanded => <DiffRows rows={expanded ? rows : folded} />}</ExpandableFrame>
-      </ToolSection>;
-    }}</FullOp>
-    {failed && <ResultOutput item={item} />}
-  </>;
+  return <ToolSections<ChangeOp> item={item} input={{
+    actions: <CopyButton className="content-action btn-ghost btn-sm" label="复制路径" value={path} onError={onCopyError}>路径</CopyButton>,
+    views: op => [
+      op.kind === "edit" && { label: "改动", body: <Diff hunks={op.hunks ?? []} /> },
+      op.kind === "write" && textView("内容", op.content ?? ""),
+    ],
+  }} output={itemStatus(item) === "error" || item.index === 0 && !!item.part.content.script_result ? {} : false} />;
+}
+
+/** 未改动的行只保留改动两侧各 2 行，展开后显示全部。 */
+function Diff({ hunks }: { hunks: DiffHunk[] }) {
+  const rows = hunkRows(hunks);
+  const folded = foldUnchanged(rows, 2);
+  const hasFolded = folded.length !== rows.length || folded.some((row, index) => row.kind !== rows[index].kind);
+  return <ExpandableFrame lines={rows.length} overflow={hasFolded} label="改动">{expanded => <DiffRows rows={expanded ? rows : folded} />}</ExpandableFrame>;
 }
 
 function DiffRows({ rows }: { rows: DiffRow[] }) {

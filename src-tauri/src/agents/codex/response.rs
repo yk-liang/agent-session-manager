@@ -59,7 +59,7 @@ pub(super) fn convert(
         "reasoning" => {
             let thinking = ["summary", "content"].into_iter()
                 .filter_map(|key| payload[key].as_array())
-                .map(|items| text_of_content(items))
+                .map(text_of_content)
                 .filter(|text| !text.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -118,8 +118,9 @@ pub(super) fn convert(
                 json!(payload.get("input").and_then(Value::as_str).unwrap_or(""))
             };
             let mut block = json!({ "type": "tool_use", "id": call_id, "name": name, "input": input });
-            if let Some(op) = tools::describe(name, &input) {
-                block["ops"] = json!([op]);
+            let ops = tools::describe(name, &input);
+            if !ops.is_empty() {
+                block["ops"] = json!(ops);
             }
             out.push(json!({
                 "type": "assistant",
@@ -132,11 +133,8 @@ pub(super) fn convert(
             let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
             let output = &payload["output"];
             let status = tool_output::status(output);
-            let mut result = json!({"type":"tool_result", "tool_use_id":call_id,
-                "content":tool_output::content(output), "is_error":status.failed});
-            if let Some(exit) = status.exit_code.filter(|_| payload["type"] == "function_call_output") {
-                result["exit_code"] = json!(exit);
-            }
+            let mut result = json!({"type":"tool_result", "tool_use_id":call_id, "content":tool_output::content(output)});
+            status.annotate(&mut result, kind == "function_call_output");
             out.push(json!({
                 "type": "user",
                 "timestamp": ts,
