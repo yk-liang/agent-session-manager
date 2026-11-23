@@ -20,8 +20,3 @@ export function historicalModels(events: SessionEvent[]): string[] {
   }
   return [...models];
 }
-
-export function eventModelTitle(event: SessionEvent): string | undefined {
-  const model = assistantModel(event);
-  if (model) return `模型：${model}`;
-}

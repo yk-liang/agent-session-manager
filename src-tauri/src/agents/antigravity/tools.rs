@@ -29,9 +29,20 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
         }
         (Some("write_file"), Some(path)) => Some(Op::write(path, input["Content"].as_str().unwrap_or_default(),
             output.lines().any(|line| line == "Created file.").then_some(true))),
-        (Some("run_command"), _) => text(input, "CommandLine")
-            .map(|command| tool_ops::shell(command, text(input, "toolSummary"), None, result.as_ref().map(|_| output))),
-        (Some("search_web"), _) => text(input, "query").map(|query| Op::web_search(query, text(input, "domain"), None)),
+        (Some("run_command"), _) => text(input, "CommandLine").map(|command| {
+            let receipt = command_receipt(output);
+            if let (Some(result), Some((_, Some(body)))) = (&mut result, receipt) {
+                result.block["command_output"] = json!(body);
+                if receipt.is_some_and(|(exit, _)| exit != 0) {
+                    if let Some(reason) = body.lines().map(str::trim).find(|line| !line.is_empty()) {
+                        result.block["error_summary"] = json!(reason.chars().take(240).collect::<String>());
+                    }
+                }
+            }
+            let (exit, stdout) = receipt.map_or((None, result.as_ref().map(|_| output)), |(exit, body)| (Some(exit), body));
+            tool_ops::shell(command, text(input, "toolSummary"), exit, stdout)
+        }),
+        (Some("search_web"), _) => Some(Op::web_search(input, None, None)),
         (Some("ask_question"), _) => Some(Op::ask(input["questions"].as_array().into_iter().flatten().filter_map(|q| Some(Question {
             question: text(q, "question")?.into(),
             header: None,
@@ -66,4 +77,43 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
         result.block["content"] = content.unwrap_or(original);
     }
     op.into_iter().collect()
+}
+
+fn command_receipt(text: &str) -> Option<(i64, Option<&str>)> {
+    let with_timestamps = !text.starts_with("Command exited with code ");
+    let rest = if with_timestamps {
+        let (prefix, rest) = text.split_once("Created At: ")?;
+        if !prefix.is_empty() && !prefix.starts_with("The tool's output was truncated") { return None; }
+        let (created, rest) = rest.split_once('\n')?;
+        let (completed, rest) = rest.strip_prefix("Completed At: ")?.split_once('\n')?;
+        chrono::DateTime::parse_from_rfc3339(created.trim_end()).ok()?;
+        chrono::DateTime::parse_from_rfc3339(completed.trim_end()).ok()?;
+        rest
+    } else { text };
+    let (status, rest) = rest.split_once('\n').unwrap_or((rest, ""));
+    let exit = status.trim_end().strip_prefix("Command exited with code ")?.strip_suffix('.')?.parse().ok()?;
+    let rest = rest.trim_start_matches(['\n', '\r']);
+    let body = rest.strip_prefix("Command output:\n").or_else(|| rest.strip_prefix("Command output:\r\n"))
+        .or_else(|| (rest.trim_end() == "No output from the command.").then_some(""));
+    (with_timestamps || body.is_some()).then_some((exit, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_receipts_preserve_output_but_use_recorded_exit() {
+        let receipt = "Created At: 2026-01-12T12:00:00+00:00\nCompleted At: 2026-01-12T12:00:01+00:00\nCommand exited with code 128.\n\nCommand output:\nfatal: missing ref";
+        let mut result = json!({"content":receipt,"status":"completed"});
+        let ops = describe(&json!({"name":"run_command","input":{"CommandLine":"git reset --soft HEAD~1 && git log"}}),
+            Some(ToolResult { block: &mut result, event: &mut Value::Null }));
+        let shell = json!(&ops[0]);
+        assert_eq!(shell["exit_code"], 128);
+        assert_eq!(shell["intent"], "git_change");
+        assert_eq!(result["content"], receipt);
+        assert_eq!(result["command_output"], "fatal: missing ref");
+        assert_eq!(command_receipt("Command exited with code 1.\n\nNo output from the command."), Some((1, Some(""))));
+        assert!(command_receipt("Command exited with code 128.\nother output").is_none());
+    }
 }

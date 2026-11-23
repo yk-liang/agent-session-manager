@@ -32,7 +32,7 @@ function MessageBubble({ role, timestamp, blocks, markdown, query, head }: {
   </div>;
 }
 
-/** 其他代理发来的消息：类型、任务名和发送方；正文只有密文时如实说明。 */
+/** 其他智能体发来的消息：类型、任务名和发送方；正文只有密文时如实说明。 */
 function AgentHead({ agent }: { agent: AgentEnvelope }) {
   return <div className="agent-head">
     <strong>{AGENT_KINDS[agent.kind]}</strong>

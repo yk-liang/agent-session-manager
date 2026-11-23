@@ -9,6 +9,7 @@ mod context;
 mod context_tests;
 pub(crate) mod deferred;
 pub(crate) mod deletion;
+mod exec;
 mod history;
 #[cfg(test)]
 mod history_tests;
@@ -78,7 +79,7 @@ struct ParsedRollout {
     history_base: Option<history::HistoryBase>,
     forked_from: Option<String>,
     attached_thread: bool,
-    /// 子代理分叉时，序号小于该值的记录是复制来的父会话上下文。
+    /// 子智能体分叉时，序号小于该值的记录是复制来的父会话上下文。
     fork_start: Option<u64>,
     /// 父会话上下文生成的事件数；仅读取正文时统计。
     inherited: usize,
@@ -399,7 +400,7 @@ fn read_rollout(
                 continue;
             }
             "session_meta" if seen_meta => {
-                // 分叉副本以父会话的 session_meta 开头；Guardian 等子代理只有预置任务，没有父会话副本。
+                // 分叉副本以父会话的 session_meta 开头；Guardian 等子智能体只有预置任务，没有父会话副本。
                 copies_parent |= parsed.forked_from.is_some()
                     && serde_json::from_str::<ThreadId>(raw_payload).is_ok_and(|meta| meta.id == parsed.forked_from);
                 continue;
@@ -1179,6 +1180,7 @@ mod tests {
         assert_eq!(p.events[2]["message"]["content"][0]["thinking"], "先分析需求\n\n核对正文");
         assert_eq!(p.events[2]["message"]["model"], "fixture-model");
         assert_eq!(p.events[6]["message"]["content"][0]["name"], "web_search");
+        assert_eq!(p.events[6]["message"]["content"][0]["ops"][0]["queries"], json!(["fixture"]));
         assert_eq!(p.events[7]["message"]["content"], "压缩正文");
         assert_eq!(p.events[8]["content"], "轮次已中断");
 
@@ -1236,7 +1238,7 @@ mod tests {
             r#"{"timestamp":"2099-12-31T00:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg-reply","role":"assistant","content":[{"type":"output_text","text":"收到"}]}}"#.to_string(),
             r#"{"timestamp":"2099-12-31T00:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"agent_message","id":"amsg-task","author":"/root","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/sub\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw=="}]}}"#.to_string(),
             r#"{"timestamp":"2099-12-31T00:00:04Z","ordinal":4,"type":"response_item","payload":{"type":"function_call","name":"send_message","call_id":"call-report","arguments":"{\"target\":\"/root\",\"message\":\"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw==\"}"}}"#.to_string(),
-            r#"{"timestamp":"2099-12-31T00:00:05Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg-done","author":"/root/sub/leaf","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/sub\nSender: /root/sub/leaf\nPayload:\n子代理完成"}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:05Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg-done","author":"/root/sub/leaf","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/sub\nSender: /root/sub/leaf\nPayload:\n子智能体完成"}]}}"#.to_string(),
             format!(r#"{{"timestamp":"2099-12-31T00:00:06Z","ordinal":6,"type":"response_item","payload":{{"type":"function_call","name":"send_message","call_id":"call-plain","arguments":"{{\"target\":\"/root\",\"message\":\"gAAAAA{}==\"}}"}}}}"#, "B".repeat(92)),
         ]
         .join("\n");
@@ -1275,7 +1277,7 @@ mod tests {
         assert_eq!(sub.events[2]["message"]["content"], json!([]));
         assert_eq!(sub.events[3]["message"]["content"][0]["ops"][0]["encrypted"], true);
         assert_eq!(sub.events[4]["agent"]["kind"], "result");
-        assert_eq!(sub.events[4]["message"]["content"][0]["text"], "子代理完成");
+        assert_eq!(sub.events[4]["message"]["content"][0]["text"], "子智能体完成");
         assert!(sub.events[5]["message"]["content"][0]["ops"][0].get("encrypted").is_none(), "非规范补位的明文不能当成密文");
         let sub_meta = ours.iter().find(|meta| meta.session_id == id_sub).unwrap();
         assert_eq!(CodexSource.search_events(sub_meta).unwrap(), sub.events[2..]);

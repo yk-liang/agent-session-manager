@@ -14,7 +14,7 @@ import CopyButton from "./CopyButton";
 import PathLabel from "./PathLabel";
 import { Checkbox, CheckboxField } from "./Checkbox";
 
-const HIT_ROLES: Record<ConversationSearchHit["role"], string> = { user: "用户", assistant: "助手", agent: "代理" };
+const HIT_ROLES: Record<ConversationSearchHit["role"], string> = { user: "用户", assistant: "助手", agent: "智能体" };
 
 interface Props {
   scopeKey: string;

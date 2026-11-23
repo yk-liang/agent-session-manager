@@ -21,7 +21,7 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
-/// 多代理之间的消息：信封写明类型和收发方，正文可能只有密文。
+/// 多智能体之间的消息：信封写明类型和收发方，正文可能只有密文。
 fn agent_message(payload: &Value, ts: Option<&str>, cwd: Option<&str>) -> Value {
     let items = payload["content"].as_array().map(Vec::as_slice).unwrap_or_default();
     let text = text_of_content(items);
@@ -80,15 +80,17 @@ pub(super) fn convert(
             out.push(context::compaction(payload["summary"].as_str(), ts, cwd));
         }
         "web_search_call" | "tool_search_call" => {
-            let (name, input) = if kind == "web_search_call" {
-                ("web_search", &payload["action"])
+            let (name, input, op) = if kind == "web_search_call" {
+                let action = &payload["action"];
+                let (name, op) = tools::web_action(action, None, None);
+                (name, action, op)
             } else {
-                ("tool_search", &payload["arguments"])
+                ("tool_search", &payload["arguments"], None)
             };
             out.push(json!({"type":"assistant","timestamp":ts,"cwd":cwd,
                 "message":{"role":"assistant","content":[{
                     "type":"tool_use","id":payload["call_id"].as_str().or_else(|| payload["id"].as_str()),
-                    "name":name,"input":input,"status":match payload["status"].as_str() {
+                    "name":name,"input":input,"ops":op.into_iter().collect::<Vec<_>>(),"status":match payload["status"].as_str() {
                         Some("completed") => Some("completed"),
                         Some("in_progress" | "searching") => Some("running"),
                         Some("failed" | "error") => Some("error"),

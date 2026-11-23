@@ -367,7 +367,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
     ))
 }
 
-/// 子代理分叉时 Codex 只复制精简后的父会话历史，执行记录等事件不会随副本保留。
+/// 子智能体分叉时 Codex 只复制精简后的父会话历史，执行记录等事件不会随副本保留。
 /// 副本中的响应项沿用父会话的 ID：最后一个对应得上的位置之前改用父会话的完整记录，之后的副本原样保留。
 pub(super) fn adopt_parent_history(detail: &mut SessionDetail, parent: Vec<Value>) {
     let item = |event: &Value| event["uuid"].as_str()?.split_once('@').map(|(id, _)| id.to_owned());

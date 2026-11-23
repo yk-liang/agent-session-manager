@@ -107,7 +107,7 @@ pub(super) struct Location {
     pub(super) path: PathBuf,
     pub(super) id: String,
     cwd: Option<String>,
-    /// 按子代理日志的存储结构推断的父会话文件；有值即为子会话。
+    /// 按子智能体日志的存储结构推断的父会话文件；有值即为子会话。
     layout_parent: Option<PathBuf>,
     /// 会话头记录的父会话文件。自定义会话目录下它与存储结构不一致，以它为准。
     recorded_parent: Option<PathBuf>,

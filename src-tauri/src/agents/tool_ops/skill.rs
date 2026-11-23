@@ -12,7 +12,7 @@ pub(crate) fn loaded(name: &str, args: Option<&str>, text: &str) -> Op {
         Some((path, rest)) => (Some(path.trim().to_owned()), rest.trim_start()),
         None => (None, text),
     };
-    let (description, body) = frontmatter(text);
+    let (_, description, body) = frontmatter(text);
     Op::Skill {
         name: name.into(),
         args: args.map(str::trim).filter(|args| !args.is_empty()).map(Into::into),
@@ -22,38 +22,45 @@ pub(crate) fn loaded(name: &str, args: Option<&str>, text: &str) -> Op {
     }
 }
 
-/// 读取 `skills/<名称>/SKILL.md` 的结果视为加载技能；返回技能描述和去掉 frontmatter 的正文。
-pub(crate) fn read(path: &str, text: &str) -> Option<Op> {
-    let dir = path.strip_suffix("/SKILL.md").filter(|dir| dir.rsplit('/').nth(1) == Some("skills"))?;
-    let (description, body) = frontmatter(text);
-    let name = dir.rsplit('/').next().unwrap_or(dir);
+/// 读取 SKILL.md 的结果：名称取 frontmatter 的 `name`，没有时要求路径形如 `skills/<名称>/SKILL.md`。
+fn read(path: &str, text: &str) -> Option<Op> {
+    let dir = if path == "SKILL.md" { "." } else { path.strip_suffix("/SKILL.md")? };
+    let (name, description, body) = frontmatter(text);
+    let name = name.or_else(|| (dir.rsplit('/').nth(1) == Some("skills")).then(|| dir.rsplit('/').next()).flatten())?;
     Some(Op::Skill { name: name.into(), args: None, path: Some(dir.into()), description, body: Some(body.into()) })
 }
 
-/// 单次读取 SKILL.md 的调用改为技能卡片。
 pub(crate) fn promote(ops: &mut [Op], result: &Value) {
+    if result["is_error"] == true { return; }
+    let content = &result["content"];
+    let text = result["command_output"].as_str().or_else(|| content.as_str()).or_else(|| content.as_array()
+        .filter(|parts| parts.len() == 1)
+        .and_then(|parts| parts[0]["text"].as_str()));
+    if let Some(text) = text { promote_text(ops, text); }
+}
+
+/// 从第一行起读取 SKILL.md 的单次调用改为技能卡片。
+pub(crate) fn promote_text(ops: &mut [Op], text: &str) {
     let path = match &*ops {
-        [Op::Read { path, .. }] => path.as_str(),
+        [Op::Read { path, start, tail: None, .. }] if start.is_none_or(|line| line == 1) => path.as_str(),
         [Op::Shell(shell)] => match shell.single_read() {
             Some(path) => path,
             None => return,
         },
         _ => return,
     };
-    let content = &result["content"];
-    let text = content.as_str().or_else(|| content.as_array()
-        .filter(|parts| parts.len() == 1)
-        .and_then(|parts| parts[0]["text"].as_str()));
-    if let Some(skill) = text.filter(|_| result["is_error"] != true).and_then(|text| read(path, text)) {
+    if let Some(skill) = read(path, text) {
         ops[0] = skill;
     }
 }
 
-/// frontmatter 里的 `description`，支持单行和 `>-`、`|` 折叠写法。
-fn frontmatter(text: &str) -> (Option<String>, &str) {
+/// frontmatter 里的 `name` 和 `description`（支持单行和 `>-`、`|` 折叠写法），以及其后的正文。
+fn frontmatter(text: &str) -> (Option<&str>, Option<String>, &str) {
     let Some((head, body)) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")) else {
-        return (None, text);
+        return (None, None, text);
     };
+    let name = head.lines().find_map(|line| line.strip_prefix("name:")).map(|value| value.trim().trim_matches(['\'', '"']))
+        .filter(|name| !name.is_empty() && !name.starts_with(['|', '>']));
     let mut lines = head.lines();
     let description = lines.by_ref().find_map(|line| line.strip_prefix("description:")).map(|value| {
         let value = value.trim();
@@ -63,7 +70,7 @@ fn frontmatter(text: &str) -> (Option<String>, &str) {
             value.trim_matches(['"', '\'']).to_owned()
         }
     });
-    (description.filter(|d| !d.is_empty()), body.trim_start_matches('\n'))
+    (name, description.filter(|d| !d.is_empty()), body.trim_start_matches('\n'))
 }
 
 #[cfg(test)]
@@ -81,5 +88,12 @@ mod tests {
         promote(&mut ops, &result);
         assert_eq!(ops, [Op::Skill { name: "ego".into(), args: None, path: Some("/u/.agents/skills/ego".into()), description: Some("Drive the browser.".into()), body: Some("# Ego\n".into()) }]);
         assert!(json!(ops.pop().unwrap().summary()).get("body").is_none());
+
+        let mut partial = vec![Op::read_range("/u/.agents/skills/ego/SKILL.md", 24, 2, Some(40))];
+        promote(&mut partial, &json!({"content":"Two lines from the middle."}));
+        assert!(matches!(partial.as_slice(), [Op::Read { start: Some(24), .. }]));
+        let mut shell = [super::super::shell("sed -n '1,25p' SKILL.md", None, None, None)];
+        promote(&mut shell, &result);
+        assert!(matches!(&shell[0], Op::Skill { name, .. } if name == "ego"));
     }
 }

@@ -32,13 +32,12 @@ export function Stats({ items }: { items: (string | false | undefined)[] }) {
 }
 
 /** 工具卡片外框：标题始终一行，内容区可收缩，右侧的状态和工具名固定。 */
-export function OpCard({ item, className, icon, label, tone, open = false, head, children }: {
+export function OpCard({ item, className, icon, label, tone, head, children }: {
   item: ToolItem;
   className: string;
   icon: LucideIcon;
   label: string;
   tone?: Tone;
-  open?: boolean;
   head: ReactNode;
   children: ReactNode;
 }) {
@@ -50,7 +49,7 @@ export function OpCard({ item, className, icon, label, tone, open = false, head,
   const recordedExit = item.op?.kind === "shell" ? item.op.exit_code : undefined;
   const exit = recordedExit || result?.exit_code || (exitLine && Number(exitLine[1])) || undefined;
   const tool = item.part.content.name;
-  return <Collapsible id={item.key} className={`tool op ${className}${failed ? " error" : ""}`} defaultOpen={open && !failed}
+  return <Collapsible id={item.key} className={`tool op ${className}${failed ? " error" : ""}`}
     head={<>
       <TypeIcon icon={icon} label={label} tone={tone} />
       <span className="op-main">{head}</span>

@@ -2,7 +2,7 @@
 //!
 //! v1 使用 session/message/part，v2 使用 session_v2/session_message。
 //! storage 在只读连接内建立兼容视图，统一读取两种 JSON 结构：
-//! - 只读访问，删除委托给官方 `opencode session delete`（会一并清理子代理）
+//! - 只读访问，删除委托给官方 `opencode session delete`（会一并清理子智能体）
 //! - 标题为占位符时回退到首条用户消息
 //! - 会话 ID 形如 ses_[0-9A-Za-z]+
 

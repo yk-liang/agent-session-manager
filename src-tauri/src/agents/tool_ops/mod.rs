@@ -4,8 +4,8 @@ mod shell;
 mod skill;
 
 pub(crate) use browse::{find, list, search};
-pub(crate) use shell::shell;
-pub(crate) use skill::{loaded as loaded_skill, promote as promote_skill, read as read_skill};
+pub(crate) use shell::{shell, CommandOutput};
+pub(crate) use skill::{loaded as loaded_skill, promote as promote_skill, promote_text as promote_skill_text};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,6 +58,8 @@ pub(crate) enum Op {
         files: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         hits: Option<Vec<Hits>>,
+        #[serde(skip_serializing_if = "Not::not")]
+        truncated: bool,
     },
     Find {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,6 +77,12 @@ pub(crate) enum Op {
     },
     Shell(shell::Shell),
     Script(Script),
+    Exec {
+        calls: Vec<ExecCall>,
+        lines: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        features: Vec<ExecFeature>,
+    },
     Skill {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,7 +95,7 @@ pub(crate) enum Op {
         body: Option<String>,
     },
     WebSearch {
-        query: String,
+        queries: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         domain: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +143,7 @@ pub(crate) enum Op {
         detail: Option<String>,
     },
     TaskStatus { task: String },
+    TerminalInput { session: u64, send: bool },
     AgentList,
     Monitor {
         description: String,
@@ -150,12 +159,57 @@ pub(crate) enum Op {
     Image {
         path: String,
     },
+    GenerateImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Report {
+        title: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
     Mcp {
         server: String,
         tool: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ExecCall {
+    Command {
+        shell: shell::Shell,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    Patch { changes: Vec<Op> },
+    Image { path: String },
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<(String, Value)>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expression: Option<String>,
+        #[serde(skip_serializing_if = "Not::not")]
+        dynamic: bool,
+    },
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecFeature {
+    Parallel,
+    Loop,
+    Conditional,
+    State,
+    Output,
+    Invalid,
 }
 
 /// 行以 ` `、`-`、`+` 开头；起始行号未知时为空。
@@ -265,10 +319,19 @@ impl Op {
         Op::Todo { items }
     }
 
-    /// 结果里的链接数；格式不认识时为空。
-    pub fn web_search(query: &str, domain: Option<&str>, output: Option<&str>) -> Op {
-        let results = output.map(|output| output.matches("\"url\":").count()).filter(|&count| count > 0);
-        Op::WebSearch { query: query.into(), domain: domain.map(Into::into), results }
+    pub fn web_search(input: &Value, fallback: Option<&str>, results: Option<usize>) -> Op {
+        let mut queries: Vec<String> = Vec::new();
+        for query in input["queries"].as_array().into_iter().flatten().filter_map(Value::as_str)
+            .chain(text(input, "query")).map(str::trim).filter(|query| !query.is_empty())
+        {
+            if !queries.iter().any(|seen| seen == query) {
+                queries.push(query.into());
+            }
+        }
+        if queries.is_empty() {
+            queries.extend(fallback.map(str::trim).filter(|query| !query.is_empty()).map(str::to_owned));
+        }
+        Op::WebSearch { queries, domain: text(input, "domain").map(Into::into), results }
     }
 
     /// 延迟加载时只保留卡片标题所需的字段，正文随原始数据一起按需读取。
@@ -284,6 +347,19 @@ impl Op {
             Op::Search { hits, .. } => *hits = None,
             Op::Shell(shell) => shell.strip_bodies(),
             Op::Script(script) => script.body = None,
+            Op::Exec { calls, .. } => {
+                for call in calls {
+                    match call {
+                        ExecCall::Command { shell, .. } => shell.strip_bodies(),
+                        ExecCall::Patch { changes } => changes.iter_mut().for_each(Op::strip_bodies),
+                        ExecCall::Tool { fields, expression, .. } => {
+                            fields.clear();
+                            *expression = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Op::Skill { body, .. } => *body = None,
             _ => {}
         }
@@ -430,7 +506,7 @@ pub(crate) fn describe_tools(
             Some((j, l)) => {
                 let mut block = events[j]["message"]["content"][l].take();
                 let mut ops = describe(&call, Some(ToolResult { block: &mut block, event: &mut events[j] }));
-                skill::promote(&mut ops, &mut block);
+                skill::promote(&mut ops, &block);
                 events[j]["message"]["content"][l] = block;
                 ops
             }

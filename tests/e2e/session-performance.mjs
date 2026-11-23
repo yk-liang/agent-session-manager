@@ -40,7 +40,7 @@ try {
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   assert.deepEqual(await page.locator('.session-info-popover .model-label').allTextContents(),
     ['logged-codex-model', 'earlier-codex-model']);
-  assert.equal(await page.locator('#ev-1').getAttribute('title'), '模型：earlier-codex-model');
+  assert.equal(await page.locator('#ev-1').getAttribute('title'), null);
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.__PERF__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
   const tool = page.getByRole('button',{name:/^工具调用.*失败.*shell$/});

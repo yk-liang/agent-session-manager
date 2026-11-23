@@ -10,6 +10,47 @@ export interface DiffLine {
 type DiffSkip = { kind: "skip"; count: number | null };
 export type DiffRow = DiffLine | DiffSkip;
 
+export function unifiedDiff(text: string) {
+  if (text.length > 1_000_000) return;
+  const lines = text.split(/\r?\n/);
+  const files: { path: string; hunks: DiffHunk[] }[] = [];
+  let file: (typeof files)[number] | undefined;
+  let git = false;
+  let incomplete = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("diff --git ")) git = true;
+    if (line.startsWith("--- ") && lines[i + 1]?.startsWith("+++ ") && lines[i + 2]?.startsWith("@@ ")) {
+      const before = line.slice(4).split("\t", 1)[0];
+      const after = lines[++i].slice(4).split("\t", 1)[0];
+      const path = after === "/dev/null" ? before : after;
+      file = { path: git ? path.replace(/^[ab]\//, "") : path, hunks: [] };
+      files.push(file);
+      git = false;
+      continue;
+    }
+    const range = file && /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!range || !file) continue;
+    let oldCount = Number(range[2] ?? 1), newCount = Number(range[4] ?? 1);
+    const hunk: DiffHunk = { old_start: Number(range[1]), new_start: Number(range[3]), lines: [] };
+    while (oldCount > 0 || newCount > 0) {
+      const row = lines[++i];
+      if (row === "\\ No newline at end of file") continue;
+      if (!row || !" +-".includes(row[0])) { i--; break; }
+      if ((row[0] !== "+" && oldCount === 0) || (row[0] !== "-" && newCount === 0)) { i--; break; }
+      if (row[0] !== "+") oldCount--;
+      if (row[0] !== "-") newCount--;
+      hunk.lines.push(row);
+    }
+    if (oldCount || newCount) incomplete = true;
+    if (hunk.lines.length && (!oldCount && !newCount || hunk.lines.some(line => line[0] === "+" || line[0] === "-"))) {
+      file.hunks.push(hunk);
+    }
+  }
+  const parsed = files.filter(file => file.hunks.length);
+  if (parsed.length) return { files: parsed, incomplete };
+}
+
 /** 保留空行与文件末尾换行差异；大文件降级为完整替换，避免 LCS 阻塞窗口。 */
 export function lineDiff(
   before: string | null,

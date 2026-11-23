@@ -1,6 +1,6 @@
 //! 按程序给命令段归类：读、搜、找、列拆成文件操作，其余给出意图。
 use super::syntax::{tokens, unquote, words, Token};
-use super::{Action, Filter, Intent, Spec};
+use super::{Action, Filter, Intent, Script, Spec};
 
 /// 一段命令的参数（已去引号、去掉前导环境变量和包装命令）与重定向。
 pub(super) struct Segment {
@@ -35,7 +35,7 @@ impl Segment {
                     let target = target.map(|target| unquote(target, vars));
                     let heredoc = op.starts_with("<<") && !op.starts_with("<<<");
                     let null = target.as_deref() == Some("/dev/null");
-                    if op.contains('>') && !null && target.is_some() {
+                    if op.contains('>') && !op.starts_with('2') && !null && target.is_some() {
                         segment.append = op.contains(">>");
                         segment.target = target.clone();
                     }
@@ -112,10 +112,12 @@ impl Segment {
             "npm" | "pnpm" if matches!(sub, Some("exec" | "dlx")) => (2, &["--package", "-p"]),
             "rustup" if sub == Some("run") => (3, &[]),
             "npx" | "bunx" | "pnpx" | "uvx" => (1, &["--package", "-p", "--from", "--with", "--python"]),
+            "xargs" => (1, &["-E", "-I", "-J", "-L", "-n", "-P", "-s", "-d", "-a", "--replace", "--max-procs", "--max-args", "--delimiter", "--arg-file"]),
             _ => return None,
         };
         let mut index = from;
         while let Some(arg) = args.get(index) {
+            if arg == "--" { return (index + 1 < args.len()).then_some(index + 1); }
             if !arg.starts_with('-') {
                 return Some(index);
             }
@@ -188,9 +190,30 @@ impl Segment {
         script_lang(self.interpreter_args().0)
     }
 
+    pub fn script(&self, body: Option<&str>) -> Option<Script> {
+        body.or_else(|| self.inline_code()).filter(|body| !body.trim().is_empty())
+            .map(|body| Script::new(self.script_language(), body))
+    }
+
     fn interpreter_args(&self) -> (&str, &[String]) {
         let args = &self.args[self.runner_skip().unwrap_or(0)..];
         (args.first().and_then(|arg| arg.rsplit('/').next()).unwrap_or_default(), args)
+    }
+
+    pub fn response_file(&self) -> Option<&str> {
+        let flag = match self.program() { "curl" => "--output", "wget" => "--output-document", _ => return None };
+        let short = if self.program() == "curl" { "-o" } else { "-O" };
+        let mut args = self.args.iter().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--" { break; }
+            if matches!(arg.as_str(), "-H" | "--header" | "-d" | "--data" | "-X" | "--request" | "-u" | "--user") {
+                args.next();
+            } else if let Some(path) = if arg == flag || arg == short { args.next().map(String::as_str) }
+                else { arg.split_once('=').filter(|(key, _)| *key == flag).map(|(_, value)| value) } {
+                return (!matches!(path, "-" | "/dev/null" | "")).then_some(path);
+            }
+        }
+        None
     }
 
     /// 标题用的原文：去掉前导环境变量、无关重定向、heredoc 标记、内联脚本和 `git -C`。
@@ -268,6 +291,15 @@ pub(super) fn classify(segment: &Segment, has_body: bool) -> Action {
     let program = segment.program();
     let args = &segment.args;
     let read = |path: &str| Spec::Read { path: path.into(), start: None, end: None, tail: None, whole: false };
+    // `-V`、`-h` 只对 HTTP 客户端和解释器表示版本与帮助；`ls -h` 这类仍按原意。
+    let version_or_help = args.len() == 2 && match args[1].as_str() {
+        "--version" | "--help" => true,
+        "-V" | "-h" => matches!(program, "curl" | "wget" | "http" | "xh") || script_lang(program).is_some(),
+        _ => false,
+    };
+    if version_or_help {
+        return Action::Run(Intent::Inspect);
+    }
     match program {
         "" | "cd" | "export" | "set" | "source" | "." | "echo" | "printf" | "true" | "false" | ":" | "pwd" | "umask"
         | "unset" | "local" | "read" | "shift" | "exit" | "return" | "break" | "continue" | "[" | "[[" | "test" | "trap"
@@ -380,13 +412,21 @@ pub(super) fn classify(segment: &Segment, has_body: bool) -> Action {
                     }]);
                 }
             }
+            let arguments = args.get(index + 1..).unwrap_or_default();
             Action::Run(match subcommand {
+                "show" if arguments.iter().take_while(|arg| arg.as_str() != "--").any(|arg| !arg.starts_with('-') && arg.split_once(':').is_some_and(|(_, path)| !path.is_empty())) => Intent::GitRead,
                 "diff" | "show" => Intent::GitDiff,
                 "log" | "blame" | "reflog" | "shortlog" => Intent::GitLog,
-                "add" | "commit" => Intent::GitCommit,
+                "commit" => Intent::GitCommit,
+                "add" if arguments.iter().take_while(|arg| arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-n" | "--dry-run")) => Intent::Inspect,
+                "add" => Intent::GitStage,
+                "stash" if matches!(arguments.first().map(String::as_str), Some("list" | "show")) => Intent::GitLog,
+                "reset" | "restore" | "merge" | "rebase" | "cherry-pick" | "revert" | "stash" => Intent::GitChange,
+                "push" => Intent::GitPush,
                 _ => Intent::Git,
             })
         }
+        "diff" => Action::Run(Intent::Diff),
         "gh" => Action::Run(Intent::Github),
         "ssh" | "scp" | "rsync" if program != "rsync" || args.iter().skip(1).any(|arg| arg.contains(':') && !arg.starts_with('-')) => Action::Run(Intent::Remote),
         "curl" | "wget" | "http" | "xh" => Action::Run(Intent::Http),
@@ -394,23 +434,41 @@ pub(super) fn classify(segment: &Segment, has_body: bool) -> Action {
         "sqlite3" | "psql" | "mysql" | "redis-cli" => Action::Run(Intent::Database),
         "mkdir" => Action::Run(Intent::Mkdir),
         "rm" | "rmdir" | "trash" => Action::Run(Intent::Remove),
-        "cp" | "ditto" | "rsync" => Action::Run(Intent::Copy),
+        "cp" | "ditto" | "rsync" | "install" => Action::Run(Intent::Copy),
+        "ln" => Action::Run(Intent::Link),
         "mv" => Action::Run(Intent::Move),
+        "chmod" | "chown" | "chgrp" | "chflags" => Action::Run(Intent::Permissions),
         "ps" | "pgrep" | "lsof" | "top" => Action::Run(Intent::Process),
         "kill" | "pkill" | "killall" => Action::Run(Intent::Kill),
         "sleep" | "wait" => Action::Run(Intent::Wait),
         "open" => Action::Run(Intent::Open),
+        "codesign" if args.iter().skip(1).take_while(|arg| arg.as_str() != "--")
+            .any(|arg| matches!(arg.as_str(), "-s" | "--sign" | "--remove-signature") || arg.starts_with("--sign=")) => Action::Run(Intent::Sign),
+        "codesign" => Action::Run(Intent::Inspect),
+        "tar" => Action::Run(Intent::Archive),
+        "magick" | "convert" | "potrace" | "sips" => Action::Run(Intent::Transform),
+        "docker" | "podman" if matches!(args.get(1).map(String::as_str), Some("build" | "run" | "exec")) => {
+            Action::Run(if args[1] == "build" { Intent::Build } else { Intent::Run })
+        }
         "which" | "whereis" | "type" | "command" | "stat" | "file" | "du" | "df" | "strings" | "objdump" | "otool" | "nm"
         | "shasum" | "sha256sum" | "sha1sum" | "md5" | "md5sum" | "cksum" | "uname" | "sw_vers" | "hostname" | "whoami" | "id"
         | "date" | "printenv" | "mdls" | "xattr" | "dig" | "nslookup" | "host" => Action::Run(Intent::Inspect),
         "jq" | "yq" | "awk" | "gawk" | "cut" | "tr" | "sort" | "uniq" | "column" | "iconv" | "base64" | "xxd" | "od" => {
             Action::Run(Intent::Transform)
         }
-        "codex" | "claude" | "opencode" | "agy" | "pi" | "gemini" | "qoder" | "aider" | "cursor-agent" | "amp" => Action::Run(Intent::Agent),
+        "codex" | "claude" | "opencode" | "agy" | "pi" | "gemini" | "qoder" | "aider" | "cursor-agent" | "amp" => {
+            let info = matches!(args.get(1).map(String::as_str), Some("help" | "version")) || args.iter().skip(1).take_while(|arg| *arg != "--")
+                .any(|arg| matches!(arg.as_str(), "--help" | "--version" | "-h" | "-V"));
+            Action::Run(if info { Intent::Inspect }
+                else if program == "pi" && matches!(args.get(1).map(String::as_str), Some("update" | "install" | "remove" | "list" | "config" | "auth" | "mcp")) { Intent::AgentManage }
+                else { Intent::Agent })
+        }
+        "sh" | "bash" | "zsh" if args.get(1).is_some_and(|arg| arg == "-n") => Action::Run(Intent::Build),
         _ if script_lang(program).is_some() && (has_body || segment.inline_code().is_some() || args.iter().any(|arg| arg == "-")) => {
             Action::Run(Intent::Script)
         }
         "python" | "python3" | "node" | "deno" | "ruby" | "perl" | "bash" | "sh" | "zsh" => Action::Run(Intent::Run),
+        _ if program.ends_with(".sh") && args.first().is_some_and(|path| path.contains('/')) => Action::Run(Intent::Run),
         _ => match segment.runner_skip() {
             Some(skip) => classify(&segment.shifted(skip), has_body),
             None => Action::Run(build_intent(program, &segment.positional(&[])).unwrap_or(Intent::Other)),
@@ -430,7 +488,7 @@ fn build_intent(program: &str, positional: &[&str]) -> Option<Intent> {
         "pytest" | "vitest" | "jest" => Some(Intent::Test),
         "playwright" if task == "install" => Some(Intent::Install),
         "playwright" => Some(Intent::Test),
-        "tsc" | "make" | "xcodebuild" | "gradle" | "mvn" | "gofmt" | "rustfmt" | "prettier" | "eslint" => Some(Intent::Build),
+        "tsc" | "make" | "xcodebuild" | "swiftc" | "rustc" | "gradle" | "mvn" | "gofmt" | "rustfmt" | "prettier" | "eslint" => Some(Intent::Build),
         "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "go" | "swift" | "npx" | "uv" | "uvx" | "vite" | "next" | "astro" | "tauri" => Some(
             if task.contains("test") || matches!(task.as_str(), "vitest" | "jest" | "playwright") {
                 Intent::Test

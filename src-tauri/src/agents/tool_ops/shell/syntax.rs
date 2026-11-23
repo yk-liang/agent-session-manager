@@ -48,13 +48,15 @@ fn heredoc_tags(line: &str) -> Vec<(String, bool)> {
 }
 
 /// 按 `&&`、`||`、`;`、`&`、换行拆成管道，再按 `|` 拆段；引号、`$(…)` 和反引号内部不拆，注释丢弃。
-pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
+/// 第二项表示管道之间出现过 `&&` 或 `||`。
+pub(super) fn pipelines(text: &str) -> (Vec<Vec<&str>>, bool) {
     let bytes = text.as_bytes();
     let mut pipelines = Vec::new();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
     let mut depth = 0usize;
+    let mut conditional = false;
     while i < bytes.len() {
         let c = bytes[i];
         match c {
@@ -77,6 +79,7 @@ pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
             }
             b'|' | b'&' | b';' | b'\n' if depth == 0 => {
                 let pair = bytes.get(i + 1) == Some(&c) && c != b';' && c != b'\n';
+                conditional |= pair;
                 let pipe_stderr = c == b'|' && bytes.get(i + 1) == Some(&b'&');
                 let redirect = c == b'&' && (bytes.get(i + 1) == Some(&b'>') || (i > 0 && bytes[i - 1] == b'>'));
                 if redirect {
@@ -97,7 +100,7 @@ pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
     if !segments.is_empty() {
         pipelines.push(segments);
     }
-    pipelines
+    (pipelines, conditional)
 }
 
 /// 去掉子 shell 和代码块的括号：开头的 `(`、单独的 `{`，以及配不上对的结尾 `)`、单独的 `}`。

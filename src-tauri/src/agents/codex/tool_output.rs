@@ -1,4 +1,5 @@
 //! 工具结果可保存为旧版字符串或 Responses 内容块数组。
+use super::super::tool_ops::CommandOutput;
 use serde::Deserialize;
 use serde_json::{value::RawValue, Value};
 
@@ -15,29 +16,34 @@ struct OutputMetadata<'a> {
 #[derive(Default)]
 pub(super) struct Status {
     failed: bool,
+    running: bool,
     exit_code: Option<i64>,
     reason: Option<String>,
-    empty_command_output: bool,
+    command_output_kind: Option<CommandOutput>,
 }
 
 impl Status {
     fn merge(mut self, other: Self) -> Self {
         self.failed |= other.failed;
+        self.running |= other.running;
         self.exit_code = self.exit_code.or(other.exit_code);
         self.reason = self.reason.or(other.reason);
-        self.empty_command_output = false;
+        self.command_output_kind = None;
         self
     }
 
     pub fn annotate(self, result: &mut Value, function_output: bool) {
         result["is_error"] = Value::Bool(self.failed);
+        if self.running && !self.failed && !function_output {
+            result["status"] = Value::String("running".into());
+        }
         if let Some(reason) = self.reason {
             result["error_summary"] = Value::String(reason);
         }
         if let Some(exit) = self.exit_code.filter(|_| function_output) {
             result["exit_code"] = Value::from(exit);
-            if self.empty_command_output {
-                result["empty_command_output"] = Value::Bool(true);
+            if let Some(kind) = self.command_output_kind {
+                result["command_output_kind"] = serde_json::json!(kind);
             }
         }
     }
@@ -47,6 +53,10 @@ fn text_status(text: &str) -> Status {
     let text = text.trim_start();
     if text.starts_with("Script failed") {
         return failed_status(None, Some(text), false);
+    }
+    if text.lines().next().and_then(|line| line.strip_prefix("Script running with cell ID "))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')) {
+        return Status { running: true, ..Status::default() };
     }
     if !text.starts_with('{') {
         let exit_code = text.lines().take_while(|line| !line.is_empty() && !line.starts_with("Output:") && !line.starts_with("Final output:"))
@@ -90,8 +100,8 @@ pub(super) fn error_reason(content: &Value) -> Option<String> {
 
 fn failed_status(exit_code: Option<i64>, output: Option<&str>, command_output_known: bool) -> Status {
     Status {
-        failed: true, exit_code, reason: output.and_then(reason),
-        empty_command_output: command_output_known && exit_code == Some(1) && output.is_some_and(|body| body.trim().is_empty()),
+        failed: true, running: false, exit_code, reason: output.and_then(reason),
+        command_output_kind: output.filter(|_| command_output_known && exit_code == Some(1)).and_then(CommandOutput::recognize),
     }
 }
 
@@ -117,7 +127,7 @@ pub(super) fn status(output: &Value) -> Status {
     if let Some(parts) = output.as_array() {
         let mut status = parts.iter().filter(|part| is_text(part["type"].as_str()))
             .filter_map(|part| part["text"].as_str()).map(text_status).reduce(Status::merge).unwrap_or_default();
-        status.empty_command_output &= parts.len() == 1;
+        status.command_output_kind = status.command_output_kind.filter(|_| parts.len() == 1);
         status
     } else {
         output.as_str().map_or_else(Status::default, text_status)
@@ -160,7 +170,7 @@ pub(super) fn raw_status(output: &RawValue) -> Status {
             .filter_map(|part| serde_json::from_str::<Part<'_>>(part.get()).ok())
             .filter(|part| is_text(part.kind.as_deref())).filter_map(|part| part.text)
             .map(status).reduce(Status::merge).unwrap_or_default();
-        result.empty_command_output &= parts.len() == 1;
+        result.command_output_kind = result.command_output_kind.filter(|_| parts.len() == 1);
         result
     } else {
         status(output)

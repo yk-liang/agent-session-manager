@@ -11,19 +11,21 @@ pub(super) fn describe(name: &str, state: &Value) -> (Vec<Op>, Option<String>) {
     }.filter(|_| state["status"] == "completed");
     let path = text(input, "filePath").or_else(|| text(input, "path"));
     let paths = || path.into_iter().map(Into::into).collect::<Vec<_>>();
+    let mut content = None;
     let op = match (name, path) {
-        ("read", Some(path)) => {
-            return match output.and_then(numbered) {
-                Some((start, end, content)) => match tool_ops::read_skill(path, &content) {
-                    Some(skill) => (vec![skill], None),
-                    None => {
-                        let total = (metadata["truncated"] == false).then_some(end);
-                        (vec![Op::read_range(path, start, end - start + 1, total)], Some(content))
-                    }
-                },
-                None => (vec![Op::read(path)], None),
-            };
-        }
+        ("read", Some(path)) if state["content"].as_array().is_some_and(|parts| parts.iter().any(|part| {
+            let mime = part["mime"].as_str().unwrap_or_default();
+            part["type"] == "file" && matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
+                && part["uri"].as_str().is_some_and(|uri| uri.starts_with("data:image/"))
+        })) => Op::Image { path: path.into() },
+        ("read", Some(path)) => match output.and_then(numbered) {
+            Some((start, end, body)) => {
+                content = Some(body);
+                let total = (metadata["truncated"] == false).then_some(end);
+                Op::read_range(path, start, end - start + 1, total)
+            }
+            None => Op::read(path),
+        },
         ("edit" | "multiedit", Some(path)) => Op::edit(path, patches(metadata).into_iter().next()
             .map(|(_, _, hunks)| hunks)
             .unwrap_or_else(|| {
@@ -51,7 +53,14 @@ pub(super) fn describe(name: &str, state: &Value) -> (Vec<Op>, Option<String>) {
         ("glob", _) => tool_ops::find(text(input, "pattern"), paths(), output),
         ("list", _) => tool_ops::list(paths(), output),
         ("bash" | "shell", _) => match text(input, "command") {
-            Some(command) => tool_ops::shell(command, text(input, "description"), metadata["exit"].as_i64(), output),
+            Some(command) => {
+                let recorded = state["content"].as_array().filter(|parts| !parts.is_empty()).and_then(|parts| {
+                    parts.iter().map(|part| part["text"].as_str()).collect::<Option<Vec<_>>>()
+                        .map(|texts| texts.join("\n"))
+                });
+                let stdout = state["output"].as_str().or(recorded.as_deref());
+                tool_ops::shell(command, text(input, "description"), metadata["exit"].as_i64(), stdout)
+            }
             None => return (Vec::new(), None),
         },
         ("execute", _) => match text(input, "code") {
@@ -65,10 +74,7 @@ pub(super) fn describe(name: &str, state: &Value) -> (Vec<Op>, Option<String>) {
             Some(url) => Op::WebFetch { url: url.into(), prompt: None },
             None => return (Vec::new(), None),
         },
-        ("websearch", _) => match text(input, "query") {
-            Some(query) => Op::web_search(query, None, output),
-            None => return (Vec::new(), None),
-        },
+        ("websearch", _) => Op::web_search(input, None, None),
         ("question", _) => Op::ask(input["questions"].as_array().into_iter().flatten().filter_map(|q| Some(Question {
             question: text(q, "question")?.into(),
             header: text(q, "header").map(Into::into),
@@ -87,7 +93,11 @@ pub(super) fn describe(name: &str, state: &Value) -> (Vec<Op>, Option<String>) {
         ("todowrite", _) => Op::todo(&input["todos"], "content"),
         _ => return (Vec::new(), None),
     };
-    (vec![op], None)
+    let mut ops = vec![op];
+    if let Some(body) = content.as_deref().or(output) {
+        tool_ops::promote_skill_text(&mut ops, body);
+    }
+    (ops, content)
 }
 
 /// `metadata.files[]` 带每个文件的 unified diff；旧版只有单个 `metadata.diff`。

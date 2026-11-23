@@ -145,8 +145,6 @@
 }
 
 .tool-input-code, .tool-command {
-  max-height: 260px;
-  overflow: auto;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -174,6 +172,7 @@
 
 .tool-output { max-height: 248px; overflow: auto; border-radius: var(--radius-sm); }
 .tool-output[data-expanded="true"] { max-height: none; }
+.tool-output-content { display: flow-root; }
 .tool-output-lines { display: grid; grid-template-columns: minmax(max-content, 1fr); }
 .tool-output-lines[data-numbered] { grid-template-columns: max-content minmax(max-content, 1fr); }
 
@@ -216,7 +215,7 @@
 /* 目标在末尾截断；目录和说明先收缩，统计标签完整显示。 */
 .op-name, .op-title {
   flex: 0 1 auto;
-  min-width: 4em;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -251,6 +250,8 @@
   white-space: nowrap;
 }
 
+.op-meta:empty { display: none; }
+
 .op-chip {
   flex: none;
   padding: 0 5px;
@@ -261,7 +262,7 @@
   white-space: nowrap;
 }
 
-.op-chip:is(.answer, .kind) { flex: 0 1 auto; min-width: 4.5em; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.op-chip:is(.answer, .kind) { flex: 0 1 auto; min-width: 0; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
 .op-chip:is(.sans, .created, .removed, .answer, .kind) { font-family: var(--font-sans); }
 .op-chip:is(.created, .answer) { background: var(--success-soft); color: var(--success); }
 .op-chip.removed { background: var(--danger-soft); color: var(--danger); }
@@ -284,6 +285,11 @@
 .tool-arguments dt { overflow-wrap: anywhere; color: var(--text-dim); }
 .tool-arguments dd { min-width: 0; margin: 0; }
 .tool-arguments pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.web-arguments > div { grid-template-columns: 6em minmax(0, 1fr); }
+.web-arguments dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+.web-arguments ul { margin: 0; padding-inline-start: 1.2em; }
+.web-search-batch { display: grid; gap: 8px; }
+.web-search-batch dl + dl { border-block-start: 1px solid var(--border); padding-block-start: 8px; }
 
 .browse-title { flex: none; color: var(--text); font-weight: 600; white-space: nowrap; }
 
@@ -312,6 +318,7 @@
 .collapsible.browse > .collapsible-body > .collapsible > .collapsible-head { min-height: var(--control-compact); padding-left: 24px; }
 
 .tool-diff { min-width: max-content; font: 11.5px/1.6 var(--font-mono); }
+.tool-diff-file + .tool-diff-file { margin-top: 8px; }
 
 .tool-diff-row {
   display: grid;
@@ -364,6 +371,7 @@
 .op-steps code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfd3da; font: 11.5px var(--font-mono); }
 .op-steps code.pattern { color: var(--info); }
 .op-steps span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: 11px var(--font-mono); }
+.command-step-label { flex: none; }
 
 .tool-plain { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .skill-path { display: flex; align-items: center; gap: 5px; margin-bottom: 8px; color: var(--text-muted); font: 11.5px var(--font-mono); }
@@ -389,3 +397,16 @@
 }
 
 .tool-result-parts { display: grid; gap: 6px; }
+
+.exec-calls, .exec-changes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0; padding: 0; list-style: none; }
+.exec-calls > li { border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.exec-calls summary, .exec-calls li > div { padding: 5px 8px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.exec-calls summary { cursor: pointer; }
+.exec-calls summary:hover { background: var(--bg-hover); }
+.exec-calls :is(summary, li > div) > :is(svg, span) { margin-right: 6px; color: var(--text-dim); vertical-align: middle; }
+.exec-changes code { margin-right: 6px; }
+.exec-changes { padding: 0 8px 5px; }
+.exec-calls .tool-command { margin: 0 8px 6px; }
+.exec-note { margin: 0 8px 4px; color: var(--text-muted); overflow-wrap: anywhere; }
+.exec-calls summary > small { margin-left: 8px; color: var(--text-muted); }
+.exec-fields { margin: 0 8px 6px; }

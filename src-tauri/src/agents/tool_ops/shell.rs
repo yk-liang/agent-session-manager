@@ -17,15 +17,14 @@ pub(crate) struct Shell {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
-    #[serde(skip_serializing_if = "Not::not")]
-    no_match: bool,
-    #[serde(skip_serializing_if = "Not::not")]
-    search_exit_one: bool,
-    /// 第一步的意图和原文（去掉环境变量、无关重定向）；循环取首行。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_one: Option<Outcome>,
     intent: Intent,
     #[serde(skip_serializing_if = "String::is_empty")]
     head: String,
-    /// 第一步之后还有几步。
+    /// 主动作之外的步骤数。
     #[serde(skip_serializing_if = "is_zero")]
     more: usize,
     #[serde(skip_serializing_if = "Not::not")]
@@ -40,6 +39,73 @@ pub(crate) struct Shell {
     /// 只读、搜、找、列的命令按步骤给出文件操作，卡片按文件操作展示。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     steps: Vec<Step>,
+    /// 多步或多段管道的命令逐步列出；`related` 是主动作之外值得在标题提示的意图。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    actions: Vec<CommandStep>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    related: Vec<Intent>,
+    /// 含 `if`/`case` 或 `&&`/`||`：列出的步骤不一定都执行过。
+    #[serde(skip_serializing_if = "Not::not")]
+    conditional: bool,
+}
+
+/// 退出码 1 的正常含义：搜索没有匹配、比较发现差异。`exit_one` 是只看命令得出的静态含义，
+/// `outcome` 要求记录里的退出码和输出都与之相符。
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    NoMatch,
+    Differences,
+}
+
+impl Outcome {
+    fn evidence(self) -> CommandOutput {
+        match self {
+            Self::NoMatch => CommandOutput::Empty,
+            Self::Differences => CommandOutput::Diff,
+        }
+    }
+}
+
+/// 退出码 1 时命令输出的形态；结果晚于调用记录时写在结果上，由前端与 `exit_one` 对照。
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CommandOutput {
+    Empty,
+    Diff,
+}
+
+impl CommandOutput {
+    pub(crate) fn recognize(text: &str) -> Option<Self> {
+        if text.trim().is_empty() {
+            Some(Self::Empty)
+        } else if has_unified_diff(text) {
+            Some(Self::Diff)
+        } else {
+            None
+        }
+    }
+}
+
+fn has_unified_diff(text: &str) -> bool {
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("--- ") && lines.peek().is_some_and(|next| next.starts_with("+++ ")) {
+            lines.next();
+            if lines.peek().is_some_and(|next| next.starts_with("@@ -") && next.contains(" +")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct CommandStep {
+    command: String,
+    intent: Intent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -55,9 +121,34 @@ pub(crate) struct Step {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Intent {
     Read, Search, Find, List, Write, Modify, Script, Run,
-    GitDiff, GitLog, GitCommit, Git, Github,
-    Test, Build, Install, Remote, Http, Browser, Database, Agent,
-    Mkdir, Remove, Copy, Move, Process, Kill, Wait, Open, Count, Inspect, Transform, Other,
+    Diff, GitDiff, GitLog, GitCommit, GitStage, GitPush, GitChange, GitRead, Git, Github,
+    Test, Build, Install, Remote, Http, Download, Browser, Database, Agent, AgentManage,
+    Mkdir, Remove, Copy, Move, Link, Sign, Archive, Permissions, Process, Kill, Wait, Open, Count, Inspect, Transform, Other,
+}
+
+impl Intent {
+    fn priority(self) -> u8 {
+        match self {
+            Self::GitCommit | Self::GitPush | Self::GitChange => 7,
+            Self::Write | Self::Modify | Self::GitStage | Self::Sign | Self::Test => 6,
+            Self::Script | Self::Build | Self::Install | Self::Http | Self::Remote |
+            Self::Download | Self::Browser | Self::Agent | Self::AgentManage | Self::Run | Self::Open | Self::Move | Self::Copy => 5,
+            Self::Remove | Self::Link | Self::Permissions | Self::Kill => 4,
+            Self::Database | Self::Diff | Self::GitDiff | Self::Archive | Self::Transform => 3,
+            Self::Mkdir | Self::Process | Self::GitLog | Self::GitRead => 2,
+            Self::Wait | Self::Other => 0,
+            _ => 1,
+        }
+    }
+
+    fn changes_state(self) -> bool {
+        matches!(self, Self::Write | Self::Modify | Self::Remove | Self::Move | Self::Copy | Self::Link | Self::Permissions
+            | Self::Mkdir | Self::GitStage | Self::GitChange | Self::GitCommit | Self::GitPush | Self::Install | Self::Kill | Self::Download | Self::Sign)
+    }
+
+    fn summary_action(self) -> bool {
+        self.changes_state() || self.priority() >= 5 || self == Self::Archive
+    }
 }
 
 /// 管道后段：截取行数、筛选和计数。
@@ -78,6 +169,7 @@ fn is_zero(value: &usize) -> bool {
 impl Shell {
     pub(super) fn strip_bodies(&mut self) {
         self.command = None;
+        self.actions.clear();
         if let Some(script) = &mut self.script {
             script.body = None;
         }
@@ -88,52 +180,69 @@ impl Shell {
 
     pub(super) fn single_read(&self) -> Option<&str> {
         match self.steps.as_slice() {
-            [Step { op: Op::Read { path, .. }, program, filters }] if program == "cat" && filters.is_empty() => Some(path),
+            [Step { op: Op::Read { path, start: Some(1), tail: None, .. }, filters, .. }] if filters.is_empty() => Some(path),
             _ => None,
         }
     }
 }
 
-/// `output` 只用于单步浏览命令的统计。
 pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<i64>, output: Option<&str>) -> Op {
     let (head, bodies) = heredocs(command);
     let mut bodies = bodies.into_iter();
     let mut parsed: Vec<Parsed> = Vec::new();
     let mut vars = Vec::new();
-    // 循环从哪里开始；循环体里的路径多半是循环变量，不按文件操作展示。
-    let mut looped = None;
-    for pipeline in pipelines(&head) {
+    let mut control = None;
+    let (pipelines, guarded) = pipelines(&head);
+    let pipeline_count = pipelines.len();
+    for (index, pipeline) in pipelines.into_iter().enumerate() {
         let segment = Segment::parse(pipeline[0], &vars);
         let rest: Vec<_> = pipeline[1..].iter().map(|text| Segment::parse(text, &vars)).collect();
         let mut stages = std::iter::once(&segment).chain(&rest).map(|stage| (stage, (0..stage.heredocs).filter_map(|_| bodies.next()).last()));
-        let first_stage = stages.next().expect("pipeline has a head");
-        let mut action = classify(&segment, first_stage.1.is_some());
-        let script = std::iter::once(first_stage).chain(stages).fold(None, |script, (stage, body)| {
-            script.or_else(|| body.as_deref().or_else(|| stage.inline_code())
-                .map(|body| Script::new(stage.script_language(), body)))
-        });
-        // 只读要求后续管道段只做筛选、结果不写进文件；`tee` 和重定向等于写文件。
-        if matches!(action, Action::Browse(_)) {
-            if segment.target.is_some() || rest.iter().any(|s| s.program() == "tee" || s.target.is_some()) {
-                action = Action::Run(Intent::Write);
-            } else if !rest.iter().all(is_pure_filter) {
-                action = Action::Run(Intent::Other);
+        let (first, body) = stages.next().expect("pipeline has a head");
+        let mut action = classify(first, body.is_some());
+        let mut main_stage = 0;
+        let mut script = first.script(body.as_deref());
+        // 管道以优先级最高的非筛选段为主；浏览后接其他程序就不再只读，`curl … | sh` 以执行为主。
+        for (index, (stage, body)) in stages.enumerate() {
+            script = script.or_else(|| stage.script(body.as_deref()));
+            if is_pure_filter(stage) || matches!(action, Action::Control) { continue; }
+            let next = match classify(stage, body.is_some()) {
+                Action::Run(intent) => intent,
+                _ => Intent::Other,
+            };
+            if matches!(action, Action::Browse(_)) || next.priority() > action.intent().priority()
+                || matches!((action.intent(), next), (Intent::Http, Intent::Run | Intent::Script)) {
+                action = Action::Run(next);
+                main_stage = index + 1;
             }
+        }
+        let written = written(&segment, &rest);
+        if written.is_some() && matches!(action, Action::Run(Intent::Http)) {
+            action = Action::Run(Intent::Download);
+        } else if written.is_some() && !matches!(action, Action::Control | Action::Run(
+            Intent::Modify | Intent::Build | Intent::Test | Intent::Install | Intent::GitCommit |
+            Intent::GitPush | Intent::Remote | Intent::Http | Intent::Browser
+        )) {
+            action = Action::Run(Intent::Write);
         }
         match action {
             Action::Noise => vars.extend(segment.assignments()),
             Action::Control => {
-                if looped.is_none() && matches!(segment.program(), "for" | "while" | "until" | "if") {
-                    looped = Some(pipeline[0].as_ptr() as usize - head.as_ptr() as usize);
+                if control.is_none() && matches!(segment.program(), "for" | "while" | "until" | "if" | "case") {
+                    control = Some((pipeline[0].as_ptr() as usize - head.as_ptr() as usize,
+                        matches!(segment.program(), "for" | "while" | "until")));
                 }
             }
             _ => parsed.push(Parsed {
+                last_pipeline: index + 1 == pipeline_count,
                 ends_in_search: std::iter::once(&segment).chain(&rest).rev()
                     .find(|stage| !matches!(stage.program(), "head" | "tail"))
                     .is_some_and(Segment::is_search),
-                target: matches!(action, Action::Run(Intent::Write | Intent::Modify)).then(|| written(&segment, &rest)).flatten(),
+                target: written,
                 filters: rest.iter().filter_map(filter).collect(),
-                text: pipeline[0],
+                main_stage,
+                stages: pipeline.iter().copied().zip(std::iter::once(&segment).chain(&rest))
+                    .map(|(text, stage)| stage.head(text)).collect::<Vec<_>>(),
                 segment,
                 action,
                 script,
@@ -142,26 +251,41 @@ pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<
     }
 
     let read_only = !parsed.is_empty() && parsed.iter().all(|p| matches!(p.action, Action::Browse(_)));
-    let browse = looped.is_none() && read_only;
-    // 只读命令里有 grep/rg、退出码 1 且没有输出：没有匹配，不是失败。
-    let search_exit_one = browse && parsed.last().is_some_and(|p| p.ends_in_search);
-    let no_match = search_exit_one && exit_code == Some(1) && output.is_some_and(|text| text.trim().is_empty());
-    // 标题和意图取第一个真正做事的步骤；`X=$(…)` 只在没有别的步骤时才当标题。
-    let lead = parsed.iter().position(|p| !p.segment.substituted).unwrap_or(0);
+    let browse = control.is_none() && read_only;
+    let exit_one = match parsed.as_slice() {
+        [step] if control.is_none() && step.last_pipeline && browse && step.ends_in_search => Some(Outcome::NoMatch),
+        [step] if control.is_none() && step.last_pipeline && step.stages.len() == 1
+            && matches!(step.action.intent(), Intent::Diff | Intent::GitDiff) => {
+            Some(Outcome::Differences)
+        }
+        _ => None,
+    };
+    let outcome = exit_one.filter(|outcome| {
+        exit_code == Some(1) && output.and_then(CommandOutput::recognize) == Some(outcome.evidence())
+    });
+    // 主动作取优先级最高的步骤，同级取最先出现的；`X=$(…)` 只在没有别的步骤时才当主动作。
+    let lead = parsed.iter().rev().max_by_key(|step| {
+        let intent = step.action.intent();
+        (!step.segment.substituted, intent.priority(), step.target.is_some(), step.script.is_some())
+    });
+    let intent = lead.map_or(Intent::Other, |step| step.action.intent());
     let mut shell = Shell {
         command: Some(command.into()),
         description: description.map(str::trim).filter(|d| !d.is_empty()).map(Into::into),
         exit_code,
-        no_match,
-        search_exit_one: search_exit_one && exit_code.is_none() && output.is_none(),
-        intent: parsed.get(lead).map_or(Intent::Other, |p| p.action.intent()),
+        outcome,
+        exit_one: exit_one.filter(|_| exit_code.is_none() && output.is_none()),
+        intent,
         head: String::new(),
         more: parsed.len().saturating_sub(1),
-        looped: looped.is_some(),
+        looped: control.is_some_and(|(_, looped)| looped),
         target: None,
         append: false,
         script: None,
         steps: Vec::new(),
+        actions: Vec::new(),
+        related: Vec::new(),
+        conditional: control.is_some_and(|(_, looped)| !looped) || guarded,
     };
     if browse {
         let count = parsed.iter().map(|p| match &p.action { Action::Browse(specs) => specs.len(), _ => 0 }).sum::<usize>();
@@ -179,27 +303,46 @@ pub(crate) fn shell(command: &str, description: Option<&str>, exit_code: Option<
         }
         return Op::Shell(shell);
     }
-    let Some(first) = parsed.get(lead) else {
+    let Some(first) = lead else {
         shell.head = command.lines().next().unwrap_or_default().trim().into();
         return Op::Shell(shell);
     };
-    shell.head = match looped {
-        Some(start) => head[start..].lines().next().unwrap_or_default().trim().into(),
-        None => first.segment.head(first.text),
+    shell.head = if let Some((start, _)) = control.filter(|_| !intent.changes_state()) {
+        head[start..].lines().next().unwrap_or_default().trim().into()
+    } else {
+        first.stages[first.main_stage].clone()
     };
-    if let Some((target, append)) = parsed.iter().find_map(|p| p.target.clone()) {
-        shell.target = Some(target);
-        shell.append = append;
+    if let Some((target, append)) = &first.target {
+        shell.target = Some(target.clone());
+        shell.append = *append;
     }
-    shell.script = parsed.into_iter().find_map(|step| step.script);
+    shell.script = first.script.clone();
+    if parsed.len() > 1 || first.stages.len() > 1 {
+        for step in parsed {
+            let intent = step.action.intent();
+            if intent != shell.intent && intent.summary_action() && !shell.related.contains(&intent) {
+                shell.related.push(intent);
+            }
+            shell.actions.push(CommandStep {
+                command: step.stages.join(" | "),
+                intent,
+                target: step.target.map(|(path, _)| path),
+            });
+            if shell.script.is_none() && !shell.intent.changes_state() {
+                shell.script = step.script;
+            }
+        }
+        shell.related.sort_by_key(|intent| std::cmp::Reverse(intent.priority()));
+    }
     Op::Shell(shell)
 }
 
-struct Parsed<'a> {
-    text: &'a str,
-    /// 管道最后的实质操作是 grep/rg；后面只能跟截取行数的过滤。
+struct Parsed {
+    main_stage: usize,
+    stages: Vec<String>,
+    last_pipeline: bool,
     ends_in_search: bool,
-    /// 写入或原地修改的文件，以及是否追加。
+    /// 写入、原地修改或保存响应的文件，以及是否追加。
     target: Option<(String, bool)>,
     segment: Segment,
     action: Action,
@@ -259,17 +402,18 @@ impl Spec {
     }
 }
 
-/// 写入目标：重定向、`tee` 的文件或 `sed -i` 修改的文件。
+/// 写入目标：重定向、`curl -o`/`wget -O` 保存的响应、`tee` 的文件或 `sed -i` 修改的文件。
 fn written(segment: &Segment, rest: &[Segment]) -> Option<(String, bool)> {
     if let Some(output) = rest.iter().rev().chain(std::iter::once(segment)).find(|stage| stage.target.is_some()) {
         return output.target.as_ref().map(|target| (target.clone(), output.append));
     }
-    let tee = std::iter::once(segment).chain(rest).find(|s| s.program() == "tee");
-    let file = match tee {
-        Some(tee) => tee.positional(&[]).first().copied(),
-        None => segment.positional(&["-e", "-f"]).last().copied(),
-    };
-    file.map(|file| (file.to_owned(), tee.is_some_and(|tee| tee.has_flag('a', "--append"))))
+    if let Some(file) = segment.response_file() { return Some((file.into(), false)); }
+    let stage = std::iter::once(segment).chain(rest).find(|stage| stage.program() == "tee" ||
+        stage.program() == "sed" && stage.has_flag('i', "--in-place"))?;
+    if stage.program() == "tee" {
+        return stage.positional(&[]).first().map(|file| ((*file).into(), stage.has_flag('a', "--append")));
+    }
+    stage.positional(&["-e", "-f"]).last().map(|file| ((*file).into(), false))
 }
 
 #[cfg(test)]
@@ -325,10 +469,11 @@ mod tests {
         let redirected = parse("cat input.txt | sort >> output.txt", None);
         assert_eq!((redirected["target"].clone(), redirected["append"].clone()), (json!("output.txt"), json!(true)));
         assert_eq!(parse("cat input.txt |& sort >> output.txt", None)["target"], "output.txt");
-        assert_eq!(json!(shell("rg -n x fixture.txt", None, Some(1), Some("")))["no_match"], true);
-        assert_eq!(json!(shell("cd /repo && rg --files -g '*.txt' | head -5", None, Some(1), Some("\n")))["no_match"], true);
-        assert!(json!(shell("rg -n x fixture.txt; cat other.txt", None, Some(1), Some(""))).get("no_match").is_none());
-        assert!(json!(shell("rg -n x fixture.txt | awk 'BEGIN { exit 1 }'", None, Some(1), Some(""))).get("no_match").is_none());
+        assert_eq!(json!(shell("rg -n x fixture.txt", None, Some(1), Some("")))["outcome"], "no_match");
+        assert_eq!(json!(shell("cd /repo && rg --files -g '*.txt' | head -5", None, Some(1), Some("\n")))["outcome"], "no_match");
+        assert!(json!(shell("rg -n x fixture.txt; false", None, Some(1), Some(""))).get("outcome").is_none());
+        assert!(json!(shell("rg -n x fixture.txt; cat other.txt", None, Some(1), Some(""))).get("outcome").is_none());
+        assert!(json!(shell("rg -n x fixture.txt | awk 'BEGIN { exit 1 }'", None, Some(1), Some(""))).get("outcome").is_none());
         assert_eq!(parse("uv run pytest -q", None)["intent"], "test");
         assert_eq!(parse("sed -n -e '2,4p' src/main.rs", None)["steps"][0]["start"], 2);
         assert_eq!(parse("sed 's/a/b/' file.txt", Some("b"))["intent"], "transform");
@@ -337,11 +482,17 @@ mod tests {
         assert_eq!(parse("bun test", None)["intent"], "test");
         assert_eq!(parse("bun add zod", None)["intent"], "install");
         assert_eq!(parse("bun src/run.ts", None)["intent"], "run");
+        assert_eq!(parse("git add -- src/main.rs", None)["intent"], "git_stage");
+        assert_eq!(parse("git show HEAD:src/main.rs", None)["intent"], "git_read");
+        let pipe = parse("ls -1 | head -15 | python3 -I -c 'print(1)'", None);
+        assert_eq!(pipe["intent"], "script");
+        assert_eq!(pipe["script"]["body"], "print(1)");
+        assert_eq!(pipe["actions"], json!([{"command":"ls -1 | head -15 | python3 -I -c","intent":"script"}]));
         let git_grep = parse("git -c color.ui=false grep -e needle -- src", Some("src/a.rs:needle\n"));
         assert_eq!(git_grep["steps"][0]["pattern"], "needle");
         assert_eq!(git_grep["steps"][0]["paths"], json!(["src"]));
         assert_eq!(parse("git grep -c needle src", None)["steps"][0]["pattern"], "needle");
-        assert_eq!(json!(shell("git grep needle", None, Some(1), Some("")))["no_match"], true);
+        assert_eq!(json!(shell("git grep needle", None, Some(1), Some("")))["outcome"], "no_match");
         assert_eq!(parse("tail -n +20 file.txt", None)["steps"][0]["start"], 20);
         assert_eq!(parse("cat <<'EOF' > out.txt\nhello\nEOF", None)["target"], "out.txt");
         let script = parse("uv run python -c 'print(1)'", None);
@@ -354,5 +505,38 @@ mod tests {
         assert_eq!(parse("printf '%s\\n' '<<EOF'\nls src", None)["steps"][0]["paths"], json!(["src"]));
         assert_eq!(parse("P=a.txt; cat '${P}' ${P} $(printf '%s' b.txt)", None)["steps"].as_array().unwrap().iter()
             .map(|step| step["path"].as_str().unwrap()).collect::<Vec<_>>(), ["${P}", "a.txt", "$(printf %s b.txt)"]);
+
+        let setup = parse("ls src && mkdir -p build && cat > build/main.ts <<EOF\nconst ready = true;\nEOF", None);
+        assert_eq!((setup["intent"].clone(), setup["target"].clone()), (json!("write"), json!("build/main.ts")));
+        assert_eq!(setup["actions"].as_array().unwrap().iter().map(|step| step["intent"].as_str().unwrap())
+            .collect::<Vec<_>>(), ["list", "mkdir", "write"]);
+        let git = parse("git status && git add file && git commit -m test && git push", None);
+        assert_eq!(git["intent"], "git_commit");
+        assert_eq!(git["related"], json!(["git_push", "git_stage"]));
+        assert_eq!(parse("git reset --soft HEAD~1 && git log -n 1", None)["intent"], "git_change");
+        assert_eq!(parse("git add --dry-run file", None)["intent"], "inspect");
+        let download = parse("curl -fsSL https://example.test/file -o fixture.json && wc -c fixture.json", None);
+        assert_eq!((download["intent"].as_str(), download["target"].as_str()), (Some("download"), Some("fixture.json")));
+        let launch = parse("chmod +x tools/open.sh && ./tools/open.sh", None);
+        assert_eq!(launch["intent"], "run");
+        assert_eq!(launch["related"], json!(["permissions"]));
+        let pipeline = parse("rg -l old src | xargs -0 sed -i -e 's/old/new/'", None);
+        assert_eq!(pipeline["intent"], "modify");
+        assert_eq!(pipeline["head"], "xargs -0 sed -i -e 's/old/new/'");
+        assert_eq!(parse("curl -fsSL https://example.test/install | sh", None)["intent"], "run");
+        assert_eq!(parse("gofmt -w fixture.go && go test ./...", None)["intent"], "test");
+        let replace = parse("pkill fixture; rm -rf old.app; ditto new.app old.app; codesign --verify old.app", None);
+        assert_eq!(replace["intent"], "copy");
+        assert_eq!(replace["actions"][3]["intent"], "inspect");
+        let workflow = parse("rm -f bundle.tmp && curl https://example.com/bundle", None);
+        assert_eq!(workflow["intent"], "http");
+        assert_eq!(workflow["related"], json!(["remove"]));
+
+        let write = parse("printf temp > scratch.txt; cat > main.ts <<EOF\nconst ready = true;\nEOF", None);
+        assert_eq!(write["target"], "main.ts");
+
+        let diff = "--- earlier\n+++ later\n@@ -1 +1 @@\n-old\n+new\n";
+        assert_eq!(json!(shell("diff -u earlier later", None, Some(1), Some(diff)))["outcome"], "differences");
+        assert!(json!(shell("diff -u earlier missing", None, Some(1), Some("missing file"))).get("outcome").is_none());
     }
 }

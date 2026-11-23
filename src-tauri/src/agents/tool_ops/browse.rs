@@ -13,7 +13,8 @@ pub(crate) fn search(pattern: &str, paths: Vec<String>, files_only: bool, output
         ),
         None => (None, None),
     };
-    Op::Search { pattern: pattern.into(), paths, in_file, matches, files, hits }
+    let truncated = output.is_some_and(|output| output.lines().any(search_limit));
+    Op::Search { pattern: pattern.into(), paths, in_file, matches, files, hits, truncated }
 }
 
 pub(crate) fn find(pattern: Option<&str>, paths: Vec<String>, output: Option<&str>) -> Op {
@@ -37,9 +38,17 @@ fn is_file(path: &str) -> bool {
 fn entries(output: &str) -> impl Iterator<Item = &str> {
     output.lines().map(str::trim_end).filter(|line| {
         let summary = (line.starts_with("No ") && line.ends_with(" found"))
-            || line.strip_prefix("Found ").and_then(|rest| rest.split(' ').next()).is_some_and(|n| n.parse::<u64>().is_ok());
+            || line.strip_prefix("Found ").and_then(|rest| rest.split(' ').next()).is_some_and(|n| n.parse::<u64>().is_ok())
+            || search_limit(line);
         !line.trim().is_empty() && !summary
     })
+}
+
+fn search_limit(line: &str) -> bool {
+    line.starts_with("[Showing results with pagination ") && line.ends_with(']')
+        || line.strip_prefix("(Results are truncated: showing first ")
+            .and_then(|line| line.strip_suffix(" results. Consider using a more specific path or pattern.)"))
+            .is_some_and(|count| count.parse::<usize>().is_ok())
 }
 
 fn file_list(output: &str) -> Option<Vec<Hits>> {
@@ -127,7 +136,8 @@ mod tests {
 
         let Op::Search { matches, hits: Some(hits), in_file, .. } = search("fn", vec!["src/a.ts".into()], false, Some("64:fn a() {\n65-  b\n")) else { panic!() };
         assert_eq!((matches, in_file, hits[0].path.as_str()), (Some(1), true, "src/a.ts"));
-        let Op::Search { matches, hits: Some(hits), .. } = search("x", Vec::new(), false, Some("Found 2 matches\n/a.ts:\n  Line 3: x\n\n/b.ts:\n  Line 9: y")) else { panic!() };
+        let Op::Search { matches, hits: Some(hits), truncated: true, .. } = search("x", Vec::new(), false,
+            Some("Found 2 matches\n/a.ts:\n  Line 3: x\n\n/b.ts:\n  Line 9: y\n\n(Results are truncated: showing first 2 results. Consider using a more specific path or pattern.)")) else { panic!() };
         assert_eq!((matches, hits[1].path.as_str(), hits[1].lines[0].line), (Some(2), "/b.ts", Some(9)));
         assert!(matches!(search("x", Vec::new(), false, Some("Error: bad pattern")), Op::Search { hits: None, .. }));
     }

@@ -53,14 +53,14 @@ try {
   assert.ok(ids.indexOf(1)<ids.indexOf(2)&&ids.indexOf(2)<ids.indexOf(3)&&ids.indexOf(3)<ids.indexOf(5));
   assert.ok((await page.locator('#ev-0').textContent()).includes('First request\ncontinued request'));
   assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
-  assert.equal(await page.locator('#ev-1').getAttribute('title'),'模型：fixture/model-a');
+  assert.equal(await page.locator('#ev-1').getAttribute('title'),null);
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   const info=page.getByRole('group',{name:'会话信息',exact:true});
   assert.equal(await info.locator('dt').first().textContent(),'最近使用的模型');
   assert.equal(await info.locator('.model-label').first().textContent(),'fixture/model-b');
   assert.equal(await info.locator('.session-model-history .model-label').textContent(),'fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
-  console.log(`PASS: latest model badge, provider-scoped history and per-message model hints (${engine})`);
+  console.log(`PASS: latest model badge and provider-scoped history without message hover hints (${engine})`);
   console.log(`PASS: source part order, grouped user prompt and folded tools/reasoning (${engine})`);
 
   assert.equal(await readCard.locator('.op-name').getAttribute('title'),'/tmp/example');

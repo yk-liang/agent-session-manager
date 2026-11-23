@@ -507,11 +507,8 @@ fn read_transcript(path: &Path, project_dir: &str, opts: FamilyOptions) -> Resul
         if let (true, Some(call), Some(uuid), Some(text)) = (v["isMeta"] == true, v["sourceToolUseID"].as_str(), v["uuid"].as_str(), tools::injected_text(&v)) {
             injected.insert(call.to_owned(), (uuid.to_owned(), text));
         }
-        match v.get("type").and_then(Value::as_str) {
-            Some("user" | "assistant" | "system" | "developer" | "attachment") => {
-                events.extend(context::normalize(v));
-            }
-            _ => {}
+        if let Some("user" | "assistant" | "system" | "developer" | "attachment") = v.get("type").and_then(Value::as_str) {
+            events.extend(context::normalize(v));
         }
     });
     let (meta, warnings) = match outcome {

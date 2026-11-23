@@ -1,6 +1,6 @@
 use super::super::tool_ops::{self, first_line, text, Choice, Hunk, Op, Question, ToolResult};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 技能正文由紧随调用的 meta 消息注入（`sourceToolUseID` 指向 Skill 调用）；`injected` 按调用 ID 记录该消息的 uuid 和正文。
 /// 正文并入 Skill 卡片后，原来的上下文事件不再单独显示。
@@ -54,11 +54,6 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
             let file = &outcome["file"];
             match (file["content"].as_str(), file["startLine"].as_u64(), file["numLines"].as_u64()) {
                 (Some(content), Some(start), Some(lines)) => {
-                    if start == 1 && file["totalLines"].as_u64() == Some(lines) {
-                        if let Some(skill) = tool_ops::read_skill(path, content) {
-                            return vec![skill];
-                        }
-                    }
                     if let Some(result) = result {
                         result.block["content"] = json!(content);
                     }
@@ -93,10 +88,15 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
             }
             None => return Vec::new(),
         },
-        ("WebSearch", _) => match text(input, "query") {
-            Some(query) => Op::web_search(query, None, output),
-            None => return Vec::new(),
-        },
+        ("WebSearch" | "web_search", _) => {
+            let count = outcome["results"].as_array().and_then(|results| {
+                let mut links = results.iter().filter_map(|result| result["content"].as_array()).peekable();
+                if results.is_empty() || links.peek().is_some() {
+                    Some(links.flatten().filter_map(|link| text(link, "url")).collect::<HashSet<_>>().len())
+                } else { None }
+            });
+            Op::web_search(input, None, count)
+        }
         ("WebFetch", _) => match text(input, "url") {
             Some(url) => Op::WebFetch { url: url.into(), prompt: text(input, "prompt").map(Into::into) },
             None => return Vec::new(),
@@ -143,6 +143,7 @@ fn describe_call(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
             description: text(input, "description").unwrap_or("后台事件").into(),
             minutes: input["timeout_ms"].as_u64().map(|ms| ms.div_ceil(60_000)),
         },
+        ("ScheduleWakeup", _) if input["stop"] == true => Op::Stop { task: "定时唤醒".into(), detail: None },
         ("ScheduleWakeup", _) => match input["delaySeconds"].as_f64() {
             Some(seconds) => Op::Wake { seconds, reason: text(input, "reason").map(Into::into) },
             None => return Vec::new(),

@@ -14,7 +14,7 @@ import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
 import { displaySessionId, formatLocalDateTime, formatMessageTimestamp, sessionKey } from "../utils";
-import { historicalModels, eventModelTitle } from "../models";
+import { historicalModels } from "../models";
 import ReadDiagnostics from "./ReadDiagnostics";
 import UiIcon from "./UiIcon";
 
@@ -208,7 +208,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
                 }
                 const i = item.row.index;
                 const previous = items[row.index - 1]?.row;
-                return <div {...placement} tabIndex={-1} title={eventModelTitle(detail.events[i])}
+                return <div {...placement} tabIndex={-1}
                   data-follows-activity={previous && !rowEndsWithMessage(rows, previous, visibility) || undefined}
                   className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
                   <EventView

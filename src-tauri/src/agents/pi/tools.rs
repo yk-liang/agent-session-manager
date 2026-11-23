@@ -7,7 +7,8 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
     let details = result.as_mut()
         .and_then(|result| result.event.as_object_mut()?.remove("details"))
         .unwrap_or(Value::Null);
-    let output = result.as_ref().filter(|result| !result.failed()).and_then(ToolResult::text).map(str::to_owned);
+    let failed = result.as_ref().is_some_and(ToolResult::failed);
+    let output = result.as_ref().and_then(ToolResult::text).map(str::to_owned);
     let output = output.as_deref();
     let input = &call["input"];
     let path = text(input, "path");
@@ -31,22 +32,37 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
         }
         (Some("write"), Some(path)) => Op::write(path, input["content"].as_str().unwrap_or_default(), None),
         (Some("grep"), _) => match text(input, "pattern") {
-            Some(pattern) => tool_ops::search(pattern, paths(), false, output),
+            Some(pattern) => tool_ops::search(pattern, paths(), false, output.filter(|_| !failed)),
             None => return Vec::new(),
         },
-        (Some("find"), _) => tool_ops::find(text(input, "pattern"), paths(), output),
-        (Some("ls"), _) => tool_ops::list(paths(), output),
+        (Some("find"), _) => tool_ops::find(text(input, "pattern"), paths(), output.filter(|_| !failed)),
+        (Some("ls"), _) => tool_ops::list(paths(), output.filter(|_| !failed)),
         (Some("bash"), _) => match text(input, "command") {
-            Some(command) => tool_ops::shell(command, None, None, output),
+            Some(command) => {
+                let exit = output.and_then(|text| {
+                    let (body, status) = text.trim_end_matches('\n').rsplit_once("\n\nCommand exited with code ")?;
+                    Some((status.parse().ok()?, if body.trim() == "(no output)" { "" } else { body }))
+                }).filter(|_| failed);
+                if let (Some((_, body)), Some(result)) = (exit, &mut result) {
+                    result.block["command_output"] = json!(body);
+                }
+                let (code, body) = exit.map_or((None, output.filter(|_| !failed)), |(code, body)| (Some(code), Some(body)));
+                tool_ops::shell(command, None, code, body)
+            }
             None => return Vec::new(),
         },
         // pi-subagents 扩展：`label` 是任务的短名。
+        (Some("subagent"), _) if input["action"] == "guide" => Op::Report {
+            title: "子智能体指南", summary: text(&input["options"], "topic").map(Into::into),
+        },
         (Some("subagent"), _) => Op::Agent {
             agent: text(input, "agent").map(Into::into),
             task: text(input, "label").map(Into::into).or_else(|| text(input, "task").map(first_line)).unwrap_or_else(|| "子任务".into()),
             background: input["async"] == true,
             encrypted: false,
         },
+        (Some("project_report"), _) => Op::Report { title: "项目报告", summary: None },
+        (Some("lens_diagnostics"), _) => Op::Report { title: "项目诊断", summary: None },
         _ => return Vec::new(),
     };
     vec![op]
@@ -67,11 +83,6 @@ fn read(path: &str, input: &Value, block: &mut Value) -> Op {
     };
     if content.starts_with("[Line ") {
         return Op::read(path);
-    }
-    if start == 1 && notice.is_none() {
-        if let Some(skill) = tool_ops::read_skill(path, content) {
-            return skill;
-        }
     }
     let lines = line_count(content) as u64;
     let end = (start - 1).checked_add(lines);

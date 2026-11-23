@@ -5,8 +5,9 @@ import type { ContentBlock, ToolOp } from "../types";
 import CopyButton from "./CopyButton";
 import { DetailState } from "./DetailState";
 import Notice from "./Notice";
+import { jsonResult } from "./ResultViews";
 import Segmented from "./Segmented";
-import { resultView, scriptView, type View } from "./ToolContent";
+import { plainResultText, resultView, scriptView, TextPreview, textView, type View } from "./ToolContent";
 
 type Kind = "input" | "output" | "error";
 type Views = (View | false | undefined)[];
@@ -47,7 +48,7 @@ function Section({ kind, title, note, views, actions, onSelect }: {
       </div>}
     </div>
     {hasTabs
-      ? <div id={panelId} role="tabpanel" aria-labelledby={`${panelId}-${views.indexOf(view)}`} tabIndex={0}>{view.body}</div>
+      ? <div key={sectionViewId(view)} id={panelId} role="tabpanel" aria-labelledby={`${panelId}-${views.indexOf(view)}`} tabIndex={0}>{view.body}</div>
       : view.body}
   </section>;
 }
@@ -92,6 +93,7 @@ type InputOptions<T> = {
   loadOnExpand?: boolean;
   views?: (op: T, call: ContentBlock) => Views;
   actions?: ReactNode;
+  sourceLabel?: string;
 };
 
 type OutputOptions<T> = {
@@ -99,6 +101,7 @@ type OutputOptions<T> = {
   start?: number | null;
   views?: (result: ContentBlock | undefined, op: T) => Views;
   actions?: (op: T) => ReactNode;
+  preferScript?: boolean;
 };
 
 export function ToolSections<T extends ToolOp>({ item, input, output = {} }: {
@@ -107,25 +110,28 @@ export function ToolSections<T extends ToolOp>({ item, input, output = {} }: {
   output?: OutputOptions<T> | false;
 }) {
   const { content, result } = item.part;
-  const [loadJson, setLoadJson] = useState(false);
+  const [loadSource, setLoadSource] = useState(false);
   const preview = input?.preview;
-  const { value: call, placeholder } = usePayload(content, !preview || !!input?.loadOnExpand || loadJson);
+  const { value: call, placeholder } = usePayload(content, !preview || !!input?.loadOnExpand || loadSource);
   const op = (call?.ops?.[item.index] ?? item.op) as T;
   const views = preview ? [preview] : (call ? input?.views?.(op, call) : undefined) ?? [];
-  const json = call && JSON.stringify(call.input, null, 2);
-  const raw = call ? (json === undefined ? message("无输入") : <pre className="code tool-input-code">{json}</pre>) : placeholder;
+  const source = call && (typeof call.input === "string" ? call.input : JSON.stringify(call.input, null, 2));
+  const sourceLabel = input?.sourceLabel ?? (typeof call?.input === "string" ? "原文" : "JSON");
+  const raw = call ? (source === undefined ? message("无输入") : <TextPreview label={sourceLabel} text={source}>
+    {text => <pre className="code tool-input-code">{text}</pre>}
+  </TextPreview>) : placeholder;
 
   return <>
     <Section kind="input" title="输入" note={input?.note} actions={input?.actions} onSelect={id => {
-      if (id === "json") setLoadJson(true);
-    }} views={[...views.filter((view): view is View => !!view), { id: "json", label: "JSON", body: raw, copy: json }]} />
+      if (id === "source") setLoadSource(true);
+    }} views={[...views.filter((view): view is View => !!view), { id: "source", label: sourceLabel, body: raw, copy: source }]} />
     {output && <ToolOutput status={itemStatus(item)} result={result} script={item.index === 0 ? content.script_result : undefined}
-      title={output.title} start={output.start} actions={output.actions?.(op)}
+      title={output.title} start={output.start} actions={output.actions?.(op)} preferScript={output.preferScript}
       views={output.views && (result => output.views!(result, op))} />}
   </>;
 }
 
-export function ToolOutput({ status, result, script, title = "输出", start = null, views, actions }: {
+export function ToolOutput({ status, result, script, title = "输出", start = null, views, actions, preferScript }: {
   status?: ContentBlock["status"];
   result?: ContentBlock;
   script?: ContentBlock;
@@ -133,23 +139,36 @@ export function ToolOutput({ status, result, script, title = "输出", start = n
   start?: number | null;
   views?: (result?: ContentBlock) => Views;
   actions?: ReactNode;
+  preferScript?: boolean;
 }) {
   const output = usePayload(result);
   const scriptOutput = usePayload(script);
   const failed = status === "error";
   const heading = failed ? "错误输出" : title;
-  const shown: SectionView[] = failed ? [] : (views?.(output.value) ?? []).filter((view): view is View => !!view);
+  const nativeViews = failed ? [] : (views?.(output.value) ?? []).filter((view): view is View => !!view);
+  const json = !failed && !nativeViews.length && jsonResult(output.value);
+  if (json) nativeViews.push(json);
+  const stdout = output.value?.command_output;
+  if (!nativeViews.length && stdout?.trim()) nativeViews.push(textView("命令输出", stdout, start));
+  const scriptBlock = scriptOutput.value;
+  const decoded = scriptBlock && scriptView(scriptBlock, "脚本输出");
+  const nativeText = output.value && plainResultText(output.value);
+  const scriptText = decoded?.copy?.trim();
+  const duplicate = scriptText && scriptText === nativeText?.trim() && scriptBlock && plainResultText(scriptBlock) !== undefined;
+  const semanticScript = decoded && !duplicate && (scriptText || !decoded.copy) ? { ...decoded, id: "script" } : undefined;
+  const scriptFirst = !!(preferScript && !failed && semanticScript && scriptText && scriptText.length > (nativeText?.trim().length ?? 0));
+  const shown: SectionView[] = [...nativeViews];
+  if (scriptFirst && semanticScript) shown.unshift(semanticScript);
   if (result) {
-    const label = shown.length ? "原文" : heading;
+    const label = scriptFirst && !nativeViews.length ? "原生结果" : shown.length ? "原文" : heading;
     const original = output.value ? resultView(output.value, label, start) : { label, body: output.placeholder };
     shown.push({ ...original, id: "raw" });
   }
   if (script) {
-    const label = "脚本输出";
-    const decoded = scriptOutput.value && scriptView(scriptOutput.value, label);
-    if (decoded) shown.push({ ...decoded, id: "script" });
+    const label = decoded ? "脚本原文" : "脚本输出";
+    if (semanticScript && !scriptFirst) shown.push(semanticScript);
     const original = scriptOutput.value
-      ? resultView(scriptOutput.value, decoded ? "脚本原文" : label)
+      ? resultView(scriptOutput.value, label)
       : { label, body: scriptOutput.placeholder };
     shown.push({ ...original, id: decoded ? "script-raw" : "script" });
   }

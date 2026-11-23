@@ -1,5 +1,6 @@
 //! Codex 的工具卡片。`item_completed` 中的执行记录单独展示，确认由成功完成的 exec 脚本发起时折叠包装脚本。
 use super::super::tool_ops::{self, first_line, text, Choice, Hunk, Op, Question};
+use super::exec::{wrapped_execution, ExecutionKey};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -8,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(super) struct Activity {
     pub calls: HashSet<String>,
     scripts: HashMap<String, ExecSpan>,
-    executions: HashMap<String, BTreeMap<i64, Vec<(String, String)>>>,
+    executions: HashMap<String, BTreeMap<i64, Vec<(String, Option<ExecutionKey>)>>>,
 }
 
 struct ExecSpan {
@@ -16,20 +17,12 @@ struct ExecSpan {
     start: i64,
     end: Option<i64>,
     succeeded: bool,
-    kind: Option<&'static str>,
+    execution: Option<ExecutionKey>,
 }
 
 impl Activity {
     pub fn start_exec(&mut self, id: &str, turn: String, start: i64, script: &str) {
-        let kind = wrapped_tool(script).and_then(|tool| match tool {
-            "exec_command" => Some("CommandExecution"),
-            "apply_patch" => Some("FileChange"),
-            "view_image" => Some("ImageView"),
-            "web__run" | "clock__sleep" => Some("Extension"),
-            tool if tool.starts_with("mcp__") => Some("McpToolCall"),
-            _ => None,
-        });
-        self.scripts.insert(id.into(), ExecSpan { turn, start, end: None, succeeded: false, kind });
+        self.scripts.insert(id.into(), ExecSpan { turn, start, end: None, succeeded: false, execution: wrapped_execution(script) });
     }
 
     pub fn finish_exec(&mut self, id: &str, end: i64, output: &serde_json::value::RawValue) {
@@ -40,8 +33,8 @@ impl Activity {
     }
 
     pub fn record_execution(&mut self, turn: String, start: i64, item: &Value) {
-        if let (Some(id), Some(kind)) = (item["id"].as_str(), item["type"].as_str()) {
-            self.executions.entry(turn).or_default().entry(start).or_default().push((id.into(), kind.into()));
+        if let Some(id) = item["id"].as_str() {
+            self.executions.entry(turn).or_default().entry(start).or_default().push((id.into(), execution_key(item)));
         }
     }
 
@@ -63,8 +56,8 @@ impl Activity {
                 previous_end = Some(previous_end.map_or(end, |previous: i64| previous.max(end)));
                 if span.succeeded && !overlaps {
                     let mut records = executions.range(span.start..=end).flat_map(|(_, records)| records);
-                    if let (Some((execution, kind)), None) = (records.next(), records.next()) {
-                        if span.kind == Some(kind.as_str()) {
+                    if let (Some((execution, Some(key))), None) = (records.next(), records.next()) {
+                        if span.execution.as_ref() == Some(key) {
                             replaced.insert(id.as_str(), execution);
                         }
                     }
@@ -104,40 +97,30 @@ impl Activity {
     }
 }
 
-/// 折叠仅限没有额外逻辑的单次调用。作为参数的代码字符串可以包含引号和括号。
-fn wrapped_tool(script: &str) -> Option<&str> {
-    let script = script.trim().trim_end_matches(';').trim_end();
-    let call = script.strip_prefix("await ").or_else(|| script.strip_prefix("text(await ")?.strip_suffix(')'))?;
-    let (name, args) = call.strip_prefix("tools.")?.split_once('(')?;
-    let args = args.strip_suffix(')')?.trim();
-    if !args.starts_with('{') {
-        return None;
-    }
-    let mut braces = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in args.char_indices() {
-        if let Some(delimiter) = quote {
-            if !escaped && ch == delimiter {
-                quote = None;
-            }
-            escaped = !escaped && ch == '\\';
-            continue;
+fn execution_key(item: &Value) -> Option<ExecutionKey> {
+    Some(match item["type"].as_str()? {
+        "CommandExecution" => ExecutionKey::Command(command_line(&item["command"])),
+        "FileChange" => {
+            let mut paths: Vec<_> = item["changes"].as_object()?.iter().map(|(path, change)|
+                text(change, "move_path").unwrap_or(path).to_owned()).collect();
+            paths.sort_unstable();
+            paths.dedup();
+            ExecutionKey::Patch(paths)
         }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '{' => braces += 1,
-            '}' => {
-                braces -= 1;
-                if braces == 0 {
-                    return args[index + 1..].trim().is_empty().then_some(name.trim_end());
-                }
-            }
-            '(' | ')' | '`' | ';' => return None,
-            _ => {}
+        "ImageView" => {
+            let path = text(item, "path")?;
+            ExecutionKey::Image(path.strip_prefix("file://").unwrap_or(path).into())
         }
-    }
-    None
+        "McpToolCall" => ExecutionKey::Mcp(text(item, "server")?.into(), text(item, "tool")?.into()),
+        "Extension" if item["kind"] == "clock.sleep" => ExecutionKey::Sleep,
+        "Extension" if item["kind"] == "web.search" => ExecutionKey::Web(match item["action"]["type"].as_str()? {
+            "search" => "search",
+            "openPage" | "open_page" => "open",
+            "findInPage" | "find_in_page" => "find",
+            _ => return None,
+        }),
+        _ => return None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -158,8 +141,9 @@ impl ItemHeader<'_> {
 pub(super) fn blocks(item: &Value, view: bool) -> Vec<Value> {
     let id = item["id"].as_str().unwrap_or_default();
     let kind = item["type"].as_str();
+    let recorded_status = item["status"].as_str();
     let command_exit = (kind == Some("CommandExecution")).then(|| item["exit_code"].as_i64()).flatten();
-    let status = match item["status"].as_str() {
+    let status = match recorded_status {
         Some("completed") | None if command_exit.is_some_and(|exit| exit != 0) => "error",
         Some("completed") | None => "completed",
         Some("in_progress") => "running",
@@ -169,9 +153,10 @@ pub(super) fn blocks(item: &Value, view: bool) -> Vec<Value> {
     let (name, mut ops, input, output) = match kind {
         Some("CommandExecution") => {
             let command = command_line(&item["command"]);
-            let output = item["aggregated_output"].as_str().unwrap_or_default();
-            let op = tool_ops::shell(&command, None, command_exit, Some(super::tool_output::execution_output(output)));
-            ("exec_command", vec![op], json!({"cmd":command,"cwd":item["cwd"]}), Some(json!(output)))
+            let output = item["aggregated_output"].as_str();
+            let concluded = matches!(recorded_status, None | Some("completed" | "failed"));
+            let op = tool_ops::shell(&command, None, command_exit, output.filter(|_| concluded).map(super::tool_output::execution_output));
+            ("exec_command", vec![op], json!({"cmd":command,"cwd":item["cwd"]}), Some(json!(output.unwrap_or_default())))
         }
         Some("FileChange") => {
             let ops = item["changes"].as_object().into_iter().flatten().map(|(path, change)| {
@@ -193,34 +178,20 @@ pub(super) fn blocks(item: &Value, view: bool) -> Vec<Value> {
                 Value::String(raw) => serde_json::from_str(raw).unwrap_or(Value::Null),
                 arguments => arguments.clone(),
             };
-            let op = Op::Mcp {
-                server: text(item, "server").unwrap_or("mcp").into(),
-                tool: text(item, "tool").unwrap_or("?").into(),
-                title: text(&arguments, "title").map(Into::into),
-            };
-            (text(item, "tool").unwrap_or("mcp"), vec![op], arguments, Some(mcp_result(item)))
+            let server = text(item, "server").unwrap_or("mcp");
+            let tool = text(item, "tool").unwrap_or("?");
+            (tool, vec![mcp_operation(server, tool, &arguments)], arguments, Some(mcp_result(item)))
         }
         Some("Extension") => match (item["kind"].as_str(), &item["action"]) {
             (Some("web.search"), action) => {
                 let results = item["results"].as_array();
-                let op = match action["type"].as_str() {
-                    Some("openPage" | "findInPage") => Op::WebFetch {
-                        url: text(action, "url").or_else(|| text(item, "query")).unwrap_or_default().into(),
-                        prompt: text(action, "pattern").map(Into::into),
-                    },
-                    _ => Op::WebSearch {
-                        query: text(action, "query").or_else(|| text(item, "query")).unwrap_or_default().into(),
-                        domain: None,
-                        results: results.map(Vec::len),
-                    },
-                };
-                let output = results.map(|results| json!(results.iter().map(|result| format!("{}\n{}",
-                    result["title"].as_str().unwrap_or_default(), result["url"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n\n")));
-                (if matches!(op, Op::WebFetch { .. }) { "open_page" } else { "web_search" }, vec![op], action.clone(), output)
+                let (name, op) = web_action(action, text(item, "query"), results.map(Vec::len));
+                let output = results.map(|results| if view { Value::Null } else { json!(results) });
+                (name, op.into_iter().collect(), action.clone(), output)
             }
             (Some("clock.sleep"), _) => ("sleep", vec![Op::Wait { seconds: item["durationMs"].as_f64().map(|ms| ms / 1000.0), target: None }], Value::Null, None),
             (Some("image_gen.generation"), _) => {
-                let path = text(item, "savedPath").unwrap_or("生成的图片");
+                let path = text(item, "savedPath");
                 let image = item["result"].as_str().filter(|data| data.starts_with("iVBORw0KGgo"));
                 let output = image.map(|data| {
                     if view { Value::Null } else {
@@ -229,7 +200,8 @@ pub(super) fn blocks(item: &Value, view: bool) -> Vec<Value> {
                         }])
                     }
                 }).or_else(|| item.get("failure").filter(|value| !value.is_null()).cloned());
-                ("image_gen", vec![Op::Image { path: path.into() }], json!({"revisedPrompt":item["revisedPrompt"],"savedPath":path}), output)
+                ("image_gen", vec![Op::GenerateImage { path: path.map(Into::into) }],
+                    json!({"revisedPrompt":item["revisedPrompt"],"savedPath":path}), output)
             }
             (kind, _) => (kind.unwrap_or("extension"), Vec::new(), item["action"].clone(),
                 item.get("result").filter(|result| !result.is_null()).map(|result| if view { Value::Null } else { result.clone() })),
@@ -269,6 +241,19 @@ pub(super) fn blocks(item: &Value, view: bool) -> Vec<Value> {
     std::iter::once(call).chain(result).collect()
 }
 
+pub(super) fn web_action(action: &Value, fallback: Option<&str>, results: Option<usize>) -> (&'static str, Option<Op>) {
+    match action["type"].as_str() {
+        Some("openPage" | "open_page") => ("open_page", Some(Op::WebFetch {
+            url: text(action, "url").or(fallback).unwrap_or_default().into(), prompt: None,
+        })),
+        Some("findInPage" | "find_in_page") => ("find_in_page", Some(Op::WebFetch {
+            url: text(action, "url").unwrap_or_default().into(), prompt: text(action, "pattern").map(Into::into),
+        })),
+        Some("search") | None => ("web_search", Some(Op::web_search(action, fallback, results))),
+        _ => ("web", None),
+    }
+}
+
 /// 函数调用形式的工具；一个补丁可改多个文件，每个文件一个操作。
 pub(super) fn describe(name: &str, input: &Value) -> Vec<Op> {
     if name == "apply_patch" {
@@ -277,17 +262,33 @@ pub(super) fn describe(name: &str, input: &Value) -> Vec<Op> {
     describe_one(name, input).into_iter().collect()
 }
 
+fn javascript(input: &Value) -> Option<Op> {
+    if let Some(code) = text(input, "code") {
+        return Some(Op::script("JavaScript", text(input, "title"), code));
+    }
+    Some(Op::Report { title: "完成电脑操作", summary: Some(text(input, "completion_summary")?.into()) })
+}
+
+fn mcp_operation(server: &str, tool: &str, input: &Value) -> Op {
+    let semantic = match (server, tool) {
+        ("node_repl" | "cua_repl", "js") => javascript(input),
+        ("openaiDeveloperDocs", "search_openai_docs") => Some(Op::web_search(input, None, None)),
+        ("openaiDeveloperDocs", "fetch_openai_doc") => text(input, "url")
+            .map(|url| Op::WebFetch { url: url.into(), prompt: None }),
+        _ => None,
+    };
+    semantic.unwrap_or_else(|| Op::Mcp { server: server.into(), tool: tool.into(), title: text(input, "title").map(Into::into) })
+}
+
 fn describe_one(name: &str, input: &Value) -> Option<Op> {
     Some(match name {
         "shell" | "container.exec" | "exec_command" => {
             let command = ["command", "cmd"].iter().map(|key| command_line(&input[*key])).find(|command| !command.trim().is_empty())?;
             tool_ops::shell(&command, None, None, None)
         }
-        "exec" => {
-            let script = input.as_str()?;
-            exec_script(script)
-        }
-        "js" => Op::script("JavaScript", text(input, "title"), text(input, "code")?),
+        "exec" => super::exec::describe(input.as_str()?),
+        "js" => javascript(input)?,
+        "write_stdin" => Op::TerminalInput { session: input["session_id"].as_u64()?, send: !input["chars"].as_str()?.is_empty() },
         "wait" => Op::Wait { seconds: input["yield_time_ms"].as_f64().map(|ms| ms / 1000.0), target: None },
         "sleep" => Op::Wait { seconds: input["duration_ms"].as_f64().map(|ms| ms / 1000.0), target: None },
         "wait_agent" => Op::Wait { seconds: input["timeout_ms"].as_f64().map(|ms| ms / 1000.0), target: Some("子智能体".into()) },
@@ -298,12 +299,16 @@ fn describe_one(name: &str, input: &Value) -> Option<Op> {
             background: true,
             encrypted: text(input, "message").is_some_and(is_fernet_token),
         },
-        "send_message" => {
+        "send_message" | "followup_task" => {
             let message = text(input, "message");
             let encrypted = message.is_some_and(is_fernet_token);
             Op::Message { to: text(input, "target")?.into(), summary: message.filter(|_| !encrypted).map(first_line), encrypted }
         }
         "send_message_to_user_async" => Op::Message { to: "用户".into(), summary: text(input, "message").map(first_line), encrypted: false },
+        "interrupt_agent" | "close_agent" => Op::Stop {
+            task: text(input, "target").or_else(|| text(input, "id")).unwrap_or("子智能体").into(),
+            detail: None,
+        },
         "request_user_input" | "request_user_input_async" => Op::ask(input["questions"].as_array()?.iter().filter_map(|q| Some(Question {
             question: text(q, "title").or_else(|| text(q, "question"))?.into(),
             header: None,
@@ -313,74 +318,18 @@ fn describe_one(name: &str, input: &Value) -> Option<Op> {
         })).collect(), None),
         "update_plan" => Op::todo(&input["plan"], "step"),
         "view_image" => Op::Image { path: text(input, "path")?.into() },
-        "search_openai_docs" => Op::web_search(text(input, "query")?, None, None),
+        "search_openai_docs" => Op::web_search(input, None, None),
         "fetch_openai_doc" => Op::WebFetch { url: text(input, "url")?.into(), prompt: None },
         _ if name.starts_with("mcp__") => {
             let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
-            Op::Mcp { server: server.into(), tool: tool.into(), title: text(input, "title").map(Into::into) }
+            mcp_operation(server, tool, input)
         }
         _ => return None,
     })
 }
 
-/// 仅提取字面量工具调用的标题，完整 JavaScript 始终可查看。
-fn exec_script(script: &str) -> Op {
-    let title = if script.matches("tools.").count() == 1 && script.contains("tools.clock__curr_time(") {
-        Some("查看当前时间".into())
-    } else if script.matches("tools.").count() == 1 && script.contains("tools.write_stdin(") {
-        let args = call_args(script, "write_stdin");
-        let args = args.and_then(|args| args.split_once("})").map(|(args, _)| args));
-        let fields = |name: &str| args.and_then(|args| args.split(',').find_map(|part| {
-            let (key, value) = part.split_once(':')?;
-            (key.trim() == name).then(|| value.trim())
-        }));
-        let action = match fields("chars") {
-            Some("\"\"" | "''") => "读取后台输出",
-            Some(_) => "发送会话输入",
-            None => "访问后台会话",
-        };
-        Some(match fields("session_id").and_then(|id| id.parse::<u64>().ok()) {
-            Some(id) => format!("{action} · 会话 {id}"),
-            None => action.into(),
-        })
-    } else {
-        call_args(script, "exec_command").and_then(|args| {
-            let (key, value) = args.split_once(':')?;
-            if !matches!(key.trim(), "cmd" | "\"cmd\"" | "'cmd'") {
-                return None;
-            }
-            let command = js_string(value.trim_start())?;
-            let head = first_line(&command);
-            (!head.is_empty()).then_some(head)
-        })
-    };
-    Op::script("JavaScript", title.as_deref(), script)
-}
-
-fn call_args<'a>(script: &'a str, tool: &str) -> Option<&'a str> {
-    script.split_once(&format!("tools.{tool}("))?.1.trim_start().strip_prefix('{')
-}
-
-fn js_string(value: &str) -> Option<String> {
-    let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
-    let mut escaped = false;
-    for (offset, ch) in value.char_indices().skip(1) {
-        if !escaped && ch == quote {
-            if !value[offset + 1..].trim_start().starts_with([',', '}']) {
-                return None;
-            }
-            let literal = &value[..=offset];
-            return if quote == '"' { serde_json::from_str(literal).ok() }
-            else if !literal.contains('\\') { Some(literal[1..offset].into()) }
-            else { None };
-        }
-        escaped = !escaped && ch == '\\';
-    }
-    None
-}
-
 /// `*** Begin Patch` 格式的补丁：每个文件一个修改、新建或删除操作；`*** Move to:` 改用新路径。
-fn patch_ops(patch: &str) -> Vec<Op> {
+pub(super) fn patch_ops(patch: &str) -> Vec<Op> {
     let Some(patch) = patch.trim_end().strip_prefix("*** Begin Patch\n").and_then(|body| body.strip_suffix("*** End Patch")) else {
         return Vec::new();
     };
@@ -478,14 +427,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exec_summary_keeps_the_script_and_labels_literal_calls() {
+    fn exec_summary_keeps_static_targets_and_loads_arguments_on_expansion() {
         let script = r#"text(await tools.write_stdin({ session_id: 42, chars: "", yield_time_ms: 1000 }));"#;
-        let op = json!(exec_script(script));
-        assert_eq!(op["title"], "读取后台输出 · 会话 42");
-        assert_eq!(op["body"], script);
-        let script = r#"text(await tools.exec_command({cmd: "git status\ngit diff"}));"#;
-        assert_eq!(json!(exec_script(script))["title"], "git status");
-        assert!(json!(exec_script(r#"text(await tools.exec_command({cmd: "echo " + value}));"#)).get("title").is_none());
+        let ops = describe("exec", &json!(script));
+        let op = json!(&ops[0]);
+        assert_eq!(op["calls"][0]["action"], "poll");
+        assert_eq!(op["calls"][0]["target"], "42");
+        assert_eq!(op["calls"][0]["fields"][2], json!(["yield_time_ms", 1000]));
+        assert!(json!(ops[0].clone().summary())["calls"][0].get("fields").is_none());
+        assert_eq!(json!(describe("write_stdin", &json!({"session_id":42,"chars":""}))),
+            json!([{"kind":"terminal_input","session":42,"send":false}]));
+    }
+
+    #[test]
+    fn web_search_uses_recorded_queries_and_keeps_other_web_actions_distinct() {
+        let action = json!({"type":"search","query":null,"queries":["first","second","first"]});
+        let item = json!({"id":"search","type":"Extension","kind":"web.search","status":"completed",
+            "action":action,"query":"display summary","results":[{"title":"Result","url":"https://example.com"}]});
+        let blocks = blocks(&item, false);
+        assert_eq!(blocks[0]["input"], action);
+        assert_eq!(blocks[0]["ops"][0], json!({"kind":"web_search","queries":["first","second"],"results":1}));
+
+        let (name, op) = web_action(&json!({"type":"find_in_page","pattern":"needle","url":null}), None, None);
+        assert_eq!(name, "find_in_page");
+        assert_eq!(json!(op), json!({"kind":"web_fetch","url":"","prompt":"needle"}));
+        assert!(web_action(&json!({"type":"other"}), None, None).1.is_none());
+
+        let script = r#"text(await tools.web__run({search_query:[{q:"first",domains:["example.com"],recency:7},{q:"second"}],open:[{ref_id:"ref"}]}));"#;
+        assert!(wrapped_execution(script).is_none());
+        let op = json!(super::super::exec::describe(script));
+        assert_eq!(op["calls"][0]["action"], "search_query");
+        assert_eq!(op["calls"][0]["fields"][0][1][0], json!({"query":"first","domains":["example.com"],"recency":7}));
+        assert_eq!(op["calls"][0]["fields"][0][1][1]["query"], "second");
     }
 
     #[test]
@@ -494,9 +467,16 @@ mod tests {
         let summary = blocks(&image, true);
         let full = blocks(&image, false);
         assert_eq!(summary.len(), full.len());
-        assert_eq!(summary[0]["ops"][0]["kind"], "image");
+        assert_eq!(summary[0]["ops"][0]["kind"], "generate_image");
         assert!(summary[1].get("content").is_none());
         assert_eq!(full[1]["content"][0]["source"]["data"], "iVBORw0KGgo=");
+
+        let args = json!({"title":"Probe state","code":"console.log(1)"});
+        let native_js = blocks(&json!({"id":"js","type":"McpToolCall","server":"node_repl","tool":"js","arguments":args}), false);
+        assert_eq!(native_js[0]["ops"], json!(describe("mcp__node_repl__js", &args)));
+        assert_eq!(native_js[0]["ops"][0]["kind"], "script");
+        assert_eq!(json!(describe("interrupt_agent", &json!({"target":"worker"})))[0]["task"], "worker");
+        assert_eq!(json!(describe("followup_task", &json!({"target":"worker","message":"continue"})))[0]["summary"], "continue");
 
         let item = json!({"id":"future", "type":"Extension", "kind":"example.future", "action":{"target":"fixture"}, "result":"done"});
         let full = blocks(&item, false);

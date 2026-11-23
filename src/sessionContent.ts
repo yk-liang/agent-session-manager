@@ -30,17 +30,17 @@ function blocks(content: unknown, row: number): SessionBlock[] {
       tool_use_id: string("tool_use_id"), input: block.input, content: block.content,
       is_error: typeof block.is_error === "boolean" ? block.is_error : undefined,
       error_summary: string("error_summary"),
-      empty_command_output: block.empty_command_output === true || undefined,
+      command_output_kind: block.command_output_kind === "empty" || block.command_output_kind === "diff" ? block.command_output_kind : undefined,
       command_output: string("command_output"),
       exit_code: typeof block.exit_code === "number" ? block.exit_code : undefined,
       script_result: typeof block.script_result === "object" && block.script_result !== null ? block.script_result as ContentBlock : undefined,
-      source: block.source, url: string("url"), image_url: string("image_url"), filename: string("filename"),
+      source: block.source, url: string("url"), image_url: string("image_url"), uri: string("uri"), filename: string("filename"),
       ops: Array.isArray(block.ops) ? block.ops as ToolOp[] : undefined,
     } }];
   });
 }
 
-/** 对话消息：用户、助手和其他代理发来的消息，不含自动注入的元消息。 */
+/** 对话消息：用户、助手和其他智能体发来的消息，不含自动注入的元消息。 */
 export function isMessageEvent(event: SessionEvent) {
   return event.type === "assistant" || event.type === "agent" || event.type === "user" && !event.isMeta;
 }
@@ -92,7 +92,7 @@ export function isAttachment(block: ContentBlock) {
 }
 
 export function attachmentLabel(block: ContentBlock) {
-  return block.filename?.trim() || (block.type === "image" || block.type === "input_image" ? "图片" : "附件");
+  return block.filename?.trim() || block.name?.trim() || (block.type === "image" || block.type === "input_image" ? "图片" : "附件");
 }
 
 export function messageBlockText(block: ContentBlock) {
@@ -102,7 +102,7 @@ export function messageBlockText(block: ContentBlock) {
 
 export const AGENT_KINDS = { task: "任务", message: "消息", result: "结果" } as const;
 
-/** 上级代理派来的任务和追加消息，在导览中和用户提问同等对待。 */
+/** 上级智能体派来的任务和追加消息，在导览中和用户提问同等对待。 */
 function fromAncestor({ from, to }: AgentEnvelope) {
   return !!from && to.startsWith(`${from}/`);
 }

@@ -625,13 +625,13 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     let result = &view.events[2]["message"]["content"][0];
     assert_eq!(result["is_error"], true);
     assert_eq!(result["exit_code"], 2);
-    assert!(result.get("empty_command_output").is_none());
+    assert!(result.get("command_output_kind").is_none());
     assert!(result.get("content").is_none());
     let search = &view.events[3]["message"]["content"][0];
-    assert_eq!(search["ops"][0]["search_exit_one"], true);
+    assert_eq!(search["ops"][0]["exit_one"], "no_match");
     let no_matches = &view.events[4]["message"]["content"][0];
     assert_eq!(no_matches["exit_code"], 1);
-    assert_eq!(no_matches["empty_command_output"], true);
+    assert_eq!(no_matches["command_output_kind"], "empty");
     assert!(no_matches.get("content").is_none());
     let mut tokens = vec![];
     for (original, light) in full.events.iter().zip(&view.events) {
@@ -689,12 +689,36 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
         "type":"item_completed","turn_id":"four","started_at_ms":origin+8500,"item":{"type":"ImageView", "id":"failed-child", "path":"/tmp/fixture.png"}}});
     let mixed = json!({"type":"event_msg", "ordinal":12, "timestamp":"2099-12-31T00:00:12Z", "payload":{
         "type":"item_completed","turn_id":"mixed","started_at_ms":origin+11500,"item":{"type":"CommandExecution", "id":"mixed-child", "command":"false", "status":"completed", "exit_code":2, "aggregated_output":"fixture failure"}}});
+    let file_change = json!({"type":"event_msg", "ordinal":15,"timestamp":"2099-12-31T00:00:15Z", "payload":{
+        "type":"item_completed","turn_id":"patch","started_at_ms":origin+14500,
+        "item":{"type":"FileChange","id":"patch-child","status":"completed","changes":{"src/new.ts":{"type":"add","content":"export {};"}}}}});
+    let comparison = json!({"type":"event_msg", "ordinal":21, "timestamp":"2099-12-31T00:00:21Z", "payload":{
+        "type":"item_completed","turn_id":"compare",
+        "item":{"type":"CommandExecution","id":"compare","command":"diff -u old new","status":"failed","exit_code":1,
+            "aggregated_output":"--- old\n+++ new\n@@ -1 +1 @@\n-before\n+after\n"}}});
+    let standalone_patch = format!("text(await tools.apply_patch({}));", json!("*** Begin Patch\n*** Add File: src/new.ts\n+export {};\n*** End Patch"));
+    let batch = r#"const patch = String.raw`*** Begin Patch
+*** Update File: src/fixture.ts
+@@
+-const previous = 1;
++const next = 2;
+*** End Patch`;
+const apply = tools.apply_patch;
+text(await apply(patch));
+const cmd = "cat " + "skills/fixture/SKILL.md";
+const r = await Promise.allSettled([tools['exec_command']({max_output_tokens: 60, cmd}), tools.exec_command({cmd:'git status --short --branch'})]);
+for (const result of r) text(result);
+text('tools.exec_command({cmd:"do not parse"})');"#;
     page(&root, "script-thread_followup", "script-thread", 1, Some(json!({"thread_id":"script-thread",
         "end_byte_offset":first.metadata().unwrap().len(), "end_ordinal_exclusive":3})), vec![
         command, output("parent", 4, "Script completed\nOutput:\nextra log"),
-        script("unrelated", "two", 5, "text('standalone log')"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
+        script("unrelated", "two", 5, "await tools.view_image({path:'/tmp/different.png'})"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
         script("failed", "four", 8, "await tools.view_image({path:'/tmp/fixture.png'})"), failed, output("failed", 10, "Script failed: fixture"),
         script("mixed", "mixed", 11, "await tools.exec_command({cmd:'false'}); await tools.update_plan({})"), mixed, output("mixed", 13, "Script completed"),
+        script("patch", "patch", 14, &standalone_patch), file_change, output("patch", 16, "Script completed\nOutput:\nDone"),
+        script("batch", "batch", 17, batch), output("batch", 18, "Script completed\nOutput:\nCombined stdout"),
+        script("running", "async", 19, "text(await tools.write_stdin({session_id:42,chars:''}));"),
+        output("running", 20, "Script running with cell ID g25"), comparison,
     ]);
     let view = read_session_mode(&root, "script-thread", ReadMode::View).unwrap();
     let blocks: Vec<_> = view.events.iter().filter_map(|event| event.pointer("/message/content/0")).collect();
@@ -710,4 +734,23 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
     assert!(blocks.iter().any(|block| block["id"] == "mixed" && block["name"] == "exec"));
     let mixed_result = blocks.iter().find(|block| block["tool_use_id"] == "mixed-child").unwrap();
     assert_eq!(mixed_result["error_summary"], "fixture failure");
+    let compare = blocks.iter().find(|block| block["id"] == "compare").unwrap();
+    assert_eq!(compare["ops"][0]["outcome"], "differences");
+    assert_eq!(compare["status"], "error");
+    assert!(!blocks.iter().any(|block| block["id"] == "patch"));
+    let patch = blocks.iter().find(|block| block["id"] == "patch-child").unwrap();
+    assert_eq!(patch["ops"][0]["kind"], "write");
+    assert_eq!(load(&patch["script_result"])["content"], "Script completed\nOutput:\nDone");
+    let wrapper = blocks.iter().find(|block| block["id"] == "batch").unwrap();
+    let calls = wrapper["ops"][0]["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0]["changes"][0]["path"], "src/fixture.ts");
+    assert!(calls[0]["changes"][0].get("hunks").is_none());
+    assert_eq!(calls[1]["shell"]["steps"][0]["path"], "skills/fixture/SKILL.md");
+    assert_eq!(calls[2]["shell"]["head"], "git status --short --branch");
+    assert_eq!(wrapper["ops"][0]["features"], json!(["output", "parallel"]));
+    assert_eq!(load(wrapper)["ops"][0]["calls"][0]["changes"][0]["hunks"][0]["lines"][1], "+const next = 2;");
+    let running = blocks.iter().copied().find(|block| block["tool_use_id"] == "running").unwrap();
+    assert_eq!(running["status"], "running");
+    assert_eq!(load(running)["status"], "running");
 }

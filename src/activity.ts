@@ -50,13 +50,18 @@ export function activityItems(parts: SessionBlock[]): ActivityItem[] {
   return items;
 }
 
-export function noMatch({ part, op }: ToolItem) {
+/** 退出码 1 的正常结果：调用记录已含结论时直接采用，否则用结果上的退出码和输出形态核对静态含义。 */
+const exitOneEvidence = { no_match: "empty", differences: "diff" } as const;
+
+export function commandOutcome({ part, op }: ToolItem) {
+  if (op?.kind !== "shell" || isDenied(part.result)) return;
+  if (op.outcome) return op.outcome;
   const { result } = part;
-  return op?.kind === "shell" && (op.no_match || op.search_exit_one && result?.exit_code === 1 && result.empty_command_output) && !isDenied(result);
+  if (op.exit_one && result?.exit_code === 1 && result.command_output_kind === exitOneEvidence[op.exit_one]) return op.exit_one;
 }
 
 export function itemStatus(item: ToolItem) {
-  if (noMatch(item)) return "completed";
+  if (commandOutcome(item)) return "completed";
   const { part, op } = item;
   if (op?.kind === "shell" && op.exit_code !== undefined) {
     if (part.content.status === "error" || part.result?.status === "error") return "error";
