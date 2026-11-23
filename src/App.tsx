@@ -11,6 +11,8 @@ import SessionDeleteDialog, { type SessionDeletion, type SessionDeleteTarget } f
 import BatchDeleteProgress from "./components/BatchDeleteProgress";
 import ConfigPanel from "./components/ConfigPanel";
 import UsagePanel from "./usage/UsagePanel";
+import { findRequestSession } from "./usage/requestSession";
+import type { RequestEvent } from "./usage/types";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
 import ReadDiagnostics from "./components/ReadDiagnostics";
@@ -19,7 +21,7 @@ import { sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
-import { catalogFilterFor } from "./catalogCache";
+import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
 import { useUiPreference } from "./useUiPreference";
 import type { SessionReading } from "./sessionContent";
 import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
@@ -53,6 +55,7 @@ export default function App() {
   const [readRequest, setReadRequest] = useState<{ session: SessionMeta; pending: boolean; error: string | null } | null>(null);
   const [searchTarget, setSearchTarget] = useState<ConversationSearchTarget | null>(null);
   const [filter, setFilter] = useUiPreference("sessionList");
+  const [requestReveal, setRequestReveal] = useState(DEFAULT_CATALOG_FILTER);
   const [configRefreshKey, setConfigRefreshKey] = useState(0);
   const [batchMode, setBatchMode] = useState(false);
   const [checkedSessionKeys, setCheckedSessionKeys] = useState<Set<string>>(new Set());
@@ -132,8 +135,11 @@ export default function App() {
   const usageAgent = availableAgents.some(agent => agent.id === preferredAgents.usage) ? preferredAgents.usage : "all";
   const supportsArchivedSessions = currentAgent?.supportsArchivedSessions;
   const catalogFilter = useMemo(
-    () => catalogFilterFor(filter, supportsArchivedSessions),
-    [filter, supportsArchivedSessions],
+    () => catalogFilterFor({
+      includeEmpty: filter.includeEmpty || requestReveal.includeEmpty,
+      includeArchived: filter.includeArchived || requestReveal.includeArchived,
+    }, supportsArchivedSessions),
+    [filter, requestReveal, supportsArchivedSessions],
   );
   const { includeArchived } = catalogFilter;
   const onWatchError = useCallback(() => showToast("会话可能无法自动更新。切回应用可重试。", true), [showToast]);
@@ -148,6 +154,13 @@ export default function App() {
   const clearBatchSelection = () => {
     setCheckedSessionKeys(new Set());
     setBatchFailures([]);
+  };
+
+  const selectSessionScope = (project: string | null) => {
+    clearBatchSelection();
+    setBatchMode(false);
+    closeSessionDetail();
+    setSelectedProject(project);
   };
 
   const changeTab = (next: Tab) => {
@@ -172,10 +185,8 @@ export default function App() {
     if (!available && !(tab === "usage" && id === "all")) return;
     protectConfig(() => {
       if (available && id !== selectedAgent) {
-        clearBatchSelection();
-        setBatchMode(false);
-        closeSessionDetail();
-        setSelectedProject(null);
+        selectSessionScope(null);
+        setRequestReveal(DEFAULT_CATALOG_FILTER);
       }
       setPreferredAgents(current => ({ local: available ? id : current.local, usage: id }));
     }, "切换 Agent");
@@ -183,10 +194,7 @@ export default function App() {
 
   const selectProject = (dirName: string | null) => {
     if (sessionActionsBusy || mutationRunning.current) return;
-    clearBatchSelection();
-    setBatchMode(false);
-    closeSessionDetail();
-    setSelectedProject(dirName);
+    selectSessionScope(dirName);
   };
 
   const { groups: sidebarGroups, byGroup, hints: groupHints, projectlessKeys: hiddenPathKeys } = catalogGroups(catalog);
@@ -228,8 +236,17 @@ export default function App() {
   const changeFilter = (next: CatalogFilter) => {
     if (sessionActionsBusy || mutationRunning.current) return;
     clearBatchSelection();
-    setFilter(supportsArchivedSessions ? next : { ...next, includeArchived: filter.includeArchived });
-    if (!next.includeArchived && (selectedDetail?.meta ?? readRequest?.session)?.archived) closeSessionDetail();
+    const changedEmpty = next.includeEmpty !== catalogFilter.includeEmpty;
+    const changedArchived = supportsArchivedSessions && next.includeArchived !== catalogFilter.includeArchived;
+    setRequestReveal(current => ({
+      includeEmpty: !changedEmpty && current.includeEmpty,
+      includeArchived: !changedArchived && current.includeArchived,
+    }));
+    setFilter({
+      includeEmpty: changedEmpty ? next.includeEmpty : filter.includeEmpty,
+      includeArchived: changedArchived ? next.includeArchived : filter.includeArchived,
+    });
+    if (changedArchived && !next.includeArchived && (selectedDetail?.meta ?? readRequest?.session)?.archived) closeSessionDetail();
   };
 
   const openSession = (session: SessionMeta, toggleSelection = false) => {
@@ -253,12 +270,12 @@ export default function App() {
   const loadSession = async (agentId: string, s: SessionMeta, refreshStamp?: string) => {
     const generation = ++detailRequestGeneration.current;
     const key = sessionKey(s);
-    const keep = !!detail && sessionKey(detail.meta) === key;
+    const keep = tab === "sessions" && agentId === selectedAgent && !!detail && sessionKey(detail.meta) === key;
     const refresh = refreshStamp !== undefined;
-    const hit = refresh ? undefined : contentSearch.hits.get(key);
+    const hit = refresh || tab !== "sessions" ? undefined : contentSearch.hits.get(key);
     const target = hit ? { ...hit, query: search.trim() } : null;
     if (!refresh) {
-      const row = findCatalogSession(s);
+      const row = agentId === selectedAgent && tab === "sessions" ? findCatalogSession(s) : s;
       detailContentVersion.current = { key, stamp: row && !row.statsPending ? sessionContentStamp(row) : null };
       if (!keep) setLoadedSession(null);
       setReadRequest(current => ({
@@ -274,6 +291,9 @@ export default function App() {
         detailContentVersion.current = { key, stamp: refreshStamp };
       } else {
         setReadRequest(null);
+        if (tab === "usage" && s.statsPending && d.meta.realUserCount === 0) {
+          setRequestReveal(current => ({ ...current, includeEmpty: true }));
+        }
         // 保持定位对象稳定，避免刷新时跳回命中处。
         setSearchTarget(current => keep && sameSearchTarget(current, target) ? current : target);
       }
@@ -296,6 +316,30 @@ export default function App() {
       }
       catalogCache.setReadError(agentId, s, error);
       setReadRequest({ session: s, pending: false, error });
+    }
+  };
+
+  const openRequestSession = async (event: RequestEvent, signal: AbortSignal) => {
+    const agent = availableAgents.find(agent => agent.id === event.agent);
+    if (!agent || tab !== "usage" || sessionActionsBusy || mutationRunning.current) return;
+
+    try {
+      const scope = catalogFilterFor({ includeEmpty: true, includeArchived: true }, agent.supportsArchivedSessions);
+      const source = await catalogCache.load(agent.id, scope, api.nextCatalogGeneration());
+      if (signal.aborted) return;
+      const session = findRequestSession(source, event);
+      if (!session) {
+        showToast("未找到可打开的关联会话。", true);
+        return;
+      }
+      selectSessionScope(null);
+      setSearch("");
+      setRequestReveal({ includeEmpty: !session.statsPending && session.realUserCount === 0, includeArchived: !!session.archived });
+      setPreferredAgents(current => ({ ...current, local: agent.id }));
+      changeTab("sessions");
+      void loadSession(agent.id, session);
+    } catch (error) {
+      if (!signal.aborted) showToast(`无法查找关联会话：${String(error)}`, true);
     }
   };
 
@@ -541,7 +585,7 @@ export default function App() {
           )}
         </main>
       ) : detectedAgents === null ? <main className="main single"><div className="placeholder">正在读取 Agent…</div></main>
-        : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} showToast={showToast} />}
+        : <UsagePanel agents={agents} agent={usageAgent} onRequestCounts={setRequestCounts} onOpenSession={openRequestSession} showToast={showToast} />}
 
       {configNavigation && <ConfirmDialog title="放弃未保存的修改？" message={`${configNavigation.label}后，未保存的配置将丢失。`} confirmLabel="放弃修改" onCancel={() => setConfigNavigation(null)} onConfirm={() => {
         const action = configNavigation.action;

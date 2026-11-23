@@ -50,13 +50,22 @@ try {
   await addUsageInitScript(page, (fixture, createCollector) => {
     Object.defineProperty(document, 'hasFocus', { value: () => false });
     const names = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', qoder: 'Qoder', pi: 'Pi' };
-    const state = window.__EVENTS__ = { fixture, calls: [], fail: false, failCopy: false, delay: false, release: null, revision: '1' };
+    const state = window.__EVENTS__ = { fixture, calls: [], fail: false, failCopy: false, delay: false, release: null, revision: '1', sessions: {}, delayCatalog: false, releaseCatalog: null };
     state.collector = createCollector([]);
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: state.collector.bridge(async (cmd, args = {}) => {
       state.calls.push({ cmd, args });
       if (cmd === 'plugin:clipboard-manager|write_text' && state.failCopy) throw Error('Clipboard unavailable');
-      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsFork: false, dataDir: null, deletePolicy: 'trash' }));
-      if (cmd === 'catalog') return { sessions: [], projects: [], warnings: [] };
+      if (cmd === 'list_agents') return Object.entries(names).map(([id, displayName]) => ({ id, displayName, installed: true, supportsArchivedSessions: id === 'codex', supportsFork: false, dataDir: null, deletePolicy: 'trash' }));
+      if (cmd === 'catalog') {
+        if (state.delayCatalog) { state.delayCatalog = false; await new Promise(resolve => state.releaseCatalog = resolve); }
+        const sessions = (state.sessions[args.agent] ?? []).filter(session => !session.archived || args.includeArchived);
+        return { sessions, projects: sessions.map(session => ({ dirName: session.projectDir, displayPath: session.cwd, sessionCount: 1, lastActivity: null })), warnings: [] };
+      }
+      if (cmd === 'read_session') {
+        const meta = state.sessions[args.agent]?.find(s => s.sessionId === args.sessionId && s.projectDir === args.projectDir);
+        if (!meta) throw Error('Unknown session');
+        return { meta, events: [{ type: 'user', message: { content: meta.title } }] };
+      }
       if (cmd === 'read_usage_summary') return { rows: fixture.events.map(e => ({ ...e, bucketStart: null, date: new Date(e.time).toISOString().slice(0,10), totalTokens: e.inputTokens + e.outputTokens + e.unclassifiedTokens })), syncedAgents: Object.keys(names), revision: '0' };
       if (cmd === 'read_request_events') {
         if (state.fail) throw new Error('fixture read failure');
@@ -447,4 +456,88 @@ try {
   await page.getByRole('button', { name: '会话', exact: true }).click();
   assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(c => c.cmd === 'cancel_request_events')));
   console.log(`PASS: bounded 960/1280/1600/2200 layouts, screenshot, cancellation, no runtime errors (${engine})`);
+
+  const noon = new Date(2026, 10, 23, 12);
+  await page.clock.setFixedTime(noon);
+  await page.evaluate(time => {
+    const state = window.__EVENTS__;
+    const start = time - 12 * 3600000;
+    state.fixture.timeline = { bounds: Array.from({ length: 25 }, (_, i) => start + i * 3600000), success: Array(24).fill(0), failed: Array(24).fill(0), untimed: { success: 0, failed: 0 } };
+    state.fixture.events.forEach((event, i) => { event.time = time - 60000 * i; });
+    const meta = (sessionId, projectDir, cwd, title, archived = false) => ({ sessionId, projectDir, cwd, title, archived,
+      hasTranscript: true, userCount: 1, realUserCount: 1, assistantCount: 0, assistantTextCount: 0, sizeBytes: 100 });
+    state.sessions.codex = [meta('codex-session', 'codex-source', '/fixture/codex-start', '关联的归档 Codex 会话', true)];
+    const workerRequest = state.fixture.events.find(event => event.request.subagentId === 'worker');
+    state.sessions.claude = [
+      meta('worker', 'wrong-a', '/fixture/unrelated-a', '同 ID 的子会话 A'),
+      meta('worker', 'wrong-b', '/fixture/unrelated-b', '同 ID 的子会话 B'),
+      meta('session-one', 'claude-source', workerRequest.request.absoluteProjectPath, '关联的 Claude 主会话'),
+    ];
+  }, noon.getTime());
+  await usageTab.click();
+  await page.getByRole('button', { name: '今日', exact: true }).click();
+  const axis = table.locator('.request-timeline-axis');
+  const nowMarker = axis.getByText('现在', { exact: true });
+  await nowMarker.waitFor();
+  for (const width of [960, 1600]) {
+    await page.setViewportSize({ width, height: 1080 });
+    assert.equal(await axis.getByText('12:00', { exact: true }).isVisible(), false);
+    await axis.getByText('06:00', { exact: true }).waitFor();
+    assert.ok(await axis.locator('span').evaluateAll(labels => {
+      const boxes = labels.filter(label => getComputedStyle(label).visibility === 'visible')
+        .map(label => label.getBoundingClientRect()).sort((a, b) => a.left - b.left);
+      return boxes.length > 2 && boxes.every((box, i) => i === 0 || box.left >= boxes[i - 1].right);
+    }));
+  }
+  console.log(`PASS: the noon marker keeps nearby ticks from overlapping at narrow and wide widths (${engine})`);
+
+  const openCodex = codex.getByRole('button', { name: '打开关联会话 codex-session', exact: true });
+  await page.evaluate(() => { window.__EVENTS__.delayCatalog = true; });
+  await openCodex.click();
+  await page.waitForFunction(() => !!window.__EVENTS__.releaseCatalog);
+  await page.getByRole('tab', { name: '统计分析', exact: true }).click();
+  await page.evaluate(() => { window.__EVENTS__.releaseCatalog(); });
+  await requestTab.click();
+  assert.equal(await usageTab.getAttribute('aria-current'), 'page');
+
+  await page.evaluate(() => { window.__EVENTS__.fail = true; });
+  await table.getByRole('button', { name: '下一页', exact: true }).click();
+  const retryPage = table.getByRole('button', { name: '重试', exact: true });
+  await retryPage.waitFor();
+  await page.evaluate(() => { window.__EVENTS__.fail = false; });
+  await page.evaluate(() => { const state = window.__EVENTS__; state.delayCatalog = true; state.releaseCatalog = null; });
+  await openCodex.click();
+  await page.waitForFunction(() => !!window.__EVENTS__.releaseCatalog);
+  await retryPage.click();
+  await page.evaluate(() => { window.__EVENTS__.releaseCatalog(); });
+  await page.getByText('第 51–100 条，共 110 条', { exact: true }).waitFor();
+  assert.equal(await usageTab.getAttribute('aria-current'), 'page');
+  await table.getByRole('button', { name: '首页', exact: true }).click();
+
+  await openCodex.click();
+  await page.locator('.detail-body').getByText('关联的归档 Codex 会话', { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(call => call.cmd === 'read_session' && call.args.agent === 'codex' && call.args.projectDir === 'codex-source')));
+  assert.equal(await page.getByRole('checkbox', { name: '显示已归档', exact: true }).isChecked(), true);
+  await page.getByRole('checkbox', { name: '显示空会话', exact: true }).check();
+  assert.ok(await page.locator('.detail-body').getByText('关联的归档 Codex 会话', { exact: true }).isVisible());
+
+  await usageTab.click();
+  const openWorker = worker.getByRole('button', { name: '打开关联会话 worker', exact: true });
+  await page.evaluate(() => {
+    const state = window.__EVENTS__;
+    state.parent = state.sessions.claude.pop();
+    state.sessions.claude.push({ ...state.parent, cwd: '/fixture/unrelated-parent' });
+  });
+  await openWorker.click();
+  await page.getByText('未找到可打开的关联会话。', { exact: true }).waitFor();
+  await page.evaluate(() => {
+    const state = window.__EVENTS__;
+    state.sessions.claude.pop();
+    state.sessions.claude.push(state.parent);
+  });
+  await openWorker.click();
+  await page.locator('.detail-body').getByText('关联的 Claude 主会话', { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => window.__EVENTS__.calls.some(call => call.cmd === 'read_session' && call.args.agent === 'claude' && call.args.sessionId === 'session-one')));
+  assert.deepEqual(errors, []);
+  console.log(`PASS: request rows open the correct cross-agent session, resolve the parent and cancel outdated navigation (${engine})`);
 } finally { await browser?.close(); rmSync(dir, { recursive: true, force: true }); }
