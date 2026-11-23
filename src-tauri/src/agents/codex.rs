@@ -15,6 +15,7 @@ mod projects;
 mod response;
 mod storage;
 mod tool_output;
+mod tools;
 
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
@@ -114,7 +115,8 @@ struct ReadLimit {
 
 #[cfg(test)]
 fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<ParsedRollout> {
-    read_rollout(
+    let mut activity = tools::Activity::default();
+    let mut parsed = read_rollout(
         path,
         if collect_events {
             ReadMode::Events
@@ -123,7 +125,15 @@ fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<Parse
         },
         ReadLimit::default(),
         None,
-    )
+        &mut activity,
+    );
+    match &mut parsed {
+        super::ParseOutcome::Ok(rollout) | super::ParseOutcome::Degraded(rollout, _) => {
+            activity.remove_redundant_scripts(&mut rollout.events);
+        }
+        super::ParseOutcome::Failed(_) => {}
+    }
+    parsed
 }
 
 #[derive(Deserialize)]
@@ -146,6 +156,17 @@ struct ToolHeader<'a> {
     name: Option<String>,
     #[serde(borrow)]
     output: Option<&'a RawValue>,
+    #[serde(borrow)]
+    arguments: Option<&'a RawValue>,
+    #[serde(borrow)]
+    input: Option<&'a RawValue>,
+    #[serde(borrow)]
+    internal_chat_message_metadata_passthrough: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ExecMetadata {
+    turn_id: String,
 }
 
 #[derive(Deserialize)]
@@ -154,13 +175,17 @@ struct ModelContext {
 }
 
 #[derive(Deserialize)]
-struct RuntimeEvent {
+struct RuntimeEvent<'a> {
     #[serde(rename = "type")]
     kind: String,
     thread_id: Option<String>,
+    turn_id: Option<String>,
     thread_settings: Option<ModelContext>,
     reason: Option<String>,
     error: Option<RuntimeError>,
+    #[serde(borrow)]
+    item: Option<&'a RawValue>,
+    started_at_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -184,6 +209,7 @@ fn read_rollout(
     mode: ReadMode,
     limit: ReadLimit,
     mut dedup: Option<&mut history::EventDedup>,
+    activity: &mut tools::Activity,
 ) -> super::ParseOutcome<ParsedRollout> {
     let file = match storage::Reader::open(path) {
         Ok(f) => f,
@@ -301,6 +327,41 @@ fn read_rollout(
                             parsed.events.push(json!({"type":"system","timestamp":ts,"cwd":parsed.cwd,
                                 "content":text}));
                         }
+                        "item_completed" if collect_events => {
+                            let Some(item) = event.item.filter(|item| serde_json::from_str::<tools::ItemHeader>(item.get())
+                                .is_ok_and(|header| header.is_tool() && !header.id.is_some_and(|id| activity.calls.contains(id))))
+                            else {
+                                continue;
+                            };
+                            if dedup.as_deref_mut().is_some_and(|seen| {
+                                !seen.include(&serde_json::from_slice(&line).unwrap_or(Value::Null))
+                            }) {
+                                continue;
+                            }
+                            let item: Value = serde_json::from_str(item.get()).unwrap_or(Value::Null);
+                            let view = mode == ReadMode::View;
+                            let blocks = tools::blocks(&item, view);
+                            if blocks.is_empty() {
+                                continue;
+                            }
+                            if let (Some(turn), Some(start)) = (event.turn_id, event.started_at_ms) {
+                                activity.record_execution(turn, start, &item);
+                            }
+                            let token = view.then(|| deferred::register(path, identity, line_offset, &line));
+                            for (index, mut block) in blocks.into_iter().enumerate() {
+                                if let Some(token) = &token {
+                                    block["deferred"] = json!(format!("{token}#{index}"));
+                                }
+                                let role = if block["type"] == "tool_use" { "assistant" } else { "user" };
+                                let mut event = json!({"type":role,"timestamp":ts,
+                                    "uuid":format!("{}:{index}", item["id"].as_str().unwrap_or_default()),
+                                    "message":{"role":role,"content":[block]}});
+                                if let (Some(model), "assistant") = (&parsed.model, role) {
+                                    event["message"]["model"] = json!(model);
+                                }
+                                parsed.events.push(event);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -336,6 +397,27 @@ fn read_rollout(
         }
         if rtype == "response_item" && dedup.as_deref_mut().is_some_and(|seen| !seen.include(&v)) {
             continue;
+        }
+        if collect_events {
+            match (shallow.kind.as_deref(), &shallow.call_id) {
+                (Some("function_call" | "custom_tool_call"), Some(id)) => {
+                    activity.calls.insert(id.clone());
+                    if shallow.name.as_deref() == Some("exec") {
+                        let metadata = shallow.internal_chat_message_metadata_passthrough
+                            .and_then(|raw| serde_json::from_str::<ExecMetadata>(raw.get()).ok());
+                        let input = shallow.input.and_then(|input| serde_json::from_str::<String>(input.get()).ok());
+                        if let (Some(metadata), Some(at), Some(input)) = (metadata, super::timestamp(ts), input) {
+                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input);
+                        }
+                    }
+                }
+                (Some("custom_tool_call_output"), Some(id)) => {
+                    if let (Some(at), Some(output)) = (super::timestamp(ts), shallow.output) {
+                        activity.finish_exec(id, at.timestamp_millis(), output);
+                    }
+                }
+                _ => {}
+            }
         }
         let deferred_payload;
         let payload = if tool && mode == ReadMode::Summary {
@@ -415,7 +497,18 @@ fn read_rollout(
                             Some("function_call" | "custom_tool_call")
                         );
                         let block = if call {
-                            json!({"type":"tool_use","id":shallow.call_id.unwrap_or_default(),"name":shallow.name.unwrap_or_else(|| "?".into()),"deferred":token})
+                            let name = shallow.name.unwrap_or_else(|| "?".into());
+                            let mut block = json!({"type":"tool_use","id":shallow.call_id.unwrap_or_default(),"name":name,"deferred":token});
+                            let input = match (shallow.arguments, shallow.input) {
+                                (Some(arguments), _) => serde_json::from_str::<String>(arguments.get()).ok()
+                                    .and_then(|arguments| serde_json::from_str::<Value>(&arguments).ok()),
+                                (None, Some(input)) => serde_json::from_str::<Value>(input.get()).ok(),
+                                _ => None,
+                            };
+                            if let Some(op) = input.and_then(|input| tools::describe(&name, &input)) {
+                                block["ops"] = json!([op.summary()]);
+                            }
+                            block
                         } else {
                             json!({"type":"tool_result","is_error":shallow.output.is_some_and(tool_output::raw_failed),"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token})
                         };
@@ -703,9 +796,7 @@ impl AgentSource for CodexSource {
         Ok((catalog, refinement))
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
-        // 旧 Codex 令牌无前缀；只识别既有 SHA-256 形式，实际读取仍须命中引用表。
-        (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| deferred::read(token))
+        deferred::read(token)
     }
     fn read_session_view(
         &self,

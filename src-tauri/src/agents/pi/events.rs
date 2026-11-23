@@ -21,16 +21,16 @@ fn message_event(entry: &Value, cwd: Option<&str>, role: &str, content: Value) -
         "message":{"role":role,"content":content}})
 }
 
-fn blocks(content: &Value, detail: bool) -> Vec<Value> {
-    if let Some(text) = content.as_str().filter(|text| !text.trim().is_empty()) {
-        return vec![json!({"type":"text","text":text.trim()})];
+/// 消息正文去掉首尾空白；工具输出保持原样，读取结果的首行缩进和行号才不会错位。
+fn blocks(content: &Value, detail: bool, trim: bool) -> Vec<Value> {
+    let clean = |text: &str| Some(if trim { text.trim() } else { text }).filter(|text| !text.trim().is_empty())
+        .map(|text| json!({"type":"text","text":text}));
+    if let Some(text) = content.as_str() {
+        return clean(text).into_iter().collect();
     }
     content.as_array().into_iter().flatten().filter_map(|part| {
         match part["type"].as_str()? {
-            "text" => {
-                let text = part["text"].as_str()?.trim();
-                (!text.is_empty()).then(|| json!({"type":"text","text":text}))
-            }
+            "text" => clean(part["text"].as_str()?),
             "thinking" => {
                 let text = part["thinking"].as_str().filter(|text| !text.trim().is_empty());
                 text.map(|text| json!({"type":"thinking","thinking":if detail { text } else { "" }}))
@@ -90,7 +90,7 @@ pub(super) fn entry(v: &Value, cwd: Option<&str>, detail: bool) -> Vec<Value> {
     match role {
         "user" | "assistant" => {
             let mut events = Vec::new();
-            let mut content = blocks(&message["content"], detail);
+            let mut content = blocks(&message["content"], detail, true);
             if role == "user" {
                 if let Some(first) = content.first_mut() {
                     if let Some((raw, name, rest)) = first["text"].as_str().and_then(skill) {
@@ -125,10 +125,16 @@ pub(super) fn entry(v: &Value, cwd: Option<&str>, detail: bool) -> Vec<Value> {
             }
             events
         }
-        "toolResult" if detail => vec![message_event(v, cwd, "user", json!([{
-            "type":"tool_result","tool_use_id":message["toolCallId"],"is_error":message["isError"] == true,
-            "content":blocks(&message["content"], true)
-        }]))],
+        "toolResult" if detail => {
+            let mut event = message_event(v, cwd, "user", json!([{
+                "type":"tool_result","tool_use_id":message["toolCallId"],"is_error":message["isError"] == true,
+                "content":blocks(&message["content"], true, false)
+            }]));
+            if message["details"].is_object() {
+                event["details"] = message["details"].clone();
+            }
+            vec![event]
+        }
         "bashExecution" if detail => {
             let id = v["id"].as_str().map(|id| format!("bash:{id}"));
             let cancelled = message["cancelled"] == true;

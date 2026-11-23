@@ -121,6 +121,7 @@ pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi>
         }
     }
     meta.title = name.map(str::to_owned).or(first_user_text);
+    agents::tool_ops::describe_tools(&mut events, super::tools::describe);
     let parsed = ParsedPi { meta, events };
     if bad_lines > 0 {
         ParseOutcome::Degraded(parsed, agents::degraded_message(path, bad_lines))

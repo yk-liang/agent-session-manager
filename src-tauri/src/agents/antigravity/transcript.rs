@@ -186,6 +186,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             }
         }
         meta.model = current_model.filter(|name| name != "unknown");
+        crate::agents::tool_ops::describe_tools(&mut detail_events, super::tools::describe);
         Ok(SessionDetail { meta, events: detail_events, warnings })
     })
 }

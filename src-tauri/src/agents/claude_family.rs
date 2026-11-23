@@ -1,6 +1,7 @@
 //! Qoder 和 Claude Code 共用的 JSONL 会话解析。消息由 uuid 和 parentUuid 串联。
 
 mod context;
+mod tools;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
@@ -432,8 +433,12 @@ pub fn read_session(
         ));
     }
     let mut events = Vec::new();
+    let mut injected = std::collections::HashMap::new();
     // 同一份读取同时提取摘要和详情，保留阶段错误，避免二次打开时错误被替换。
     let outcome = parse_meta_with(&path, project_dir, opts, "session_detail", |v| {
+        if let (true, Some(call), Some(uuid), Some(text)) = (v["isMeta"] == true, v["sourceToolUseID"].as_str(), v["uuid"].as_str(), tools::injected_text(&v)) {
+            injected.insert(call.to_owned(), (uuid.to_owned(), text));
+        }
         match v.get("type").and_then(Value::as_str) {
             Some("user" | "assistant" | "system" | "developer" | "attachment") => {
                 events.extend(context::normalize(v));
@@ -446,6 +451,7 @@ pub fn read_session(
         super::ParseOutcome::Degraded(meta, warning) => (meta, vec![warning]),
         super::ParseOutcome::Failed(error) => return Err(error),
     };
+    tools::describe(&mut events, injected);
     Ok(SessionDetail {
         meta,
         events,

@@ -3,6 +3,7 @@
 
 mod events;
 mod storage;
+mod tools;
 mod transcript;
 #[cfg(test)]
 mod context_tests;

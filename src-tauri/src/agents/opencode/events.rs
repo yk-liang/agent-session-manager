@@ -1,5 +1,6 @@
 //! 保留消息、分段顺序；用户多段正文合并为一条指令，助手分段独立供虚拟列表渲染。
 use super::*;
+use crate::agents::tool_ops::Op;
 
 fn error_text(error: &Value) -> Option<&str> {
     [error, &error["message"], &error["data"]["message"], &error["type"], &error["name"], &error["kind"]]
@@ -32,8 +33,12 @@ pub(super) fn tool_blocks(
     } else {
         status
     };
-    let mut call = json!({"type":"tool_use", "id":identity,
-        "name":part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?")});
+    let name = part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?");
+    let mut call = json!({"type":"tool_use", "id":identity, "name":name});
+    let (ops, content) = super::tools::describe(name, state);
+    if !ops.is_empty() {
+        call["ops"] = if include_content { json!(ops) } else { json!(ops.into_iter().map(Op::summary).collect::<Vec<_>>()) };
+    }
     if let Some(description) = state
         .get("title")
         .and_then(Value::as_str)
@@ -60,6 +65,8 @@ pub(super) fn tool_blocks(
         if include_content {
             result["content"] = if let Some(error) = error_text(&state["error"]) {
                 with_error(error, output)
+            } else if let Some(text) = content {
+                json!(text)
             } else {
                 output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }))
             };

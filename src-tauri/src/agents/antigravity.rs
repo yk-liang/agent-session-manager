@@ -3,6 +3,7 @@ pub(crate) mod proto;
 pub(crate) mod storage;
 mod steps;
 mod summaries;
+mod tools;
 mod transcript;
 
 use super::{

@@ -14,6 +14,7 @@ mod events;
 mod model_tests;
 mod message_meta;
 mod storage;
+mod tools;
 #[cfg(test)]
 mod v2_tests;
 

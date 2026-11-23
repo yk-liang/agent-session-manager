@@ -14,6 +14,9 @@ struct OutputStatus<'a> {
 
 fn text_failed(text: &str) -> bool {
     let text = text.trim_start();
+    if text.starts_with("Script failed") {
+        return true;
+    }
     if !text.starts_with('{') {
         return text.lines().take_while(|line| !line.is_empty() && !line.starts_with("Output:"))
             .find_map(|line| line.strip_prefix("Process exited with code ")
@@ -49,6 +52,18 @@ pub(super) fn failed(output: &Value) -> bool {
 
 fn is_text(kind: Option<&str>) -> bool {
     kind.is_some_and(|kind| TEXT_BLOCK_TYPES.contains(&kind))
+}
+
+pub(super) fn script_completed(output: &RawValue) -> bool {
+    #[derive(Deserialize)]
+    struct Part {
+        text: Option<String>,
+    }
+    let first = match serde_json::from_str::<Vec<&RawValue>>(output.get()) {
+        Ok(parts) => parts.first().and_then(|part| serde_json::from_str::<Part>(part.get()).ok()).and_then(|part| part.text),
+        Err(_) => serde_json::from_str::<String>(output.get()).ok(),
+    };
+    first.is_some_and(|text| text.starts_with("Script completed"))
 }
 
 pub(super) fn raw_failed(output: &RawValue) -> bool {

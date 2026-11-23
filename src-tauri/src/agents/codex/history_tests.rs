@@ -657,3 +657,39 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
         "同长度原位改写必须拒绝旧引用"
     );
 }
+
+#[test]
+fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let origin = chrono::DateTime::parse_from_rfc3339("2099-12-31T00:00:00Z").unwrap().timestamp_millis();
+    let script = |id: &str, turn: &str, at: u64, input: &str| json!({"type":"response_item", "ordinal":at, "timestamp":format!("2099-12-31T00:00:{at:02}Z"),
+        "payload":{"type":"custom_tool_call","name":"exec","call_id":id,"input":input, "internal_chat_message_metadata_passthrough":{"turn_id":turn}}});
+    let output = |id: &str, at: u64, body: &str| json!({"type":"response_item", "ordinal":at, "timestamp":format!("2099-12-31T00:00:{at:02}Z"),
+        "payload":{"type":"custom_tool_call_output","call_id":id,"output":body}});
+    let first = page(&root, "script-thread", "script-thread", 0, None,
+        vec![message(1, "user", "Run a command"), script("parent", "one", 2, "await tools.exec_command({cmd:'printf child'})")]);
+    let command = json!({"type":"event_msg", "ordinal":3, "timestamp":"2099-12-31T00:00:03Z", "payload":{
+        "type":"item_completed","turn_id":"one","started_at_ms":origin+2500,"item":{"type":"CommandExecution", "id":"child", "command":["/bin/zsh","-lc","printf child"], "status":"completed", "exit_code":0,"aggregated_output":"child"}}});
+    let unrelated = json!({"type":"event_msg", "ordinal":6, "timestamp":"2099-12-31T00:00:06Z", "payload":{
+        "type":"item_completed","turn_id":"two","started_at_ms":origin+5500,"item":{"type":"ImageView", "id":"image", "path":"/tmp/fixture.png"}}});
+    let failed = json!({"type":"event_msg", "ordinal":9, "timestamp":"2099-12-31T00:00:09Z", "payload":{
+        "type":"item_completed","turn_id":"four","started_at_ms":origin+8500,"item":{"type":"ImageView", "id":"failed-child", "path":"/tmp/fixture.png"}}});
+    page(&root, "script-thread_followup", "script-thread", 1, Some(json!({"thread_id":"script-thread",
+        "end_byte_offset":first.metadata().unwrap().len(), "end_ordinal_exclusive":3})), vec![
+        command, output("parent", 4, "Script completed\nOutput:\nextra log"),
+        script("unrelated", "two", 5, "text('standalone log')"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
+        script("failed", "four", 8, "await tools.view_image({path:'/tmp/fixture.png'})"), failed, output("failed", 10, "Script failed: fixture"),
+    ]);
+    let view = read_session_mode(&root, "script-thread", ReadMode::View).unwrap();
+    let blocks: Vec<_> = view.events.iter().filter_map(|event| event.pointer("/message/content/0")).collect();
+    let load = |block: &Value| crate::agents::read_tool_payload(block["deferred"].as_str().unwrap()).unwrap();
+    assert!(!blocks.iter().any(|block| block["id"] == "parent" || block["tool_use_id"] == "parent"));
+    let child = blocks.iter().copied().find(|block| block["id"] == "child").unwrap();
+    assert_eq!(load(child)["input"]["cmd"], "printf child");
+    assert_eq!(load(&child["script_result"])["content"], "Script completed\nOutput:\nextra log");
+    let stdout = blocks.iter().copied().find(|block| block["tool_use_id"] == "child").unwrap();
+    assert_eq!(load(stdout)["content"], "child");
+    assert!(blocks.iter().any(|block| block["id"] == "unrelated"));
+    assert!(blocks.iter().any(|block| block["tool_use_id"] == "failed" && block["is_error"] == true));
+}

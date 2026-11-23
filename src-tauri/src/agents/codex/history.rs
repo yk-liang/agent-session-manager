@@ -53,7 +53,7 @@ pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<
     HEADERS.get_or_init(|| FileCache::new(4096)).load(
         "codex-header",
         std::slice::from_ref(path),
-        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::tools::Activity::default()).split()),
         |(header, warnings)| header.is_some() && warnings.is_empty(),
     )
 }
@@ -222,6 +222,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
     meta.source_files = pages.iter().map(|p| p.path.clone()).collect();
     let mut events = Vec::new();
     let mut dedup = EventDedup::default();
+    let mut activity = super::tools::Activity::default();
     let multiple_pages = chain.iter().filter(|(_, l)| l.bytes != Some(0)).count() > 1;
     for (index, limit) in chain {
         if limit.bytes == Some(0) {
@@ -238,6 +239,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
             } else {
                 None
             },
+            &mut activity,
         )
         .split();
         warnings.extend(ws);
@@ -274,6 +276,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         meta.assistant_text_count += p.assistant_text_count;
         events.extend(p.events);
     }
+    activity.remove_redundant_scripts(&mut events);
     Ok((
         SessionDetail {
             meta,
