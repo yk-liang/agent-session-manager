@@ -184,7 +184,10 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
     assert!(detail.events.iter().any(|event| event["type"] == "system" && event["content"] == "provider.unavailable"));
     assert!(detail.events.iter().any(|e| e["content"] == "轮次已中断"));
     assert!(detail.events.iter().any(|e| e["context"]["label"] == "技能上下文"));
-    assert!(detail.events.iter().any(|e| e["message"]["content"][0]["content"] == "退出码：2\n\nCommand output"));
+    assert!(detail.events.iter().any(|event| {
+        let result = &event["message"]["content"][0];
+        result["content"] == "退出码：2\n\nCommand output" && result["exit_code"] == 2
+    }));
     let content = &detail.events.last().unwrap()["message"]["content"];
     assert_eq!(content[0]["text"], "附件说明");
     assert_eq!(content[1]["filename"], "preview.png");

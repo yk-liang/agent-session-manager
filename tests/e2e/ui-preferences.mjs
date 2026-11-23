@@ -41,9 +41,9 @@ try {
 
   await page.goto(baseURL);
   await chooseAgent(page, 'codex');
-  await checkbox('显示空会话').check();
+  await checkbox('空会话').check();
   await card('空会话样例').waitFor();
-  await checkbox('显示已归档').check();
+  await checkbox('已归档').check();
   await card('归档会话样例').waitFor();
   await card('给笔记应用添加全文搜索').click();
   await checkbox('工具调用').uncheck();
@@ -52,17 +52,17 @@ try {
   // Legacy Markdown is enabled by the fixture; an explicit new false must override it.
   await checkbox('Markdown').uncheck();
   await chooseAgent(page, 'qoder');
-  await checkbox('显示空会话').uncheck();
-  assert.equal(await checkbox('显示已归档').count(), 0);
-  await checkbox('显示空会话').check();
+  await checkbox('空会话').uncheck();
+  assert.equal(await checkbox('已归档').count(), 0);
+  await checkbox('空会话').check();
   await chooseAgent(page, 'codex');
   await card('归档会话样例').waitFor();
   await page.getByRole('searchbox').fill('临时搜索');
   await page.reload();
   await card('归档会话样例').waitFor({ timeout: 3000 });
   assert.equal(await combo('当前 Agent').getAttribute('value'), 'codex');
-  assert.equal(await checkbox('显示空会话').isChecked(), true);
-  assert.equal(await checkbox('显示已归档').isChecked(), true);
+  assert.equal(await checkbox('空会话').isChecked(), true);
+  assert.equal(await checkbox('已归档').isChecked(), true);
   assert.equal(await page.getByRole('searchbox').inputValue(), '');
   const catalog = await firstCall('catalog');
   assert.deepEqual([catalog.agent, catalog.includeEmpty, catalog.includeArchived], ['codex', true, true]);

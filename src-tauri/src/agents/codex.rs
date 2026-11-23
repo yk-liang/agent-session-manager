@@ -8,13 +8,16 @@ mod context;
 #[cfg(test)]
 mod context_tests;
 pub(crate) mod deferred;
+pub(crate) mod deletion;
 mod history;
 #[cfg(test)]
 mod history_tests;
 mod projects;
 mod response;
 mod storage;
+mod thread;
 mod tool_output;
+mod tools;
 
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
@@ -26,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use super::{AgentSource, CatalogFilter, ConfigFile, DeletePolicy, SessionDetail, SessionMeta};
 use app_server::ThreadAction;
+pub use thread::ThreadMeta;
+use thread::ThreadHeader;
 
 fn codex_home() -> PathBuf {
     if let Ok(v) = std::env::var("CODEX_HOME") {
@@ -40,30 +45,20 @@ fn sessions_root() -> PathBuf {
     codex_home().join("sessions")
 }
 
+pub(crate) fn sqlite_home(home: &Path) -> PathBuf {
+    std::fs::read_to_string(home.join("config.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        .and_then(|config| config.get("sqlite_home")?.as_str().map(str::to_owned))
+        .or_else(|| std::env::var("CODEX_SQLITE_HOME").ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| home.join(super::expand_tilde(value.trim())))
+        .unwrap_or_else(|| home.to_path_buf())
+}
+
 fn escape_cwd(cwd: &str) -> String {
     let normalized = super::workspace_groups::normalized(Path::new(cwd));
     super::escape_path_id(&normalized.to_string_lossy())
-}
-
-/// 会话来源三态。官方协议中 source 可以是字符串（cli/vscode/exec/
-/// appServer/mcp/internal...）或对象（subagent 的 thread_spawn 信息），
-/// 且与 thread_source 相互独立。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SourceKind {
-    /// 字段缺失（旧版 rollout），按可交互会话处理
-    Missing,
-    /// cli / vscode：用户可交互、可恢复
-    Interactive,
-    /// 其余字符串或对象形式：非交互，绝不按旧版交互会话兜底
-    NonInteractive,
-}
-
-fn classify_source(payload: &Value) -> SourceKind {
-    match payload.get("source") {
-        None => SourceKind::Missing,
-        Some(Value::String(s)) if s == "cli" || s == "vscode" => SourceKind::Interactive,
-        Some(_) => SourceKind::NonInteractive,
-    }
 }
 
 #[derive(Clone)]
@@ -76,21 +71,20 @@ struct ParsedRollout {
     model: Option<String>,
     /// 写入方标识：codex_cli / Codex Desktop 等（不能用于区分交互性）
     originator: Option<String>,
-    /// 会话来源三态（官方协议，与 thread_source 独立）
-    source: SourceKind,
-    /// 线程来源（官方协议，与 source 独立）：user / subagent /
-    /// onboarding_checklist / feature 等
-    thread_source: Option<String>,
+    source: Option<Value>,
+    thread: ThreadHeader,
     created_ts: Option<String>,
     paginated: bool,
     history_base: Option<history::HistoryBase>,
     forked_from: Option<String>,
+    attached_thread: bool,
     first_ts: Option<String>,
     last_ts: Option<String>,
     user_count: u32,
     assistant_count: u32,
     real_user_count: u32,
     assistant_text_count: u32,
+    has_activity: bool,
     first_user_text: Option<String>,
     events: Vec<Value>,
     size_bytes: u64,
@@ -114,7 +108,8 @@ struct ReadLimit {
 
 #[cfg(test)]
 fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<ParsedRollout> {
-    read_rollout(
+    let mut activity = tools::Activity::default();
+    let mut parsed = read_rollout(
         path,
         if collect_events {
             ReadMode::Events
@@ -123,7 +118,15 @@ fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<Parse
         },
         ReadLimit::default(),
         None,
-    )
+        &mut activity,
+    );
+    match &mut parsed {
+        super::ParseOutcome::Ok(rollout) | super::ParseOutcome::Degraded(rollout, _) => {
+            activity.remove_redundant_scripts(&mut rollout.events);
+        }
+        super::ParseOutcome::Failed(_) => {}
+    }
+    parsed
 }
 
 #[derive(Deserialize)]
@@ -146,6 +149,17 @@ struct ToolHeader<'a> {
     name: Option<String>,
     #[serde(borrow)]
     output: Option<&'a RawValue>,
+    #[serde(borrow)]
+    arguments: Option<&'a RawValue>,
+    #[serde(borrow)]
+    input: Option<&'a RawValue>,
+    #[serde(borrow)]
+    internal_chat_message_metadata_passthrough: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ExecMetadata {
+    turn_id: String,
 }
 
 #[derive(Deserialize)]
@@ -154,13 +168,17 @@ struct ModelContext {
 }
 
 #[derive(Deserialize)]
-struct RuntimeEvent {
+struct RuntimeEvent<'a> {
     #[serde(rename = "type")]
     kind: String,
     thread_id: Option<String>,
+    turn_id: Option<String>,
     thread_settings: Option<ModelContext>,
     reason: Option<String>,
     error: Option<RuntimeError>,
+    #[serde(borrow)]
+    item: Option<&'a RawValue>,
+    started_at_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -184,6 +202,7 @@ fn read_rollout(
     mode: ReadMode,
     limit: ReadLimit,
     mut dedup: Option<&mut history::EventDedup>,
+    activity: &mut tools::Activity,
 ) -> super::ParseOutcome<ParsedRollout> {
     let file = match storage::Reader::open(path) {
         Ok(f) => f,
@@ -203,18 +222,20 @@ fn read_rollout(
         git_branch: None,
         model: None,
         originator: None,
-        source: SourceKind::Missing,
-        thread_source: None,
+        source: None,
+        thread: ThreadHeader::default(),
         created_ts: None,
         paginated: false,
         history_base: None,
         forked_from: None,
+        attached_thread: false,
         first_ts: None,
         last_ts: None,
         user_count: 0,
         assistant_count: 0,
         real_user_count: 0,
         assistant_text_count: 0,
+        has_activity: false,
         first_user_text: None,
         events: Vec::new(),
         size_bytes,
@@ -287,6 +308,9 @@ fn read_rollout(
             }
             "event_msg" => {
                 if let Ok(event) = serde_json::from_str::<RuntimeEvent>(raw_payload) {
+                    if matches!(event.kind.as_str(), "task_started" | "task_complete" | "turn_started" | "turn_completed" | "turn_aborted" | "error") {
+                        parsed.has_activity = true;
+                    }
                     match event.kind.as_str() {
                         "thread_settings_applied"
                             if event.thread_id.as_deref().is_none_or(|id| id == parsed.session_id) =>
@@ -300,6 +324,45 @@ fn read_rollout(
                             );
                             parsed.events.push(json!({"type":"system","timestamp":ts,"cwd":parsed.cwd,
                                 "content":text}));
+                        }
+                        "item_completed" if mode != ReadMode::Header => {
+                            let Some(item) = event.item.filter(|item| serde_json::from_str::<tools::ItemHeader>(item.get())
+                                .is_ok_and(|header| header.is_tool() && !header.id.is_some_and(|id| activity.calls.contains(id))))
+                            else {
+                                continue;
+                            };
+                            parsed.has_activity = true;
+                            if !collect_events {
+                                continue;
+                            }
+                            if dedup.as_deref_mut().is_some_and(|seen| {
+                                !seen.include(&serde_json::from_slice(&line).unwrap_or(Value::Null))
+                            }) {
+                                continue;
+                            }
+                            let item: Value = serde_json::from_str(item.get()).unwrap_or(Value::Null);
+                            let view = mode == ReadMode::View;
+                            let blocks = tools::blocks(&item, view);
+                            if blocks.is_empty() {
+                                continue;
+                            }
+                            if let (Some(turn), Some(start)) = (event.turn_id, event.started_at_ms) {
+                                activity.record_execution(turn, start, &item);
+                            }
+                            let token = view.then(|| deferred::register(path, identity, line_offset, &line));
+                            for (index, mut block) in blocks.into_iter().enumerate() {
+                                if let Some(token) = &token {
+                                    block["deferred"] = json!(format!("{token}#{index}"));
+                                }
+                                let role = if block["type"] == "tool_use" { "assistant" } else { "user" };
+                                let mut event = json!({"type":role,"timestamp":ts,
+                                    "uuid":format!("{}:{index}", item["id"].as_str().unwrap_or_default()),
+                                    "message":{"role":role,"content":[block]}});
+                                if let (Some(model), "assistant") = (&parsed.model, role) {
+                                    event["message"]["model"] = json!(model);
+                                }
+                                parsed.events.push(event);
+                            }
                         }
                         _ => {}
                     }
@@ -337,6 +400,31 @@ fn read_rollout(
         if rtype == "response_item" && dedup.as_deref_mut().is_some_and(|seen| !seen.include(&v)) {
             continue;
         }
+        parsed.has_activity |= tool || matches!(
+            shallow.kind.as_deref(),
+            Some("local_shell_call" | "local_shell_call_output" | "web_search_call" | "tool_search_call")
+        );
+        if collect_events {
+            match (shallow.kind.as_deref(), &shallow.call_id) {
+                (Some("function_call" | "custom_tool_call"), Some(id)) => {
+                    activity.calls.insert(id.clone());
+                    if shallow.name.as_deref() == Some("exec") {
+                        let metadata = shallow.internal_chat_message_metadata_passthrough
+                            .and_then(|raw| serde_json::from_str::<ExecMetadata>(raw.get()).ok());
+                        let input = shallow.input.and_then(|input| serde_json::from_str::<String>(input.get()).ok());
+                        if let (Some(metadata), Some(at), Some(input)) = (metadata, super::timestamp(ts), input) {
+                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input);
+                        }
+                    }
+                }
+                (Some("custom_tool_call_output"), Some(id)) => {
+                    if let (Some(at), Some(output)) = (super::timestamp(ts), shallow.output) {
+                        activity.finish_exec(id, at.timestamp_millis(), output);
+                    }
+                }
+                _ => {}
+            }
+        }
         let deferred_payload;
         let payload = if tool && mode == ReadMode::Summary {
             if matches!(
@@ -372,13 +460,8 @@ fn read_rollout(
                         .get("originator")
                         .and_then(Value::as_str)
                         .map(|s| s.to_string());
-                    // source 可以是字符串或对象（subagent 的 thread_spawn），
-                    // 三态分类：对象形式明确为非交互，不得落入 Missing 兜底
-                    parsed.source = classify_source(p);
-                    parsed.thread_source = p
-                        .get("thread_source")
-                        .and_then(Value::as_str)
-                        .map(|s| s.to_string());
+                    parsed.source = p.get("source").cloned();
+                    parsed.thread = ThreadHeader::read(p);
                     parsed.created_ts = p
                         .get("timestamp")
                         .and_then(Value::as_str)
@@ -400,6 +483,7 @@ fn read_rollout(
                         .get("forked_from_id")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    parsed.attached_thread = p.get("attached_thread").and_then(Value::as_bool).unwrap_or(false);
                     if mode == ReadMode::Header {
                         break;
                     }
@@ -415,9 +499,25 @@ fn read_rollout(
                             Some("function_call" | "custom_tool_call")
                         );
                         let block = if call {
-                            json!({"type":"tool_use","id":shallow.call_id.unwrap_or_default(),"name":shallow.name.unwrap_or_else(|| "?".into()),"deferred":token})
+                            let name = shallow.name.unwrap_or_else(|| "?".into());
+                            let mut block = json!({"type":"tool_use","id":shallow.call_id.unwrap_or_default(),"name":name,"deferred":token});
+                            let input = match (shallow.arguments, shallow.input) {
+                                (Some(arguments), _) => serde_json::from_str::<String>(arguments.get()).ok()
+                                    .and_then(|arguments| serde_json::from_str::<Value>(&arguments).ok()),
+                                (None, Some(input)) => serde_json::from_str::<Value>(input.get()).ok(),
+                                _ => None,
+                            };
+                            if let Some(op) = input.and_then(|input| tools::describe(&name, &input)) {
+                                block["ops"] = json!([op.summary()]);
+                            }
+                            block
                         } else {
-                            json!({"type":"tool_result","is_error":shallow.output.is_some_and(tool_output::raw_failed),"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token})
+                            let status = shallow.output.map(tool_output::raw_status).unwrap_or_default();
+                            let mut block = json!({"type":"tool_result","is_error":status.failed,"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
+                            if let Some(exit) = status.exit_code.filter(|_| shallow.kind.as_deref() == Some("function_call_output")) {
+                                block["exit_code"] = json!(exit);
+                            }
+                            block
                         };
                         let role = if call { "assistant" } else { "user" };
                         new_events.push(json!({"type":role,"timestamp":ts,"message":{"role":role,"content":[block]}}));
@@ -453,6 +553,7 @@ fn read_rollout(
                                 }
                             }
                             Some("assistant") => {
+                                parsed.has_activity = true;
                                 if collect_events {
                                     if let Some(model) = &parsed.model {
                                         ev["message"]["model"] = json!(model);
@@ -563,12 +664,13 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
             .map(escape_cwd)
             .unwrap_or_else(|| "-unknown".to_string()),
         cwd: p.cwd.clone(),
-        title: thread_name.cloned().or_else(|| p.first_user_text.clone()),
+        title: thread_name.cloned().or_else(|| p.first_user_text.clone()).or_else(|| p.thread.nickname.clone()),
         model: p.model.clone(),
         version: p.version.clone(),
         client: p.originator.clone(),
         git_branch: p.git_branch.clone(),
         entrypoint: None,
+        codex: Some(p.thread.meta.clone()),
         first_ts: p.first_ts.clone(),
         last_ts: p.last_ts.clone(),
         user_count: p.user_count,
@@ -581,18 +683,6 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         stats_pending: false,
         source_files: Vec::new(),
     }
-}
-
-/// 官方协议中 source 与 thread_source 是两个独立字段：
-/// - source：cli / vscode / exec / appServer / mcp / internal 等字符串，
-///   或对象（subagent 的 thread_spawn 信息）。三态判定：只有字段缺失
-///   才按旧版交互会话兜底；对象与未知字符串一律非交互
-/// - thread_source：user / subagent / onboarding_checklist / feature 等，
-///   只有 user（或缺失）是普通用户线程
-fn is_relevant_session(p: &ParsedRollout) -> bool {
-    let source_ok = p.source != SourceKind::NonInteractive;
-    let thread_ok = matches!(p.thread_source.as_deref(), None | Some("user"));
-    source_ok && thread_ok
 }
 
 #[cfg(test)]
@@ -609,7 +699,7 @@ fn read_session_mode(
     session_id: &str,
     mode: ReadMode,
 ) -> Result<SessionDetail, String> {
-    if session_id.len() > 64 || session_id.contains(['/', '\\', '\'']) {
+    if !valid_thread_id(session_id) {
         return Err("会话 ID 无效".into());
     }
     let mut warnings = Vec::new();
@@ -618,6 +708,8 @@ fn read_session_mode(
     let groups = history::group_pages(pages);
     let pages = groups.get(session_id).ok_or("未找到该 Codex 会话")?;
     let (mut detail, ws) = history::read(pages, mode)?;
+    thread::Relations::new(&groups, thread::spawn_edges_warned(root, &mut warnings))
+        .apply(session_id, detail.meta.codex.as_mut().unwrap());
     detail.meta.archived = storage::is_archived(root, &pages.last().unwrap().path);
     detail.warnings = ws;
     let names = root
@@ -630,15 +722,20 @@ fn read_session_mode(
     Ok(detail)
 }
 
+fn valid_thread_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn same_rollout_identity(a: &ParsedRollout, b: &ParsedRollout) -> bool {
     a.session_id == b.session_id
         && a.cwd == b.cwd
         && a.paginated == b.paginated
         && a.history_base == b.history_base
         && a.forked_from == b.forked_from
+        && a.attached_thread == b.attached_thread
         && a.created_ts == b.created_ts
         && a.source == b.source
-        && a.thread_source == b.thread_source
+        && a.thread == b.thread
 }
 
 pub(crate) fn transcript_session_id(path: &PathBuf) -> Result<Option<String>, String> {
@@ -658,6 +755,23 @@ pub(crate) fn transcript_session_id(path: &PathBuf) -> Result<Option<String>, St
 
 pub struct CodexSource;
 
+pub(crate) fn archive_snapshot() -> Result<Vec<super::ArchiveChange>, String> {
+    let root = sessions_root();
+    let mut warnings = Vec::new();
+    let paths = storage::rollouts(&root, true, &mut warnings, &|| false)?;
+    let groups = history::group_pages(history::read_headers(&paths, &mut warnings, &|| false)?);
+    Ok(groups.into_values().filter_map(|pages| {
+        let page = pages.last()?;
+        Some(super::ArchiveChange {
+            session: super::search::SessionRef {
+                session_id: page.header.session_id.clone(),
+                project_dir: page.header.cwd.as_deref().map(escape_cwd).unwrap_or_else(|| "-unknown".into()),
+            },
+            archived: storage::is_archived(&root, &page.path),
+        })
+    }).collect())
+}
+
 impl AgentSource for CodexSource {
     fn id(&self) -> &'static str {
         "codex"
@@ -676,8 +790,20 @@ impl AgentSource for CodexSource {
         let mut paths = super::AgentWatchPaths::transcripts("sessions", None);
         paths.extra_transcript_suffixes.push(".jsonl.zst");
         paths.transcript_dirs.push(PathBuf::from(storage::ARCHIVED_SESSIONS));
-        paths.root_files = vec!["session_index.jsonl", ".codex-global-state.json"];
+        paths.root_files = vec!["session_index.jsonl", ".codex-global-state.json", thread::STATE_DB, thread::STATE_WAL];
         paths
+    }
+    fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
+        let home = codex_home();
+        let sqlite = sqlite_home(&home);
+        let mut locations = vec![(home.clone(), self.watch_paths())];
+        if sqlite != home {
+            locations.push((sqlite, super::AgentWatchPaths {
+                root_files: vec![thread::STATE_DB, thread::STATE_WAL],
+                ..Default::default()
+            }));
+        }
+        locations
     }
     fn scan_catalog(
         &self,
@@ -703,9 +829,7 @@ impl AgentSource for CodexSource {
         Ok((catalog, refinement))
     }
     fn read_tool_payload(&self, token: &str) -> Option<Result<Value, String>> {
-        // 旧 Codex 令牌无前缀；只识别既有 SHA-256 形式，实际读取仍须命中引用表。
-        (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| deferred::read(token))
+        deferred::read(token)
     }
     fn read_session_view(
         &self,
@@ -732,9 +856,6 @@ impl AgentSource for CodexSource {
         }
         Ok(detail.events)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
-        app_server::update(ThreadAction::Delete, project_dir, session_id)
-    }
     fn delete_policy(&self) -> DeletePolicy {
         DeletePolicy::Permanent
     }
@@ -751,6 +872,21 @@ impl AgentSource for CodexSource {
         app_server::update(action, project_dir, session_id)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
+        if !valid_thread_id(session_id) {
+            return None;
+        }
+        let root = sessions_root();
+        let mut warnings = Vec::new();
+        let paths = storage::rollouts(&root, true, &mut warnings, &|| false).ok()?;
+        let groups = history::group_pages(history::read_headers(&paths, &mut warnings, &|| false).ok()?);
+        let pages = groups.get(session_id)?;
+        let latest = pages.last()?;
+        let mut thread = thread::metadata(&latest.header, pages);
+        thread::Relations::new(&groups, thread::spawn_edges(root.parent()?).ok()?)
+            .apply(session_id, &mut thread);
+        if !thread.can_resume || storage::is_archived(&root, &latest.path) {
+            return None;
+        }
         Some(format!(
             "{} resume {}",
             super::shell_quote("codex"),
@@ -823,87 +959,23 @@ mod tests {
     }
 
     #[test]
-    fn classify_source_three_states() {
-        use serde_json::json;
-        // 字段缺失 = 旧版 rollout
-        assert_eq!(classify_source(&json!({})), SourceKind::Missing);
-        // 交互来源
-        assert_eq!(
-            classify_source(&json!({"source":"cli"})),
-            SourceKind::Interactive
-        );
-        assert_eq!(
-            classify_source(&json!({"source":"vscode"})),
-            SourceKind::Interactive
-        );
-        // 其余字符串 = 非交互
-        assert_eq!(
-            classify_source(&json!({"source":"exec"})),
-            SourceKind::NonInteractive
-        );
-        assert_eq!(
-            classify_source(&json!({"source":"appServer"})),
-            SourceKind::NonInteractive
-        );
-        // 对象形式（subagent thread_spawn）= 非交互，绝不能落入 Missing
-        let obj =
-            json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"x","depth":1}}}});
-        assert_eq!(classify_source(&obj), SourceKind::NonInteractive);
-    }
-
-    #[test]
-    fn relevance_matrix_source_vs_thread_source() {
-        fn with(source: SourceKind, thread_source: Option<&str>) -> ParsedRollout {
-            ParsedRollout {
-                session_id: "x".into(),
-                cwd: None,
-                version: None,
-                git_branch: None,
-                model: None,
-                originator: None,
-                source,
-                thread_source: thread_source.map(String::from),
-                created_ts: None,
-                paginated: false,
-                history_base: None,
-                forked_from: None,
-                first_ts: None,
-                last_ts: None,
-                user_count: 0,
-                assistant_count: 0,
-                real_user_count: 1,
-                assistant_text_count: 0,
-                first_user_text: None,
-                events: Vec::new(),
-                size_bytes: 0,
-                decoded_size_bytes: Some(0),
-            }
+    fn codex_thread_source_retains_resume_and_parent_capabilities() {
+        for (payload, source, subagent, can_resume) in [
+            (json!({}), None, false, true),
+            (json!({"source":"vscode","thread_source":"user"}), Some("vscode"), false, true),
+            (json!({"source":"exec"}), Some("exec"), false, true),
+            (json!({"source":"cli","originator":"codex_exec"}), Some("exec"), false, true),
+            (json!({"source":"appServer"}), Some("appServer"), false, true),
+            (json!({"source":"mcp"}), Some("mcp"), false, true),
+            (json!({"source":"vscode","thread_source":"onboarding_checklist"}), Some("vscode"), false, false),
+            (json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}), Some("subagent"), true, false),
+            (json!({"thread_source":"subagent"}), None, true, false),
+        ] {
+            let meta = ThreadHeader::read(&payload).meta;
+            assert_eq!(meta.source.as_deref(), source);
+            assert_eq!(meta.subagent, subagent);
+            assert_eq!(meta.can_resume, can_resume);
         }
-        // 可交互：交互来源 × 用户线程（vscode+user 曾被旧实现误过滤）
-        assert!(is_relevant_session(&with(
-            SourceKind::Interactive,
-            Some("user")
-        )));
-        // 旧版 rollout 两字段缺失，按可交互处理
-        assert!(is_relevant_session(&with(SourceKind::Missing, None)));
-        // 非用户线程
-        assert!(!is_relevant_session(&with(
-            SourceKind::Interactive,
-            Some("onboarding_checklist")
-        )));
-        assert!(!is_relevant_session(&with(
-            SourceKind::Missing,
-            Some("subagent")
-        )));
-        // 非交互来源：对象形式 source 即使用户线程也不相关（曾被误判为旧版交互）
-        assert!(!is_relevant_session(&with(
-            SourceKind::NonInteractive,
-            Some("user")
-        )));
-        assert!(!is_relevant_session(&with(
-            SourceKind::NonInteractive,
-            None
-        )));
     }
 
     #[test]
@@ -1104,7 +1176,6 @@ mod tests {
         let main_file = day_dir.join("rollout-2099-12-31T00-00-00-it-a.jsonl");
         fs::write(&main_file, &main_content).unwrap();
 
-        // onboarding 引导会话（GUI 安装流程产生），应被过滤
         let gui_content = [
             format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","type":"session_meta","payload":{{"id":"{id_gui}","cwd":"/tmp/codex-it","originator":"Codex Desktop","source":"vscode","thread_source":"onboarding_checklist"}}}}"#),
             r#"{"timestamp":"2099-12-31T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"引导会话"}]}}"#.to_string(),
@@ -1116,7 +1187,6 @@ mod tests {
         )
         .unwrap();
 
-        // 子代理会话：source 是对象（非字符串）、thread_source=subagent，应被过滤
         let sub_content = [
             format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","type":"session_meta","payload":{{"id":"{id_sub}","cwd":"/tmp/codex-it","originator":"Codex Desktop","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{id_main}","depth":1}}}}}},"thread_source":"subagent"}}}}"#),
             r#"{"timestamp":"2099-12-31T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"子代理任务"}]}}"#.to_string(),
@@ -1142,32 +1212,34 @@ mod tests {
             .iter()
             .filter(|s| s.session_id.starts_with("it-"))
             .collect();
-        assert_eq!(ours.len(), 1, "onboarding/subagent 会话应被过滤");
-        assert_eq!(ours[0].session_id, id_main);
-        assert_eq!(ours[0].title.as_deref(), Some("集成测试消息"));
+        assert_eq!(ours.len(), 3);
+        let main = ours.iter().find(|meta| meta.session_id == id_main).unwrap();
+        assert_eq!(main.title.as_deref(), Some("集成测试消息"));
         let in_project = ours.iter().filter(|s| s.project_dir == project_id).count();
-        assert_eq!(in_project, 1, "项目分组应包含该会话");
+        assert_eq!(in_project, 3);
 
         let detail = read_session_in(&root, &id_main).unwrap();
         assert_eq!(detail.events.len(), 2);
-
-        let cmd = CodexSource.resume_command(&id_main, false).unwrap();
-        assert!(cmd.contains("resume"));
-        assert!(cmd.contains(&id_main));
+        let sub = read_session_in(&root, &id_sub).unwrap().meta.codex.unwrap();
+        assert!(sub.subagent && !sub.can_resume);
+        assert_eq!(sub.parent_id.as_deref(), Some(id_main.as_str()));
 
         let archived = storage::archived_root(&root);
         fs::create_dir(&archived).unwrap();
         fs::rename(&main_file, archived.join(main_file.file_name().unwrap())).unwrap();
-        assert!(catalog_in(&root, false).unwrap().sessions.is_empty());
+        let active = catalog_in(&root, false).unwrap();
+        assert_eq!(active.sessions.len(), 2);
+        assert_eq!(active.sessions.iter().find(|s| s.session_id == id_sub).unwrap().codex.as_ref().unwrap().orphan, Some(false));
 
         let filter = CatalogFilter { include_archived: true, ..Default::default() };
         let scan = catalog::Scan::new(&root, filter, &|| false).unwrap();
         for quick in [true, false] {
             let catalog = scan.read(quick, &|| false).unwrap();
-            assert_eq!(catalog.sessions.len(), 1);
-            assert!(catalog.sessions[0].archived);
-            assert_eq!(catalog.projects[0].session_count, 1);
-            assert_eq!(CodexSource.search_events(&catalog.sessions[0]).unwrap(), detail.events);
+            assert_eq!(catalog.sessions.len(), 3);
+            let archived = catalog.sessions.iter().find(|s| s.session_id == id_main).unwrap();
+            assert!(archived.archived);
+            assert_eq!(catalog.projects[0].session_count, 3);
+            assert_eq!(CodexSource.search_events(archived).unwrap(), detail.events);
         }
         let archived_detail = read_session_in(&root, &id_main).unwrap();
         assert!(archived_detail.meta.archived);

@@ -23,12 +23,31 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(fixture => {
     window.__CONTEXT_CALLS__ = [];
+    window.__HIERARCHY__ = sessionStorage.getItem('codex-hierarchy') === 'true';
     const archived = new Set();
+    let deleted = new Set();
     window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (cmd, args = {}) => {
       window.__CONTEXT_CALLS__.push({ cmd, args });
       if (cmd === 'list_agents') return [{ id: 'codex', displayName: 'Codex', installed: true, supportsArchive: true, supportsArchivedSessions: true, deletePolicy: 'permanent' }];
       if (cmd === 'catalog') {
         const catalog = structuredClone(args.includeEmpty ? fixture.all : fixture.catalog);
+        if (window.__HIERARCHY__) {
+          const original = catalog.sessions[0];
+          const row = (sessionId, title, parentId, options = {}) => ({
+            ...original, sessionId, title, archived: false,
+            codex: { source: parentId ? 'subagent' : 'exec', subagent: !!parentId, parentId, canResume: !parentId, empty: false, ...options },
+          });
+          catalog.sessions = [
+            row('main', '父任务', undefined, { source: 'cli' }),
+            row('child', '一级子任务', 'main'),
+            row('leaf', '二级子任务', 'child'),
+            row('orphan', '孤儿任务', 'missing', { orphan: true }),
+            row('exec', '独立执行', undefined),
+          ].filter(session => !deleted.has(session.sessionId));
+          catalog.projects = [{ ...fixture.catalog.projects[0], sessionCount: catalog.sessions.length }];
+          window.__HIERARCHY_ROWS__ = catalog.sessions;
+          return catalog;
+        }
         for (const session of catalog.sessions) session.archived = archived.has(session.sessionId);
         if (!args.includeArchived) catalog.sessions = catalog.sessions.filter(session => !session.archived);
         for (const project of catalog.projects) project.sessionCount = catalog.sessions.filter(session => session.projectDir === project.dirName).length;
@@ -36,9 +55,19 @@ try {
         return catalog;
       }
       if (cmd === 'read_session') {
+        if (window.__HIERARCHY__) return {
+          meta: window.__HIERARCHY_ROWS__.find(row => row.sessionId === args.sessionId),
+          events: [{ type: 'assistant', message: { content: '子会话正文样例' } }],
+        };
         const detail = structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
         detail.meta.archived = archived.has(args.sessionId);
         return detail;
+      }
+      if (cmd === 'delete_session' && window.__HIERARCHY__) {
+        deleted = new Set(['main', 'child', 'leaf']);
+        const removed = window.__HIERARCHY_ROWS__.filter(row => deleted.has(row.sessionId))
+          .map(({ sessionId, projectDir }) => ({ sessionId, projectDir }));
+        return { removed, error: null };
       }
       if (cmd === 'set_session_archived') {
         if (args.archived) archived.add(args.sessionId);
@@ -95,7 +124,7 @@ try {
   console.log(`PASS: hidden context does not enter conversation search; result indices still locate the right answer (${engine})`);
 
   await page.getByRole('searchbox').fill('');
-  await page.getByRole('checkbox', { name: '显示空会话', exact: true }).check();
+  await page.getByRole('checkbox', { name: '空会话', exact: true }).check();
   await page.waitForFunction(() => document.querySelectorAll('.session-card').length === 2);
   const index = fixture.all.sessions.findIndex(s => s.sessionId === 'context-only');
   await page.locator('.session-card').nth(index).click();
@@ -106,8 +135,8 @@ try {
   await page.setViewportSize({ width: 960, height: 760 });
   assert.ok(await page.locator('.detail-header').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
 
-  const showEmpty = page.getByRole('checkbox', { name: '显示空会话', exact: true });
-  const showArchived = page.getByRole('checkbox', { name: '显示已归档', exact: true });
+  const showEmpty = page.getByRole('checkbox', { name: '空会话', exact: true });
+  const showArchived = page.getByRole('checkbox', { name: '已归档', exact: true });
   const emptyBounds = await showEmpty.boundingBox();
   const archiveBounds = await showArchived.boundingBox();
   assert.ok(archiveBounds.x > emptyBounds.x && archiveBounds.y === emptyBounds.y);
@@ -146,6 +175,38 @@ try {
   await confirm.getByRole('button', { name: '取消', exact: true }).click();
   assert.deepEqual(errors, []);
   console.log(`PASS: archive controls, badges and independent empty/archive filters fit the minimum window width (${engine})`);
+
+  await page.evaluate(() => sessionStorage.setItem('codex-hierarchy', 'true'));
+  await page.reload();
+  const card = title => page.locator('.session-card').filter({ has: page.getByText(title, { exact: true }) });
+  const expand = card('父任务').getByRole('button', { name: '展开 父任务 的 1 个子会话' });
+  await expand.waitFor();
+  assert.equal(await page.locator('.session-card').count(), 3);
+  await page.locator('.sidebar-project-list .project-meta').getByText('5 个会话', { exact: true }).waitFor();
+  await page.getByRole('combobox', { name: '当前 Agent' }).click();
+  assert.equal(await page.getByRole('option', { name: 'Codex', exact: true }).getAttribute('aria-description'), '5 个会话');
+  await page.keyboard.press('Escape');
+  assert.equal(await card('孤儿任务').locator('.orphan-ribbon').textContent(), '孤儿');
+  assert.equal(await card('独立执行').getByText('exec', { exact: true }).count(), 1);
+  await expand.click();
+  await card('一级子任务').getByRole('button', { name: '展开 一级子任务 的 1 个子会话' }).click();
+  await card('二级子任务').locator('.session-card-open').click();
+  const header = page.locator('.detail-header');
+  await header.getByRole('button', { name: '打开父会话 child' }).waitFor();
+  assert.equal(await header.getByRole('button', { name: '复制会话 ID：leaf' }).count(), 1);
+  assert.equal(await header.getByRole('button', { name: '在终端恢复' }).count(), 0);
+  assert.equal(await header.getByRole('button', { name: '归档', exact: true }).count(), 1);
+  await card('父任务').getByRole('button', { name: '收起 父任务 的 1 个子会话' }).click();
+  await header.getByRole('button', { name: '在列表定位' }).click();
+  await card('二级子任务').locator('.session-card-open').waitFor();
+  await card('父任务').hover();
+  await card('父任务').getByRole('button', { name: '删除（父任务）' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '永久删除', exact: true }).click();
+  await page.locator('.placeholder').waitFor();
+  await page.locator('.sidebar-project-list .project-meta').getByText('2 个会话', { exact: true }).waitFor();
+  assert.equal(await page.locator('.session-card').count(), 2);
+  assert.deepEqual(errors, []);
+  console.log(`PASS: nested Codex sessions, orphans, all-session counts, and cascade deletion (${engine})`);
 } finally {
   await browser?.close();
   rmSync(dir, { recursive: true, force: true });

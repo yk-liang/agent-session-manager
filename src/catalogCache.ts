@@ -1,5 +1,5 @@
-import type { Catalog, CatalogFilter, Project, SessionMeta } from "./types";
-import { compareTimestamps, sessionKey } from "./utils.ts";
+import type { Catalog, CatalogFilter, Project, SessionMeta, SessionRef } from "./types";
+import { compareTimestamps, isEmptySession, sessionKey } from "./utils.ts";
 
 export const EMPTY_CATALOG: Catalog = { projects: [], sessions: [], warnings: [] };
 export const DEFAULT_CATALOG_FILTER: CatalogFilter = { includeEmpty: false, includeArchived: false };
@@ -13,7 +13,7 @@ const scopeKey = (agent: string, { includeEmpty, includeArchived }: CatalogFilte
 
 const matchesFilter = (session: SessionMeta, filter: CatalogFilter) =>
   (filter.includeArchived || !session.archived)
-  && (filter.includeEmpty || session.realUserCount > 0 || session.statsPending);
+  && (filter.includeEmpty || !isEmptySession(session) || session.statsPending);
 
 function withSessions(catalog: Catalog, sessions: SessionMeta[], previous?: Catalog): Catalog {
   const paths = new Map(previous?.projects.map(project => [project.dirName, project.displayPath]));
@@ -134,8 +134,9 @@ export class AgentCatalogCache {
     const title = latest.statsPending ? latest.title ?? meta.title : latest.title;
     const model = latest.statsPending ? meta.model : latest.model;
     const archived = latest.archived ?? false;
-    return meta.title === title && meta.model === model && (meta.archived ?? false) === archived
-      ? meta : { ...meta, title, model, archived };
+    const codex = latest.codex ?? meta.codex;
+    return meta.title === title && meta.model === model && (meta.archived ?? false) === archived && meta.codex === codex
+      ? meta : { ...meta, title, model, archived, codex };
   }
 
   /**
@@ -163,6 +164,7 @@ export class AgentCatalogCache {
         assistantCount: last.assistantCount,
         realUserCount: last.realUserCount,
         assistantTextCount: last.assistantTextCount,
+        codex: session.codex ? { ...session.codex, empty: last.codex?.empty } : undefined,
         statsRetained: true,
       };
     });
@@ -229,29 +231,46 @@ export class AgentCatalogCache {
     return this.decorate(scope, this.retainKnownStats(scope, catalog));
   }
 
-  remove(agent: string, removed: SessionMeta[]) {
+  remove(agent: string, removed: SessionRef[]) {
     const keys = new Set(removed.map(sessionKey));
     for (const key of keys) this.readFailures.get(agent)?.delete(key);
     this.updateSnapshots(agent, catalog => withSessions(catalog, catalog.sessions.filter(row => !keys.has(sessionKey(row)))));
   }
 
-  setArchived(agent: string, session: SessionMeta, archived: boolean) {
-    const key = sessionKey(session);
+  setArchived(agent: string, changes: { session: SessionRef; archived: boolean; meta?: SessionMeta }[]) {
+    if (!changes.length) return;
+    const byKey = new Map(changes.map(change => [sessionKey(change.session), change]));
+    const known = new Map<string, SessionMeta>();
+    for (const scope of this.scopes.values()) {
+      if (scope.agent !== agent) continue;
+      for (const row of scope.snapshot?.sessions ?? []) {
+        const key = sessionKey(row);
+        if (byKey.has(key) && (!known.has(key) || !row.statsPending)) known.set(key, row);
+      }
+    }
     const failures = this.readFailures.get(agent);
-    const failed = failures?.get(key);
-    if (failed) failures?.set(key, { ...failed, archived });
+    for (const [key, { archived }] of byKey) {
+      const failed = failures?.get(key);
+      if (failed) failures?.set(key, { ...failed, archived });
+    }
     this.updateSnapshots(agent, (catalog, filter) => {
-      const previous = catalog.sessions.find(row => sessionKey(row) === key);
-      const updated = { ...(previous ?? session), archived };
-      if (!matchesFilter(updated, filter)) {
-        return previous ? withSessions(catalog, catalog.sessions.filter(row => row !== previous)) : catalog;
+      const present = new Set<string>();
+      const sessions = catalog.sessions.flatMap(row => {
+        const key = sessionKey(row);
+        const change = byKey.get(key);
+        if (!change) return [row];
+        present.add(key);
+        const updated = { ...row, archived: change.archived };
+        return matchesFilter(updated, filter) ? [updated] : [];
+      });
+      for (const [key, { archived, meta }] of byKey) {
+        const row = !present.has(key) ? known.get(key) ?? meta : undefined;
+        if (row && matchesFilter({ ...row, archived }, filter)) sessions.push({ ...row, archived });
       }
-      if (previous) {
-        const sessions = catalog.sessions.map(row => row === previous ? updated : row);
-        return { ...catalog, sessions };
+      if (sessions.length === catalog.sessions.length && sessions.every((row, index) => row === catalog.sessions[index])) {
+        return catalog;
       }
-      const sessions = [...catalog.sessions, updated].sort((a, b) =>
-        compareTimestamps(b.lastTs, a.lastTs) || a.projectDir.localeCompare(b.projectDir)
+      sessions.sort((a, b) => compareTimestamps(b.lastTs, a.lastTs) || a.projectDir.localeCompare(b.projectDir)
         || a.sessionId.localeCompare(b.sessionId));
       return withSessions(catalog, sessions);
     });

@@ -1,4 +1,4 @@
-import type { SessionMeta } from "./types";
+import type { SessionMeta, SessionRef } from "./types";
 
 export function formatClient(agentName: string, client?: string | null, version?: string | null) {
   const recorded = client?.trim();
@@ -10,8 +10,14 @@ export function formatClient(agentName: string, client?: string | null, version?
   return { name, version: release, label: release ? `${name} ${release}` : name };
 }
 
-export function sessionKey(session: Pick<SessionMeta, "projectDir" | "sessionId">): string {
+export function sessionKey(session: SessionRef): string {
   return JSON.stringify([session.projectDir, session.sessionId]);
+}
+
+export function isEmptySession(session: SessionMeta) {
+  const thread = session.codex;
+  return thread && (!thread.canResume || ["exec", "mcp", "appServer"].includes(thread.source ?? "")) && thread.empty !== undefined
+    ? thread.empty : session.realUserCount === 0;
 }
 
 export function compareTimestamps(a: string | null, b: string | null): number {
@@ -66,6 +72,31 @@ export function shortPath(path: string | null): string {
     if (separator > 0) return "~" + userPath.slice(separator);
   }
   return path;
+}
+
+/** 按 fish 风格逐级缩写目录直到放得下，仍放不下时省略前面的目录。 */
+export function fitPath(path: string, fits: (label: string) => boolean) {
+  if (fits(path)) return path;
+
+  const parts = path.split("/");
+  const trailingSlash = path.endsWith("/");
+  if (trailingSlash) parts.pop();
+  const leaf = parts.pop();
+  if (!parts.length || !leaf) return path;
+
+  const suffix = trailingSlash ? `${leaf}/` : leaf;
+  const compact = [...parts];
+  for (const [index, part] of parts.entries()) {
+    if (!part || part === "~" || part === "." || part === "..") continue;
+    compact[index] = Array.from(part).slice(0, part.startsWith(".") ? 2 : 1).join("");
+    const label = [...compact, suffix].join("/");
+    if (fits(label)) return label;
+  }
+  for (let start = 1; start <= parts.length; start++) {
+    const label = ["…", ...parts.slice(start), suffix].join("/");
+    if (fits(label)) return label;
+  }
+  return suffix;
 }
 
 export function projectName(path: string | null): string {

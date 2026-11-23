@@ -1,5 +1,6 @@
 import type { Catalog, Project, SessionMeta } from "./types";
 import { compareTimestamps, sessionKey } from "./utils.ts";
+import { sessionTree } from "./sessionTree.ts";
 
 export const PROJECTLESS_GROUP = "group:projectless";
 export interface SessionGroup extends Project {
@@ -10,7 +11,8 @@ export interface SessionGroup extends Project {
 function buildCatalogGroups(catalog: Catalog) {
   const projectlessIds = new Set(catalog.projectlessSessionIds);
   const hints = new Map(catalog.sessionGroupHints?.map(hint => [sessionKey(hint), hint.root]));
-  const regroup = projectlessIds.size > 0 || hints.size > 0;
+  const tree = sessionTree(catalog.sessions);
+  const regroup = projectlessIds.size > 0 || hints.size > 0 || catalog.sessions.some(session => session.codex?.subagent);
   const paths = new Map(catalog.projects.map(project => [project.dirName, project.displayPath]));
   const missingPaths = new Set(catalog.missingProjectPaths);
   const byGroup = new Map<string, SessionMeta[]>();
@@ -19,9 +21,10 @@ function buildCatalogGroups(catalog: Catalog) {
 
   for (const session of catalog.sessions) {
     const key = sessionKey(session);
-    const root = hints.get(key);
-    const projectless = root === null || root === undefined && projectlessIds.has(session.sessionId);
-    const dirName = projectless ? PROJECTLESS_GROUP : root === undefined ? session.projectDir : `group:root:${root}`;
+    const projectOwner = session.codex?.projectOwner ?? tree.owner(session);
+    const root = hints.get(sessionKey(projectOwner));
+    const projectless = root === null || root === undefined && projectlessIds.has(projectOwner.sessionId);
+    const dirName = projectless ? PROJECTLESS_GROUP : root === undefined ? projectOwner.projectDir : `group:root:${root}`;
     const rows = byGroup.get(dirName);
     if (rows) rows.push(session);
     else byGroup.set(dirName, [session]);
@@ -30,7 +33,7 @@ function buildCatalogGroups(catalog: Catalog) {
 
     const group = groups.get(dirName);
     if (!group) {
-      const displayPath = projectless ? "未归属项目" : root ?? paths.get(dirName) ?? session.cwd ?? session.projectDir;
+      const displayPath = projectless ? "未归属项目" : root ?? paths.get(dirName) ?? projectOwner.cwd ?? projectOwner.projectDir;
       groups.set(dirName, {
         dirName, displayPath, projectless, missing: !projectless && missingPaths.has(displayPath),
         sessionCount: 1, lastActivity: session.lastTs,
@@ -45,7 +48,7 @@ function buildCatalogGroups(catalog: Catalog) {
     groups: regroup ? [...groups.values()].sort((a, b) => Number(b.projectless) - Number(a.projectless)
       || compareTimestamps(b.lastActivity, a.lastActivity))
       : catalog.projects.map(project => ({ ...project, projectless: false, missing: missingPaths.has(project.displayPath) })),
-    byGroup, hints, projectlessKeys,
+    byGroup, hints, projectlessKeys, tree,
   };
 }
 

@@ -165,13 +165,13 @@ test("background statistics cannot replace a newer refresh or revive deleted ses
 
   await cache.load("codex", withArchived, generation);
   const stale = deferred(); const pending = cache.refine("codex", active, () => stale.promise);
-  cache.setArchived("codex", row, true);
+  cache.setArchived("codex", [{ session: row, archived: true }]);
   stale.resolve(catalog(row));
   assert.equal(await pending, undefined);
   assert.equal(cache.peek("codex", active).sessions.length, 0);
   assert.equal(cache.peek("codex", withArchived).sessions[0].archived, true);
 
-  cache.setArchived("codex", { ...row, archived: true }, false);
+  cache.setArchived("codex", [{ session: row, archived: false }]);
   assert.equal(cache.peek("codex", active).sessions[0].archived, false);
   assert.equal(cache.peek("codex", active).projects[0].sessionCount, 1);
   cache.remove("codex", [row]);

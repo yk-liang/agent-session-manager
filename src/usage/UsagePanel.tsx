@@ -6,7 +6,7 @@ import type { PriceStatusFilter, UsageTab } from "../uiPreferences";
 import { requestRecordCounts } from "./metrics";
 import { summaryQuery, type UsagePeriod } from "./range";
 import type { AgentInfo } from "../types";
-import type { UsageSummary } from "./types";
+import type { RequestEvent, UsageSummary } from "./types";
 import ModelPrices from "./pricing/ModelPrices";
 import RequestEvents from "./RequestEvents";
 import UiIcon from "../components/UiIcon";
@@ -33,11 +33,13 @@ export default function UsagePanel({
   agents,
   agent,
   onRequestCounts,
+  onOpenSession,
   showToast,
 }: {
   agents: AgentInfo[];
   agent: string;
   onRequestCounts: (counts: ReadonlyMap<string, number | null>) => void;
+  onOpenSession: (event: RequestEvent, signal: AbortSignal) => void;
   showToast: (message: string) => void;
 }) {
   const [{ tab: subTab, period, priceStatus }, setUsage] = useUiPreference("usage");
@@ -161,6 +163,7 @@ export default function UsagePanel({
             agent={agent}
             revision={revision}
             showToast={showToast}
+            onOpenSession={onOpenSession}
             syncing={loadingHistory}
           />
         )}

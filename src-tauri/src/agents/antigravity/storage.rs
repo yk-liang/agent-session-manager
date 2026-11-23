@@ -63,6 +63,15 @@ pub(crate) fn session_id(path: &Path) -> ReadResult<&str> {
         .ok_or_else(|| "会话文件名无效".into())
 }
 
+pub(super) fn database_size(connection: &Connection) -> ReadResult<u64> {
+    let bytes: i64 = connection.query_row(
+        "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(bytes.max(0) as u64)
+}
+
 pub(crate) fn client_id(path: &Path) -> Option<&str> {
     path.parent()?
         .parent()?

@@ -138,7 +138,7 @@ fn actual_context_log_is_read_only_if_requested() {
     };
     let path = Path::new(&path);
     let before = fs::read(path).unwrap();
-    let (parsed, warnings) = read_rollout(path, ReadMode::View, ReadLimit::default(), None).split();
+    let (parsed, warnings) = read_rollout(path, ReadMode::View, ReadLimit::default(), None, &mut super::tools::Activity::default()).split();
     let parsed = parsed.unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(parsed

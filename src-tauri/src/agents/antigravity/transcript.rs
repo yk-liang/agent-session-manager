@@ -7,7 +7,7 @@ use super::{
 };
 use crate::agents::{context, escape_path_id, ms_to_iso, SessionDetail, SessionMeta};
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, HashMap}, fs, path::Path};
+use std::{collections::{BTreeMap, HashMap}, path::Path};
 
 fn generation_models(
     connection: &rusqlite::Connection,
@@ -57,7 +57,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
     storage::read(path, |connection, schema| {
         let session_id = storage::session_id(path)?;
         let wal = crate::agents::scanning::sqlite_wal_path(path);
-        let size = fs::metadata(path)?.len() + fs::metadata(&wal).map_or(0, |meta| meta.len());
+        let size = storage::database_size(connection)?;
         let (trajectory, _) = storage::trajectory(connection)?;
         let cwd = trajectory.cwd;
         let created = trajectory.created;
@@ -71,6 +71,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             client: storage::client_id(path).map(str::to_owned),
             git_branch: None,
             entrypoint: Some(if is_cli(path) { "cli" } else { "antigravity" }.into()),
+            codex: None,
             first_ts: created.and_then(ms_to_iso),
             last_ts: None,
             user_count: 0,
@@ -186,6 +187,60 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             }
         }
         meta.model = current_model.filter(|name| name != "unknown");
+        crate::agents::tool_ops::describe_tools(&mut detail_events, super::tools::describe);
         Ok(SessionDetail { meta, events: detail_events, warnings })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::fs;
+
+    #[test]
+    fn size_uses_logical_pages_instead_of_bloated_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("active-session.db");
+        let wal = crate::agents::scanning::sqlite_wal_path(&path);
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, step_payload BLOB);",
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO steps (idx, step_type, metadata, step_payload) VALUES (0, ?1, X'', ?2)",
+                rusqlite::params![USER_PROMPT, vec![b'a'; 8192]],
+            )
+            .unwrap();
+        writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+
+        // 保持读事务打开以固定 WAL，模拟运行中连接反复重写同一批页导致的 WAL 膨胀。
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT count(*) FROM steps;").unwrap();
+        for byte in 1u8..=40 {
+            writer
+                .execute(
+                    "UPDATE steps SET step_payload = ?1 WHERE idx = 0",
+                    [vec![byte; 8192]],
+                )
+                .unwrap();
+        }
+        let db_len = fs::metadata(&path).unwrap().len();
+        let wal_len = fs::metadata(&wal).unwrap().len();
+        assert!(wal_len > db_len * 3, "expected bloated WAL: db={db_len}, wal={wal_len}");
+
+        let during_wal = read(&path, false).unwrap();
+        drop(reader);
+        writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let checkpointed_len = fs::metadata(&path).unwrap().len();
+        let after_checkpoint = read(&path, false).unwrap();
+
+        assert_eq!(during_wal.meta.size_bytes, Some(checkpointed_len));
+        assert_eq!(after_checkpoint.meta.size_bytes, Some(checkpointed_len));
+    }
 }

@@ -13,6 +13,7 @@ import type {
   ConfigActivity,
   ConversationSearchResult,
   SessionMeta,
+  SessionRef,
 } from "./types";
 
 export const listAgents = () => invoke<AgentInfo[]>("list_agents");
@@ -79,10 +80,11 @@ export const deleteSession = (
   agent: string,
   projectDir: string,
   sessionId: string,
-) => invoke<void>("delete_session", { agent, projectDir, sessionId });
+) => invoke<{ removed: SessionRef[]; error: string | null } | null>("delete_session", { agent, projectDir, sessionId });
 
 export const setSessionArchived = (agent: string, session: SessionMeta, archived: boolean) =>
-  invoke<void>("set_session_archived", { agent, projectDir: session.projectDir, sessionId: session.sessionId, archived });
+  invoke<{ changed: { session: SessionRef; archived: boolean }[]; error: string | null } | null>("set_session_archived",
+    { agent, projectDir: session.projectDir, sessionId: session.sessionId, archived });
 
 export const resumeCommand = (agent: string, sessionId: string, fork = false) =>
   invoke<string | null>("resume_command", { agent, sessionId, fork });

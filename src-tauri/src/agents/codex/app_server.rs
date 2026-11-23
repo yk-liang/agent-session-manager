@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, TryLockError};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -26,8 +26,39 @@ impl ThreadAction {
     }
 }
 
+pub(super) type Mutation<'a> = dyn FnMut() -> Result<(), String> + 'a;
+pub(super) type Preserve<'a> =
+    dyn Fn(Option<&str>, Option<&str>, &mut Mutation<'_>) -> Result<(), String> + Sync + 'a;
+
+pub(super) fn file_url_path(uri: &str) -> Option<PathBuf> {
+    tauri::Url::parse(uri).ok()?.to_file_path().ok()
+}
+
 pub(super) fn update(action: ThreadAction, project: &str, id: &str) -> Result<(), String> {
-    update_using(&runtime::executables(), &codex_home(), action, project, id)
+    update_using(
+        &runtime::executables(),
+        &codex_home(),
+        action,
+        project,
+        id,
+        None,
+    )
+}
+
+pub(super) fn delete_verified(
+    home: &Path,
+    project: &str,
+    id: &str,
+    preserve: &Preserve<'_>,
+) -> Result<(), String> {
+    update_using(
+        &runtime::executables(),
+        home,
+        ThreadAction::Delete,
+        project,
+        id,
+        Some(preserve),
+    )
 }
 
 fn update_using(
@@ -36,10 +67,11 @@ fn update_using(
     action: ThreadAction,
     project: &str,
     id: &str,
+    preserve: Option<&Preserve<'_>>,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
     for bin in executables {
-        match update_at(bin, home, action, project, id) {
+        match update_at(bin, home, action, project, id, preserve) {
             Ok(()) => return Ok(()),
             Err(UpdateError::Unavailable(error)) => {
                 errors.push(format!("{}：{error}", bin.display()))
@@ -71,6 +103,7 @@ fn update_at(
     action: ThreadAction,
     project: &str,
     id: &str,
+    preserve: Option<&Preserve<'_>>,
 ) -> Result<(), UpdateError> {
     let mut child = Command::new(bin)
         .args(["app-server", "--listen", "stdio://"])
@@ -84,17 +117,40 @@ fn update_at(
         .map_err(|e| UpdateError::Unavailable(format!("无法启动：{e}")))?;
     let input = BufWriter::new(child.stdin.take().expect("piped stdin"));
     let output = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let deletion = Mutex::new(());
     std::thread::scope(|scope| {
         let (tx, rx) = mpsc::sync_channel(1);
+        let deletion = &deletion;
         scope.spawn(move || {
-            let _ = tx.send(update_thread(input, output, action, project, id));
+            let _ = tx.send(update_thread(
+                input, output, action, project, id, preserve, deletion,
+            ));
         });
-        let result = rx.recv_timeout(Duration::from_secs(30));
+        let limit = if matches!(action, ThreadAction::Delete) {
+            180
+        } else {
+            30
+        };
+        let mut result = rx.recv_timeout(Duration::from_secs(limit));
+        // 已发出的永久删除必须等服务器完成索引提交。
+        let preflight = if result.is_err() {
+            match deletion.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::WouldBlock) => {
+                    result = rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected);
+                    None
+                }
+                Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            }
+        } else {
+            None
+        };
         // npm launches the native server as a child that inherits both pipes.
         if unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) } != 0 {
             let _ = child.kill();
         }
         let _ = child.wait();
+        drop(preflight);
         result.map_err(|e| {
             UpdateError::Operation(
                 match e {
@@ -113,6 +169,8 @@ fn update_thread(
     action: ThreadAction,
     project: &str,
     id: &str,
+    preserve: Option<&Preserve<'_>>,
+    deletion: &Mutex<()>,
 ) -> Result<(), UpdateError> {
     request(&mut input, &mut output, 1, "initialize", json!({
             "clientInfo": {"name": "agent-session-manager", "version": env!("CARGO_PKG_VERSION")},
@@ -120,10 +178,42 @@ fn update_thread(
     })).map_err(|error| UpdateError::Unavailable(error.message()))?;
     send(&mut input, &json!({"method": "initialized"}))
         .map_err(|error| UpdateError::Unavailable(error.message()))?;
+    let mut request_id = 2;
+    let sqlite = if preserve.is_some() {
+        let requirements = request(
+            &mut input,
+            &mut output,
+            request_id,
+            "configRequirements/read",
+            json!({}),
+        )
+        .map_err(|error| UpdateError::Unavailable(error.message()))?;
+        request_id += 1;
+        let config = request(
+            &mut input,
+            &mut output,
+            request_id,
+            "config/read",
+            json!({}),
+        )
+        .map_err(|error| UpdateError::Unavailable(error.message()))?;
+        request_id += 1;
+        requirements
+            .pointer("/requirements/sqliteHome")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                config
+                    .pointer("/config/sqlite_home")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let thread = request(
         &mut input,
         &mut output,
-        2,
+        request_id,
         "thread/read",
         json!({"threadId": id, "includeTurns": false}),
     )
@@ -131,6 +221,7 @@ fn update_thread(
         ResponseError::Rejected(message) => UpdateError::Operation(message),
         other => UpdateError::Unavailable(other.message()),
     })?;
+    request_id += 1;
     let cwd = thread.pointer("/thread/cwd").and_then(Value::as_str);
     if thread.pointer("/thread/id").and_then(Value::as_str) != Some(id)
         || cwd.map(escape_cwd).as_deref().unwrap_or("-unknown") != project
@@ -139,21 +230,46 @@ fn update_thread(
             "Codex 会话身份或所属项目已变化，请刷新列表后重试".into(),
         ));
     }
-    request(
-        &mut input,
-        &mut output,
-        3,
-        action.method(),
-        json!({"threadId": id}),
-    )
-    .map_err(|error| match error {
-        ResponseError::Unsupported => UpdateError::Unavailable(error.message()),
-        ResponseError::Rejected(message) => UpdateError::Operation(message),
-        ResponseError::Transport(message) => UpdateError::Operation(format!(
-            "无法确认 Codex 会话操作结果，请刷新列表。\n{message}"
-        )),
-    })?;
-    Ok(())
+    let mut mutate = || {
+        let _in_flight = matches!(action, ThreadAction::Delete)
+            .then(|| deletion.lock().unwrap_or_else(|error| error.into_inner()));
+        request(
+            &mut input,
+            &mut output,
+            request_id,
+            action.method(),
+            json!({"threadId": id}),
+        )
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResponseError::Unsupported => UpdateError::Unavailable(error.message()),
+            ResponseError::Rejected(message) => UpdateError::Operation(message),
+            ResponseError::Transport(message) => UpdateError::Operation(format!(
+                "无法确认 Codex 会话操作结果，请刷新列表。\n{message}"
+            )),
+        })
+    };
+    let Some(preserve) = preserve else {
+        return mutate();
+    };
+    let mut mutation_error = None;
+    let result = preserve(
+        sqlite.as_deref(),
+        thread.pointer("/thread/path").and_then(Value::as_str),
+        &mut || match mutate() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = match &error {
+                    UpdateError::Unavailable(message) | UpdateError::Operation(message) => {
+                        message.clone()
+                    }
+                };
+                mutation_error = Some(error);
+                Err(message)
+            }
+        },
+    );
+    result.map_err(|error| mutation_error.unwrap_or(UpdateError::Operation(error)))
 }
 
 fn request(

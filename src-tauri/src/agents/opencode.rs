@@ -14,6 +14,7 @@ mod events;
 mod model_tests;
 mod message_meta;
 mod storage;
+mod tools;
 #[cfg(test)]
 mod v2_tests;
 
@@ -832,6 +833,7 @@ fn build_meta(
         client: None,
         git_branch: None,
         entrypoint: None,
+        codex: None,
         first_ts: row.created_ms.and_then(ms_to_iso),
         last_ts: row.updated_ms.or(row.created_ms).and_then(ms_to_iso),
         user_count: real_user,

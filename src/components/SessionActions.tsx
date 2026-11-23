@@ -15,7 +15,8 @@ interface Props {
 }
 
 export default function SessionActions({ agent, session, onRequestDelete, onToggleArchive, toast, compact = false, disabled }: Props) {
-  const canResume = !session.archived && session.hasTranscript && (!agent.resumeEntrypoint || session.entrypoint === agent.resumeEntrypoint);
+  const canResume = !session.archived && session.hasTranscript && (session.codex?.canResume ?? true)
+    && (!agent.resumeEntrypoint || session.entrypoint === agent.resumeEntrypoint);
   const canDelete = agent.deletePolicy !== "readOnly";
   if (!canResume && !canDelete && !agent.supportsArchive) return null;
 

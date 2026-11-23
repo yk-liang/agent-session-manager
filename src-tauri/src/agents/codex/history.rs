@@ -53,7 +53,7 @@ pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<
     HEADERS.get_or_init(|| FileCache::new(4096)).load(
         "codex-header",
         std::slice::from_ref(path),
-        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None).split()),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::tools::Activity::default()).split()),
         |(header, warnings)| header.is_some() && warnings.is_empty(),
     )
 }
@@ -63,18 +63,7 @@ pub(super) fn read_headers(
     warnings: &mut Vec<String>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Page>, String> {
-    let mut pages = Vec::new();
-    for path in paths {
-        check_catalog_cancelled(cancelled)?;
-        let (header, ws) = read_header(path)?;
-        warnings.extend(ws);
-        if let Some(header) = header {
-            pages.push(Page {
-                path: path.clone(),
-                header,
-            });
-        }
-    }
+    let mut pages = read_all_headers(paths, warnings, cancelled)?;
     let by_path: HashMap<_, _> = pages
         .iter()
         .enumerate()
@@ -84,7 +73,7 @@ pub(super) fn read_headers(
     for page in &pages {
         if page.path.extension().is_some_and(|ext| ext == "zst") {
             if let Some(&i) = by_path.get(&page.path.with_extension("")) {
-                // 压缩替换的短暂交叠期优先使用仍可追加的原文。删除另行枚举、复核所有副本。
+                // 压缩替换短暂重叠时优先使用仍可追加的原文。
                 if same_rollout_identity(&page.header, &pages[i].header) {
                     compressed_copies.insert(page.path.clone());
                 } else {
@@ -93,9 +82,91 @@ pub(super) fn read_headers(
             }
         }
     }
-    pages.retain(|page| {
-        is_relevant_session(&page.header) && !compressed_copies.contains(&page.path)
-    });
+    pages.retain(|page| !compressed_copies.contains(&page.path));
+    Ok(pages)
+}
+
+pub(super) fn validate_delete_copies(pages: &[&Page], targets: &HashSet<&str>) -> Result<(), String> {
+    let by_path: HashMap<_, _> = pages.iter().map(|page| (&page.path, &page.header)).collect();
+    for page in pages.iter().filter(|page| targets.contains(page.header.session_id.as_str())) {
+        let (plain, compressed) = if page.path.extension().is_some_and(|ext| ext == "zst") {
+            (page.path.with_extension(""), page.path.clone())
+        } else {
+            (page.path.clone(), page.path.with_extension("jsonl.zst"))
+        };
+        for path in [plain, compressed] {
+            if path == page.path || !super::super::present(&path)? { continue; }
+            if !by_path.get(&path).is_some_and(|header| same_rollout_identity(&page.header, header)) {
+                return Err(format!("Codex 日志和压缩副本的身份无法确认：{path:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_delete_references(pages: &[&Page], targets: &HashSet<&str>) -> Result<(), String> {
+    let mut physical_ids = HashMap::<String, &str>::new();
+    for page in pages {
+        let id = page.header.session_id.as_str();
+        if !targets.contains(id) && filename_id(&page.path).is_some_and(|id| targets.contains(id)) {
+            return Err(format!("Codex 文件名与会话身份冲突：{:?}", page.path));
+        }
+        for physical in [storage_id(page), filename_id(&page.path).unwrap_or(id).to_owned()] {
+            if let Some(previous) = physical_ids.insert(physical, id) {
+                if id != previous && (targets.contains(id) || targets.contains(previous)) {
+                    return Err("Codex 日志的物理标识重复，无法确认删除范围".into());
+                }
+            }
+        }
+    }
+    for page in pages.iter().filter(|page| !targets.contains(page.header.session_id.as_str())) {
+        let references = page.header.history_base.as_ref().is_some_and(|base| {
+            physical_ids.get(&base.thread_id).is_some_and(|id| targets.contains(id))
+        });
+        let attached = page.header.attached_thread && page.header.forked_from.as_deref().is_some_and(|id| targets.contains(id));
+        if references || attached {
+            return Err(format!("Codex 会话 {} 仍引用待删会话的历史", page.header.session_id));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn filename_id(path: &Path) -> Option<&str> {
+    let filename = path.file_name()?.to_str()?;
+    let stem = filename.strip_suffix(".jsonl.zst").or_else(|| filename.strip_suffix(".jsonl"))?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    id.bytes().enumerate().all(|(i, byte)| {
+        if matches!(i, 8 | 13 | 18 | 23) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    }).then_some(id)
+}
+
+pub(super) fn read_all_headers(
+    paths: &[PathBuf],
+    warnings: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Page>, String> {
+    scan_headers(paths, cancelled, |_, diagnostics| warnings.extend(diagnostics))
+}
+
+pub(super) fn scan_headers(
+    paths: &[PathBuf],
+    cancelled: &dyn Fn() -> bool,
+    mut report: impl FnMut(&Path, Vec<String>),
+) -> Result<Vec<Page>, String> {
+    let mut pages = Vec::new();
+    for path in paths {
+        check_catalog_cancelled(cancelled)?;
+        let (header, ws) = read_header(path)?;
+        if !ws.is_empty() {
+            report(path, ws);
+        }
+        if let Some(header) = header {
+            pages.push(Page {
+                path: path.clone(),
+                header,
+            });
+        }
+    }
     pages.sort_by(|a, b| {
         super::super::timestamp(a.header.created_ts.as_deref())
             .cmp(&super::super::timestamp(b.header.created_ts.as_deref()))
@@ -216,12 +287,15 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         warnings.clear();
     }
     let mut meta = to_meta(&latest.header, None);
+    meta.codex = Some(super::thread::metadata(&latest.header, pages));
     meta.first_ts = None;
     meta.last_ts = None;
     meta.size_bytes = Some(pages.iter().map(|p| p.header.size_bytes).sum());
     meta.source_files = pages.iter().map(|p| p.path.clone()).collect();
     let mut events = Vec::new();
+    let mut has_activity = false;
     let mut dedup = EventDedup::default();
+    let mut activity = super::tools::Activity::default();
     let multiple_pages = chain.iter().filter(|(_, l)| l.bytes != Some(0)).count() > 1;
     for (index, limit) in chain {
         if limit.bytes == Some(0) {
@@ -238,11 +312,12 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
             } else {
                 None
             },
+            &mut activity,
         )
         .split();
         warnings.extend(ws);
         let Some(mut p) = parsed else { continue };
-        if p.session_id != meta.session_id || !is_relevant_session(&p) {
+        if !same_rollout_identity(&p, &page.header) {
             return Err("会话来源已变化，请刷新后重试".into());
         }
         dedup.commit_page();
@@ -272,8 +347,12 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         meta.assistant_count += p.assistant_count;
         meta.real_user_count += p.real_user_count;
         meta.assistant_text_count += p.assistant_text_count;
+        has_activity |= p.has_activity;
         events.extend(p.events);
     }
+    let thread = meta.codex.as_mut().unwrap();
+    thread.empty = Some(!has_activity && meta.real_user_count == 0);
+    activity.remove_redundant_scripts(&mut events);
     Ok((
         SessionDetail {
             meta,

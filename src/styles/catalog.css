@@ -42,7 +42,12 @@
 .project-item:hover { background: var(--bg-hover); }
 .project-item.active { background: var(--accent-soft); }
 
+.project-heading { display: flex; align-items: center; gap: 6px; }
+.project-icon { color: var(--text-dim); }
+
 .project-path {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
@@ -50,26 +55,19 @@
   text-overflow: ellipsis;
 }
 
-.project-item.active .project-path { color: var(--accent); font-weight: 600; }
-.project-item.missing :is(.project-path, .project-meta) { color: var(--text-muted); }
-
-.project-heading { display: flex; align-items: center; gap: 6px; }
-.project-heading .project-path { flex: 1; min-width: 0; }
-.project-heading .status-tag { flex: none; }
-
-.project-meta,
-.session-card-sub {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 1px 12px;
-  font-variant-numeric: tabular-nums;
-}
+.project-item.missing :is(.project-icon, .project-path, .project-meta) { color: var(--text-muted); }
+.project-item.active :is(.project-icon, .project-path) { color: var(--accent); }
+.project-item.active .project-path { font-weight: 600; }
 
 .project-meta {
+  display: flex;
+  align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1px 12px;
   font-size: var(--text-meta);
   color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
 
@@ -163,30 +161,50 @@
 .session-location code { font: 11px/1.5 var(--font-mono); }
 .deletion-count { color: var(--text); }
 
-.session-card.selectable {
+.session-card-selection {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
   cursor: pointer;
 }
+.session-card:has(> .session-card-path) .session-card-selection { padding-bottom: 6px; }
 
-.session-card.selectable .checkbox-box { margin-top: 2px; }
+.session-card-selection .checkbox-box { margin-top: 2px; }
 .session-card-content { min-width: 0; flex: 1; }
-.session-card.empty .session-card-open { opacity: 0.55; }
+.session-card.empty :is(.session-card-open, .session-card-path) { opacity: 0.55; }
 
 .session-cards {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  undefined: undefined;
   overflow-anchor: none;
 }
 
 .session-card-list { position: relative; }
-.session-card-row { position: absolute; inset-inline: 8px; }
+.session-card-row { position: absolute; inset-inline: calc(8px + 18px * var(--session-depth, 0)) 8px; }
 .session-card-row:is(:hover, :focus-within) { z-index: 1; }
+
+.session-branch {
+  position: absolute;
+  transform: translateX(calc(-18px * var(--session-depth)));
+  top: -6px;
+  bottom: 0;
+  border-left: 1px solid var(--border-raised);
+  pointer-events: none;
+}
+.session-branch:not(.continues) { border-color: transparent; }
+.session-branch.elbow { border-color: var(--border-raised); }
+.session-branch.elbow:not(.continues) { bottom: auto; height: 24px; }
+.session-branch.elbow::after {
+  content: "";
+  position: absolute;
+  top: 24px;
+  left: 0;
+  width: 10px;
+  border-top: 1px solid var(--border-raised);
+}
 
 .session-card {
   position: relative;
@@ -199,6 +217,7 @@
 }
 
 .session-card:hover { background: var(--bg-hover); }
+.session-card.child:not(.active, :hover) { background: color-mix(in srgb, var(--bg) 42%, var(--bg-panel)); }
 .session-card.active { border-color: var(--accent); background: var(--accent-soft); }
 
 .session-card-open,
@@ -213,14 +232,48 @@
   background: transparent;
 }
 
-.session-card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.session-card-open > :not(.session-card-title) { grid-column: 1 / -1; }
+.session-card-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+}
+
+.session-card-open:focus-visible { outline: none; }
+.session-card-open:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
+.session-card:has(> .session-card-path) .session-card-open { padding-bottom: 6px; }
+.session-card-open > * { grid-column: 1 / -1; }
+
+.session-card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-card-time {
+  flex-shrink: 0;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 .session-card-actions {
   grid-area: 1 / 2;
   align-self: start;
   justify-self: end;
-  z-index: 1;
+  z-index: 2;
   display: flex;
   gap: 2px;
   margin: 5px 7px 0 4px;
@@ -231,8 +284,10 @@
   pointer-events: none;
 }
 
-.session-card:is(:hover, :has(:focus-visible)) { grid-template-columns: minmax(0, 1fr) auto; }
-.session-card:is(:hover, :has(:focus-visible)) .session-card-actions { opacity: 1; pointer-events: auto; }
+.session-card:has(.session-card-actions):is(:hover, :has(:focus-visible)) { grid-template-columns: minmax(0, 1fr) auto; }
+.session-card:has(.session-card-actions):is(:hover, :has(:focus-visible)) .session-card-header { grid-column: 1; }
+.session-card:has(.session-card-actions):is(:hover, :has(:focus-visible)) .session-card-actions { opacity: 1; pointer-events: auto; }
+.session-card:has(.session-card-actions):is(:hover, :has(:focus-visible)) .session-card-time { display: none; }
 .session-card-actions button { position: relative; }
 
 .session-action-tooltip {
@@ -256,47 +311,36 @@
   display: block;
 }
 
-.session-card-title {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .session-card-sub {
-  justify-content: space-between;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  margin-top: 6px;
   font-size: var(--text-meta);
   color: var(--text-dim);
-  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
 }
 
 .session-card-stats {
-  display: flex;
+  display: inline-flex;
+  align-items: baseline;
   flex-wrap: wrap;
-  gap: 0 10px;
+  gap: 0 8px;
   min-width: 0;
 }
 
 .session-card-size { color: var(--text-muted); }
-.session-card-sub > time { margin-left: auto; white-space: nowrap; }
 
-.session-card-badges {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-  flex-wrap: wrap;
-}
-
-.session-card-badges:empty { display: none; }
-
-/* 归档卡降低强调但保持可操作；角标在卡片右上角斜切，标题与悬停操作避开它。 */
-.session-card.archived:not(.active) { background: transparent; border-color: var(--border); }
-.session-card.archived:not(.active):hover { background: var(--bg-hover); }
-.session-card.selectable:has(input:checked) { background: var(--accent-soft); }
-.session-card.archived .session-card-title { margin-right: 22px; color: var(--text-dim); font-weight: 500; }
-.session-card.archived .session-card-sub { color: var(--text-muted); }
+/* 归档卡降低强调但保持可操作；角标在卡片右上角斜切，标题、时间与悬停操作避开它。 */
+.session-card:is(.archived, .orphan):not(.active) { background: transparent; border-color: var(--border); }
+.session-card:is(.archived, .orphan):not(.active):hover { background: var(--bg-hover); }
+.session-card:has(.session-card-selection input:checked) { background: var(--accent-soft); }
+.session-card:is(.archived, .orphan) .session-card-header { margin-right: 26px; }
+.session-card:is(.archived, .orphan):has(.session-card-actions):is(:hover, :has(:focus-visible)) .session-card-header { margin-right: 0; }
+.session-card.archived .session-card-title { color: var(--text-dim); font-weight: 500; }
+.session-card.archived :is(.session-card-time, .session-card-sub) { color: var(--text-muted); }
 
 .session-card.archived .status-tag:not([data-tone="error"]) {
   background: var(--bg-elevated);
@@ -304,7 +348,7 @@
   border-color: var(--border);
 }
 
-.session-card.archived .session-card-actions { margin-right: 38px; }
+.session-card:is(.archived, .orphan) .session-card-actions { margin-right: 38px; }
 
 .archived-ribbon {
   position: absolute;
@@ -332,6 +376,8 @@
 }
 
 .session-card.archived.active .archived-ribbon > span { background: #3b4670; color: #c5d0ff; }
+.session-card .orphan-ribbon > span { background: var(--warning-soft); color: var(--warning); }
+.session-search-parent { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
 .search-status { margin-top: 8px; color: var(--text-dim); font-size: 11px; }
 .search-status.warning { color: var(--warning); }
 
@@ -358,13 +404,72 @@
 
 .event-group.search-target .msg { outline: 1px solid var(--accent); outline-offset: 3px; }
 
+.session-card-path {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 12px 10px;
+  pointer-events: none;
+}
+
+.session-card:has(.session-card-selection) .session-card-path { padding-inline-start: 34px; }
+.session-path-slot { display: flex; flex: 1; min-width: 0; }
+.session-children-toggle {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 20px;
+  padding: 1px 4px;
+  border-color: var(--border-raised);
+  font-variant-numeric: tabular-nums;
+}
+.session-children-toggle .ui-icon { transition: transform .14s ease; }
+.session-children-toggle::before { content: ""; position: absolute; inset: -3px -2px; }
+.session-children-toggle[aria-expanded="true"] { background: var(--accent-soft); color: var(--info); border-color: var(--info-border); }
+.session-children-toggle[aria-expanded="true"] .ui-icon { transform: rotate(90deg); }
+.session-children-dot { position: absolute; right: -2px; top: -2px; width: 6px; height: 6px; background: var(--info); border-radius: 50%; }
+@media (prefers-reduced-motion: reduce) {
+  .session-children-toggle .ui-icon { transition: none; }
+}
+
 .session-project-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  min-width: 0;
   max-width: 100%;
+  min-height: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text-dim);
+  overflow: hidden;
+}
+
+.session-project-path:hover:not(:disabled) { background: var(--bg-elevated); }
+
+.session-project-path-text {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex-shrink: 1;
 }
+
+.session-path-copy-icon { display: none; }
+.session-project-path:is(:hover, :focus-visible, [data-copied="true"]) .session-path-copy-icon { display: inline-block; }
 
 .empty-hint {
   color: var(--text-dim);

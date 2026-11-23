@@ -33,6 +33,7 @@ mod tests;
 mod types;
 
 pub(crate) use cache::Store;
+pub(crate) use codex::failures::database as codex_failure_database;
 #[cfg(test)]
 use chrono::{Local, TimeZone, Utc};
 use sha2::{Digest, Sha256};
@@ -168,6 +169,17 @@ pub fn preserve_before_delete(
         Some(targets) => deletion::preserve_at(agent, &roots, &mut store, targets, delete),
         None => preserve_before_delete_at(agent, &roots, &mut store, delete),
     }
+}
+
+pub(crate) fn preserve_codex_deletion(
+    targets: &[PathBuf],
+    validate: impl FnOnce() -> Result<(), String>,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let roots = roots("codex")?;
+    let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
+    let mut store = store("codex").lock().unwrap_or_else(|e| e.into_inner());
+    deletion::preserve_validated_at("codex", &roots, &mut store, targets, validate, delete)
 }
 
 fn preserve_before_delete_at(

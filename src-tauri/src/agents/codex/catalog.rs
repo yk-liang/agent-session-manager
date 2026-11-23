@@ -1,4 +1,4 @@
-use super::{history, load_thread_names_in, projects, storage, to_meta, ReadMode};
+use super::{history, load_thread_names_in, projects, storage, thread, to_meta, ReadMode};
 use crate::agents::{
     self, catalog_cache, check_catalog_cancelled, Catalog, CatalogFilter, SessionMeta,
 };
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const SUMMARY_CACHE_KIND: &str = "codex-history-v6";
+const SUMMARY_CACHE_KIND: &str = "codex-history-v7";
 
 pub(super) struct Scan {
     root: PathBuf,
@@ -24,7 +24,7 @@ impl Scan {
     ) -> Result<Self, String> {
         check_catalog_cancelled(cancelled)?;
         let mut warnings = Vec::new();
-        let paths = storage::rollouts(root, filter.include_archived, &mut warnings, cancelled)?;
+        let paths = storage::rollouts(root, true, &mut warnings, cancelled)?;
         check_catalog_cancelled(cancelled)?;
         let titles = root
             .parent()
@@ -47,8 +47,13 @@ impl Scan {
         let mut warnings = self.warnings.clone();
         let pages = history::read_headers(&self.paths, &mut warnings, cancelled)?;
         let groups = history::group_pages(pages);
+        let relations = thread::Relations::new(&groups, thread::spawn_edges_warned(&self.root, &mut warnings));
         let mut items = Vec::with_capacity(groups.len());
-        for pages in groups.values() {
+        for (id, pages) in &groups {
+            let archived = storage::is_archived(&self.root, &pages.last().unwrap().path);
+            if archived && !self.filter.include_archived {
+                continue;
+            }
             let paths: Vec<_> = pages.iter().map(|page| page.path.clone()).collect();
             check_catalog_cancelled(cancelled)?;
             let result = if quick {
@@ -64,16 +69,14 @@ impl Scan {
             match result {
                 Ok((mut meta, ws)) => {
                     warnings.extend(ws);
-                    if !self.filter.include_empty
-                        && !meta.stats_pending
-                        && meta.real_user_count == 0
-                    {
+                    relations.apply(id, meta.codex.as_mut().unwrap());
+                    if !self.filter.include_empty && !meta.stats_pending && meta.is_empty() {
                         continue;
                     }
                     if let Some(name) = self.titles.get(&meta.session_id) {
                         meta.title = Some(name.clone());
                     }
-                    meta.archived = storage::is_archived(&self.root, &pages.last().unwrap().path);
+                    meta.archived = archived;
                     let display = meta.cwd.clone().unwrap_or_else(|| "(未知目录)".into());
                     items.push((meta, display));
                 }
@@ -91,7 +94,9 @@ impl Scan {
 }
 
 fn preview(pages: &[history::Page], paths: Vec<PathBuf>) -> SessionMeta {
-    let mut meta = to_meta(&pages.last().unwrap().header, None);
+    let latest = &pages.last().unwrap().header;
+    let mut meta = to_meta(latest, None);
+    meta.codex = Some(super::thread::metadata(latest, pages));
     meta.size_bytes = Some(pages.iter().map(|page| page.header.size_bytes).sum());
     meta.last_ts = paths
         .iter()

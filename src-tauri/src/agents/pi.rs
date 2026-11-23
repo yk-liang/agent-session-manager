@@ -3,6 +3,7 @@
 
 mod events;
 mod storage;
+mod tools;
 mod transcript;
 #[cfg(test)]
 mod context_tests;
@@ -16,6 +17,8 @@ use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
 use transcript::parse;
 #[cfg(test)]
 use transcript::ParsedPi;
+
+const SUMMARY_CACHE_KIND: &str = "pi-transcript-v4";
 
 fn pi_home() -> PathBuf {
     if let Ok(v) = std::env::var("PI_CODING_AGENT_DIR") {
@@ -95,7 +98,7 @@ impl AgentSource for PiSource {
         let mut items = Vec::new();
         for path in storage::session_files(&sessions_dir(), &mut warnings) {
             super::check_catalog_cancelled(cancelled)?;
-            let result = super::catalog_cache::summary("pi-transcript-v3", std::slice::from_ref(&path), || {
+            let result = super::catalog_cache::summary(SUMMARY_CACHE_KIND, std::slice::from_ref(&path), || {
                 let (parsed, warnings) = parse(&path, false).split();
                 let parsed = parsed.ok_or_else(|| warnings.join("；"))?;
                 Ok((parsed.meta, warnings))
@@ -489,19 +492,27 @@ mod tests {
             r#"{"type":"model_change","id":"model","parentId":"e4","modelId":"selected"}"#,
             r#"{"type":"message","id":"e5","parentId":"model","timestamp":"2026-09-03T10:00:01.321Z","message":{"role":"assistant","model":"actual","content":[{"type":"thinking","thinking":"思考"},{"type":"text","text":"新回答"},{"type":"toolCall","id":"call","name":"check","arguments":{"path":"."}}]}}"#,
             r#"{"type":"message","id":"tool","parentId":"e5","timestamp":"2026-09-03T10:00:01.654Z","message":{"role":"toolResult","toolCallId":"call","content":[{"type":"image","mimeType":"image/png","data":"AAAA"}]}}"#,
+            r#"{"type":"session_info","id":"rename","parentId":"tool","timestamp":"2026-09-10T09:00:00Z","name":"改名后"}"#,
+            r#"{"type":"label","id":"tag","parentId":"rename","timestamp":"2026-09-10T09:01:00Z","label":"important"}"#,
+            r#"{"type":"usage","id":"u1","parentId":"tag","timestamp":"2026-09-10T09:02:00Z"}"#,
+            r#"{"type":"custom","id":"ext","parentId":"u1","timestamp":"2026-09-10T09:03:00Z","customType":"plugin","data":{}}"#,
         ];
         for line in lines {
             writeln!(f, "{line}").unwrap();
         }
 
+        let summary = parse(f.path(), false).split().0.unwrap();
         let p = session_of(f.path());
         assert_eq!(p.meta.session_id, "pi-001");
         assert_eq!(p.meta.cwd.as_deref(), Some("/tmp/pi-proj"));
-        assert_eq!(p.meta.title.as_deref(), Some("我的命名"));
+        assert_eq!(p.meta.title.as_deref(), Some("改名后"));
         assert_eq!(p.meta.real_user_count, 2);
         assert_eq!(p.meta.assistant_text_count, 1);
         assert_eq!(p.meta.model.as_deref(), Some("actual"));
+        assert_eq!(p.meta.first_ts.as_deref(), Some("2026-09-03T10:00:00Z"));
         assert_eq!(p.meta.last_ts.as_deref(), Some("2026-09-03T10:00:01.654Z"));
+        assert_eq!(summary.meta.last_ts, p.meta.last_ts);
+        assert_eq!(summary.meta.title, p.meta.title);
         assert_eq!(p.events.len(), 4);
         let answer = &p.events[2]["message"];
         assert_eq!(answer["model"], "actual");

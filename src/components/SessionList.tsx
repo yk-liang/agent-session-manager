@@ -1,19 +1,27 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef, type CSSProperties } from "react";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight } from "lucide-react";
 import UiIcon from "./UiIcon";
-import { formatSize, formatLocalDateTime, relativeTime, sessionKey, shortPath } from "../utils";
+import { formatSize, formatLocalDateTime, isEmptySession, relativeTime, sessionKey, shortPath } from "../utils";
+import type { SessionListRow } from "../sessionTree";
 import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
 import SearchField from "./SearchField";
 import ReadDiagnostics from "./ReadDiagnostics";
 import SessionActions from "./SessionActions";
+import CopyButton from "./CopyButton";
+import PathLabel from "./PathLabel";
 import { Checkbox, CheckboxField } from "./Checkbox";
 
 interface Props {
   scopeKey: string;
-  sessions: SessionMeta[];
+  rows: SessionListRow[];
+  expanded: ReadonlySet<string>;
+  onToggleChildren: (key: string) => void;
+  hidingSessionKey?: string;
+  revealSessionKey: string | null;
+  onRevealComplete: () => void;
   selectedSessionKey: string | null;
   search: string;
   onSearch: (s: string) => void;
@@ -48,7 +56,12 @@ interface Props {
 
 export default function SessionList({
   scopeKey,
-  sessions,
+  rows,
+  expanded,
+  onToggleChildren,
+  hidingSessionKey,
+  revealSessionKey,
+  onRevealComplete,
   selectedSessionKey,
   search,
   onSearch,
@@ -82,33 +95,44 @@ export default function SessionList({
 }: Props) {
   const busy = loading || refreshing;
   const selectedCount = batchMode && checkedSessionKeys.size
-    ? new Set(sessions.filter(session => checkedSessionKeys.has(sessionKey(session))).map(sessionKey)).size : 0;
-  const allSelected = selectedCount > 0 && sessions.every(session => checkedSessionKeys.has(sessionKey(session)));
+    ? new Set(rows.filter(row => checkedSessionKeys.has(row.key)).map(row => row.key)).size : 0;
+  const allSelected = selectedCount > 0 && rows.every(row => checkedSessionKeys.has(row.key));
   const scroll = useRef<HTMLDivElement>(null);
-  const getItemKey = useCallback((index: number) => `${agent?.id}:${sessionKey(sessions[index])}`, [agent?.id, sessions]);
-  const list = useVirtualizer({ count: sessions.length, getScrollElement: () => scroll.current,
+  const getItemKey = useCallback((index: number) => `${agent?.id}:${rows[index].key}`, [agent?.id, rows]);
+  const list = useVirtualizer({ count: rows.length, getScrollElement: () => scroll.current,
     getItemKey, estimateSize: () => 76, gap: 6, paddingStart: 8, paddingEnd: 8, overscan: 5,
     useAnimationFrameWithResizeObserver: true });
+  const items = list.getVirtualItems();
   useLayoutEffect(() => { scroll.current?.scrollTo(0, 0); }, [scopeKey, search]);
   // 滚动后用首条可见会话定位，列表顶部则跟随最新排序。
-  const layout = useRef<{ scope: string; sessions: SessionMeta[]; items: Pick<VirtualItem, "key" | "start" | "end">[] } | null>(null);
+  const layout = useRef<{ scope: string; rows: SessionListRow[]; items: Pick<VirtualItem, "key" | "start" | "end">[] } | null>(null);
   const layoutScope = `${scopeKey}\n${search}`;
   useLayoutEffect(() => {
     const previous = layout.current;
     const element = scroll.current;
     const top = element?.scrollTop ?? 0;
-    if (previous && previous.scope === layoutScope && previous.sessions !== sessions && top > 0) {
+    if (previous && previous.scope === layoutScope && previous.rows !== rows && top > 0) {
       for (const item of previous.items) {
         if (item.end <= top) continue;
-        const index = sessions.findIndex((_, i) => getItemKey(i) === item.key);
+        const index = rows.findIndex((_, i) => getItemKey(i) === item.key);
         if (index < 0) continue;
         const start = list.measurementsCache[index]?.start;
         if (start !== undefined && start !== item.start) list.scrollBy(start - item.start);
         break;
       }
     }
-    layout.current = { scope: layoutScope, sessions, items: list.getVirtualItems().map(({ key, start, end }) => ({ key, start, end })) };
+    layout.current = { scope: layoutScope, rows, items };
   });
+  const revealIndex = revealSessionKey ? rows.findIndex(row => row.key === revealSessionKey) : -1;
+  const revealMounted = items.some(item => item.index === revealIndex);
+  useLayoutEffect(() => {
+    if (revealIndex >= 0) list.scrollToIndex(revealIndex, { align: "auto" });
+  }, [list, revealIndex, revealSessionKey]);
+  useLayoutEffect(() => {
+    if (!revealMounted) return;
+    scroll.current?.querySelector<HTMLElement>(`[data-index="${revealIndex}"] :is(.session-card-open, .session-card-selection input)`)?.focus({ preventScroll: true });
+    onRevealComplete();
+  }, [revealIndex, revealMounted, onRevealComplete]);
   const emptyHint = loading ? "正在读取会话…"
     : loadError || warnings.length > 0 ? "暂无可显示的会话"
     : search.trim() ? "未找到匹配的会话" : "暂无会话";
@@ -126,15 +150,15 @@ export default function SessionList({
         {warnings.length > 0 && <ReadDiagnostics title="部分会话无法读取" errors={warnings} retry={onRetryLoad} busy={disabled || busy} />}
         <div className="session-list-options">
           <div className="session-list-filters">
-            <CheckboxField label="显示空会话" checked={filter.includeEmpty} disabled={disabled}
+            <CheckboxField label="空会话" checked={filter.includeEmpty} disabled={disabled}
               onChange={includeEmpty => onFilterChange({ ...filter, includeEmpty })} />
             {agent?.supportsArchivedSessions && (
-              <CheckboxField label="显示已归档" checked={filter.includeArchived} disabled={disabled}
+              <CheckboxField label="已归档" checked={filter.includeArchived} disabled={disabled}
                 onChange={includeArchived => onFilterChange({ ...filter, includeArchived })} />
             )}
           </div>
           {agent && agent.deletePolicy !== "readOnly" && (
-            <button type="button" onClick={onToggleBatch} disabled={disabled || busy || searchPending || (!batchMode && sessions.length === 0)}>
+            <button type="button" onClick={onToggleBatch} disabled={disabled || busy || searchPending || (!batchMode && rows.length === 0)}>
               {batchMode ? "完成" : "批量管理"}
             </button>
           )}
@@ -146,7 +170,7 @@ export default function SessionList({
             已选中 {selectedCount} 个会话
           </div>
           <div className="batch-actions">
-            <button type="button" onClick={onToggleAll} disabled={disabled || busy || searchPending || sessions.length === 0}>
+            <button type="button" onClick={onToggleAll} disabled={disabled || busy || searchPending || rows.length === 0}>
               {allSelected ? "取消全选" : "全选结果"}
             </button>
             <button type="button" className="danger" onClick={onDeleteSelected} disabled={disabled || busy || searchPending || selectedCount === 0}>
@@ -158,7 +182,7 @@ export default function SessionList({
       )}
       {failures.length > 0 && (
         <details className="batch-failures" open>
-          <summary><UiIcon icon={ChevronRight} className="details-caret" />{failures.length} 个会话未删除</summary>
+          <summary><UiIcon icon={ChevronRight} className="details-caret" />{failures.length} {agent?.id === "codex" ? "项删除失败" : "个会话未删除"}</summary>
           <ul>
             {failures.map(({ session, error }) => (
               <li key={sessionKey(session)}>
@@ -171,64 +195,103 @@ export default function SessionList({
         </details>
       )}
       <div className="session-cards" ref={scroll}>
-        <div className="session-card-list" style={{ height: sessions.length ? list.getTotalSize() : undefined }}>
-          {list.getVirtualItems().map(item => {
-            const s = sessions[item.index];
+        <div className="session-card-list" style={{ height: rows.length ? list.getTotalSize() : undefined }}>
+          {items.map(item => {
+            const { session: s, key, depth, childCount, guides } = rows[item.index];
             const statsKnown = !s.statsPending || s.statsRetained;
-            const isEmpty = statsKnown && s.realUserCount === 0;
-            const key = sessionKey(s);
+            const isEmpty = statsKnown && isEmptySession(s);
             const hit = searchHits.get(key);
             const title = s.title || "无标题";
             const hidePath = hiddenPathSessionKeys?.has(key) ?? false;
             const displayPath = displayRoots?.get(key) ?? s.cwd;
+            const copyPath = s.cwd ?? displayPath;
             const cardTitle = hidePath ? s.cwd ?? undefined : undefined;
-            const cardClass = `session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}`;
-            const content = (
+            const orphan = !!s.codex?.orphan;
+            const cardClass = `session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}${orphan ? " orphan" : ""}${depth ? " child" : ""}`;
+            const body = (
               <>
-                <span className="session-card-title">{title}</span>
+                <span className="session-card-header">
+                  <span className="session-card-title">{title}</span>
+                  <time className="session-card-time" dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>
+                    {relativeTime(s.lastTs)}
+                  </time>
+                </span>
                 {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
+                  {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
+                  {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
+                  {s.codex?.source === "exec" && <span className="status-tag" data-tone="success">exec</span>}
+                  <ModelLabel model={s.model} badge />
                   <span className="session-card-stats">
                     {statsKnown && <span>{s.realUserCount + s.assistantTextCount} 条消息</span>}
                     {s.sizeBytes != null && <span className="session-card-size">{formatSize(s.sizeBytes)}</span>}
                   </span>
-                  <time dateTime={s.lastTs ?? undefined} title={formatLocalDateTime(s.lastTs)}>{relativeTime(s.lastTs)}</time>
                 </span>
-                <span className="session-card-badges">
-                  {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
-                  {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
-                  <ModelLabel model={s.model} badge />
-                  {showPaths && !hidePath && displayPath && <span className="status-tag session-project-path" title={s.cwd ?? displayPath}>{shortPath(displayPath)}</span>}
-                </span>
-                {s.archived && <span className="archived-ribbon"><span>已归档</span></span>}
+                {!!search.trim() && s.codex?.parentId && <span className="session-search-parent">父会话 ID <code>{s.codex.parentId}</code></span>}
+                {!search.trim() && !depth && s.codex?.subagent && !orphan &&
+                  <span className="session-search-parent">父会话不在当前范围</span>}
+                {(s.archived || orphan) && <span className={`archived-ribbon${orphan ? " orphan-ribbon" : ""}`}><span>{orphan ? "孤儿" : "已归档"}</span></span>}
+                {s.archived && orphan && <span className="session-search-parent">已归档</span>}
               </>
             );
+            const pathButton = showPaths && !hidePath && displayPath && copyPath ? (
+              <CopyButton
+                className="status-tag session-project-path"
+                value={copyPath}
+                label={`复制路径：${copyPath}`}
+                title={copyPath}
+                iconClassName="session-path-copy-icon"
+                onError={error => toast(`复制路径失败：${String(error)}`, true)}
+              >
+                <PathLabel path={shortPath(displayPath)} className="session-project-path-text" bounds=".session-path-slot" reservedWidth={14} />
+              </CopyButton>
+            ) : null;
+            const canToggle = childCount > 0;
+            const isExpanded = expanded.has(key);
+            const hidesSelection = hidingSessionKey === key;
+            const footer = canToggle || pathButton ? (
+              <div className="session-card-path">
+                {canToggle && <button type="button" className="status-tag session-children-toggle"
+                  aria-expanded={isExpanded}
+                  aria-label={`${isExpanded ? "收起" : "展开"} ${title} 的 ${childCount} 个子会话${hidesSelection ? "（包含正在查看的会话）" : ""}`}
+                  onClick={() => onToggleChildren(key)} disabled={disabled}>
+                  <UiIcon icon={ChevronRight} size={12} />
+                  {childCount} 个子会话
+                  {hidesSelection && <span className="session-children-dot" aria-hidden="true" />}
+                </button>}
+                {pathButton && <div className="session-path-slot">{pathButton}</div>}
+              </div>
+            ) : null;
             return (
               <div className="session-card-row" key={item.key} data-index={item.index}
-                ref={list.measureElement} style={{ top: item.start }}>
-                {batchMode ? (
-                  <label className={`${cardClass} selectable`} title={cardTitle}>
-                    <Checkbox
-                      checked={checkedSessionKeys.has(key)}
-                      onChange={() => onSelect(s)}
-                      disabled={disabled || busy || searchPending}
-                      aria-label={`选择会话：${title}（${s.projectDir}）`}
-                    />
-                    <div className="session-card-content">{content}</div>
-                  </label>
-                ) : (
-                  <div className={cardClass} title={cardTitle}>
-                    <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
-                      {content}
-                    </button>
-                    {agent && <SessionActions agent={agent} session={s} onRequestDelete={onRequestDelete}
-                      onToggleArchive={onToggleArchive} toast={toast} compact disabled={disabled} />}
-                  </div>
-                )}
+                data-session-depth={depth || undefined}
+                ref={list.measureElement} style={{ top: item.start, "--session-depth": guides.length } as CSSProperties}>
+                {guides.map((continues, index) => <span key={index} aria-hidden="true"
+                  className={`session-branch${index === guides.length - 1 ? " elbow" : ""}${continues ? " continues" : ""}`}
+                  style={{ left: 8 + index * 18 }} />)}
+                <div className={cardClass} title={cardTitle}>
+                  {batchMode ? (
+                    <label className="session-card-selection">
+                      <Checkbox checked={checkedSessionKeys.has(key)} onChange={() => onSelect(s)}
+                        disabled={disabled || busy || searchPending}
+                        aria-label={`选择会话：${title}（${s.projectDir}）`} />
+                      <span className="session-card-content">{body}</span>
+                    </label>
+                  ) : (
+                    <>
+                      <button type="button" className="session-card-open" onClick={() => onSelect(s)} disabled={disabled}>
+                        {body}
+                      </button>
+                      {agent && <SessionActions agent={agent} session={s} onRequestDelete={onRequestDelete}
+                        onToggleArchive={onToggleArchive} toast={toast} compact disabled={disabled} />}
+                    </>
+                  )}
+                  {footer}
+                </div>
               </div>
             );
           })}
-          {sessions.length === 0 && (loading || !searchPending) && <div className="empty-hint" role="status">{emptyHint}</div>}
+          {rows.length === 0 && (loading || !searchPending) && <div className="empty-hint" role="status">{emptyHint}</div>}
         </div>
       </div>
     </div>

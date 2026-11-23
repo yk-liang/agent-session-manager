@@ -1,5 +1,5 @@
 import { Fragment, memo } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentInfo } from "../types";
 import type { EventPage, RequestEvent } from "./types";
 import { formatClock, formatCount, formatDate, formatDuration, formatPercent, formatRate, formatTps, formatUsd } from "./format";
@@ -12,6 +12,7 @@ import { TipTrigger, type TooltipContent } from "./UsageTooltip";
 import CopyButton from "../components/CopyButton";
 import ModelLabel from "../components/ModelLabel";
 import RequestDetail from "./RequestDetail";
+import { requestSessionIds } from "./requestSession";
 import UiIcon from "../components/UiIcon";
 import UsageNumber from "./UsageNumber";
 
@@ -48,14 +49,15 @@ function costTip(event: RequestEvent): TooltipContent {
   };
 }
 
-export default memo(function RequestTable({ page, agents, expandedRequestId, onExpand, copyFeedback }: {
+export default memo(function RequestTable({ page, agents, expandedRequestId, onExpand, onOpenSession, copyFeedback }: {
   page: EventPage;
   agents: AgentInfo[];
   expandedRequestId: string | null;
   onExpand: (id: string | null) => void;
+  onOpenSession: (event: RequestEvent) => void;
   copyFeedback: { onCopied: () => void; onError: () => void };
 }) {
-  const agentNames = new Map(agents.map(agent => [agent.id, agent.displayName]));
+  const agentInfo = new Map(agents.map(agent => [agent.id, agent]));
   const showCacheWrites = page.hasCacheWrites;
   const columns = requestColumns(showCacheWrites, page.hasServiceTiers);
   const { events } = page;
@@ -69,7 +71,8 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
           {events.map(event => {
             const { request } = event;
             const { latencyMs, ttftMs } = request;
-            const agentName = agentNames.get(event.agent) ?? event.agent;
+            const agent = agentInfo.get(event.agent);
+            const agentName = agent?.displayName ?? event.agent;
             const tier = request.tier?.trim();
             const estimated = request.timing === "codex_boundary" && latencyMs != null;
             const expanded = expandedRequestId === event.id;
@@ -125,8 +128,12 @@ export default memo(function RequestTable({ page, agents, expandedRequestId, onE
               </td>
               <td>
                 <div className="request-session-id">
-                  <code title={session}>{session}</code>
-                  <CopyButton className="request-session btn-icon btn-ghost" value={session} label={`复制会话 ID ${session}`} {...copyFeedback} />
+                  <code title={session}>{session || "—"}</code>
+                  {session && <CopyButton className="request-session btn-icon btn-ghost" value={session} label={`复制会话 ID ${session}`} {...copyFeedback} />}
+                  {agent?.installed && requestSessionIds(event).length > 0 && <button type="button" className="btn-icon btn-ghost"
+                    aria-label={`打开关联会话${session ? ` ${session}` : ""}`} title="打开关联会话" onClick={() => onOpenSession(event)}>
+                    <UiIcon icon={ArrowUpRight} />
+                  </button>}
                 </div>
               </td>
             </tr>

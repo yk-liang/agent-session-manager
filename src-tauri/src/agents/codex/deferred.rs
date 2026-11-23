@@ -24,6 +24,7 @@ fn locations() -> &'static Mutex<Locations> {
     static STORE: OnceLock<Mutex<Locations>> = OnceLock::new();
     STORE.get_or_init(Mutex::default)
 }
+/// 一行可生成多个工具块（如命令的调用与结果）时共用一条位置记录，令牌以 `#下标` 区分块。
 pub(super) fn register(path: &Path, identity: (u64, u64), offset: u64, line: &[u8]) -> String {
     let hash: [u8; 32] = Sha256::digest(line).into();
     let key = format!(
@@ -53,12 +54,20 @@ pub(super) fn register(path: &Path, identity: (u64, u64), offset: u64, line: &[u
     }
     key
 }
-pub(crate) fn read(token: &str) -> Result<Value, String> {
+pub(super) fn read(token: &str) -> Option<Result<Value, String>> {
+    let (key, block) = match token.split_once('#') {
+        Some((key, block)) => (key, block.parse().ok()?),
+        None => (token, 0),
+    };
+    (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).then(|| read_block(key, block))
+}
+
+fn read_block(key: &str, block: usize) -> Result<Value, String> {
     let location = locations()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entries
-        .get(token)
+        .get(key)
         .cloned()
         .ok_or("内容引用已过期，请重新打开会话")?;
     let mut file = storage::Reader::open(&location.path)
@@ -80,11 +89,12 @@ pub(crate) fn read(token: &str) -> Result<Value, String> {
         return Err("会话内容已变化，请重新打开会话".into());
     }
     let record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let mut events = Vec::new();
-    response::convert(&record["payload"], None, None, &mut events);
-    events
-        .first()
-        .and_then(|e| e.pointer("/message/content/0"))
-        .cloned()
-        .ok_or("工具内容不可用".into())
+    let blocks = if record["type"] == "event_msg" {
+        tools::blocks(&record["payload"]["item"], false)
+    } else {
+        let mut events = Vec::new();
+        response::convert(&record["payload"], None, None, &mut events);
+        events.iter().filter_map(|e| e.pointer("/message/content/0")).cloned().collect()
+    };
+    blocks.into_iter().nth(block).ok_or("工具内容不可用".into())
 }

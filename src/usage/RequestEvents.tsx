@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 import { useDelayedBusy } from "../useDelayedBusy";
 import type { AgentInfo } from "../types";
-import type { EventQuery, RequestFilters, RequestOutcome } from "./types";
+import type { EventQuery, RequestEvent, RequestFilters, RequestOutcome } from "./types";
 import { formatCount } from "./format";
 import { summaryQuery, type UsagePeriod } from "./range";
 import { REQUEST_OUTCOMES, REQUEST_OUTCOME_IDS } from "./trend";
@@ -25,6 +25,7 @@ interface Props {
   agent: string;
   revision: string;
   showToast: (message: string) => void;
+  onOpenSession: (event: RequestEvent, signal: AbortSignal) => void;
   syncing?: boolean;
 }
 
@@ -52,7 +53,7 @@ function filterOptions(
   ];
 }
 
-export default function RequestEvents({ agents, period, now, agent, revision, showToast, syncing = false }: Props) {
+export default function RequestEvents({ agents, period, now, agent, revision, showToast, onOpenSession, syncing = false }: Props) {
   const [requestFilters, setRequestFilters] = useUiPreference("requestFilters");
   const selection = (Object.prototype.hasOwnProperty.call(requestFilters, agent) ? requestFilters[agent] : undefined) ?? defaultRequestSelection;
   const onSelectionChange = (filters: RequestSelection) => setRequestFilters(current => ({ ...current, [agent]: filters }));
@@ -60,6 +61,14 @@ export default function RequestEvents({ agents, period, now, agent, revision, sh
   const [{ requestPageSize: pageSize }, setUsage] = useUiPreference("usage");
   const [copyError, setCopyError] = useState("");
   const [showCleanup, setShowCleanup] = useState(false);
+  const sessionJump = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => sessionJump.current?.abort(), [agent, period, model, project, status, pageSize]);
+  const openSession = useCallback((event: RequestEvent) => {
+    sessionJump.current?.abort();
+    const jump = new AbortController();
+    sessionJump.current = jump;
+    onOpenSession(event, jump.signal);
+  }, [onOpenSession]);
   const finishCleanup = (removed: number) => {
     setShowCleanup(false);
     showToast(removed ? `已清理 ${formatCount(removed)} 条孤儿记录` : "没有符合条件的孤儿记录");
@@ -81,6 +90,7 @@ export default function RequestEvents({ agents, period, now, agent, revision, sh
     onError: () => setCopyError("复制失败，请重试。"),
   }), []);
   const changePage = (target: number) => {
+    sessionJump.current?.abort();
     setCopyError("");
     goToPage(target);
   };
@@ -106,10 +116,13 @@ export default function RequestEvents({ agents, period, now, agent, revision, sh
     </div>
     <div className="request-table-wrap" ref={table} onScroll={onTableScroll} tabIndex={0} role="region" aria-label="请求记录表" aria-busy={loading}>
       {page && events.length > 0 && <RequestTable page={page} agents={agents} expandedRequestId={expandedRequestId}
-        onExpand={setExpandedRequestId} copyFeedback={copyFeedback} />}
+        onExpand={setExpandedRequestId} onOpenSession={openSession} copyFeedback={copyFeedback} />}
       {!events.length && !error && <div className="request-empty">{loading ? "正在读取请求记录…" : syncing ? "正在同步历史用量…" : filtered ? "未找到匹配的请求" : "所选范围暂无请求记录"}</div>}
     </div>
-    {error && <Notice tone="error" action={{ label: "重试", onClick: retryLoad, disabled: navigating }}>无法读取请求记录：{error}</Notice>}
+    {error && <Notice tone="error" action={{ label: "重试", onClick: () => {
+      sessionJump.current?.abort();
+      retryLoad();
+    }, disabled: navigating }}>无法读取请求记录：{error}</Notice>}
     {copyError && <Notice tone="error">{copyError}</Notice>}
     <div className="request-footer">
       {page?.timeline && page.total > 0 && <RequestTimeline

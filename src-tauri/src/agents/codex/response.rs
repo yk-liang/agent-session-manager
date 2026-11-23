@@ -1,4 +1,4 @@
-use super::{context, tool_output};
+use super::{context, tool_output, tools};
 use serde_json::{json, Value};
 
 pub(super) fn text_of_content<'a>(items: impl IntoIterator<Item = &'a Value>) -> String {
@@ -95,33 +95,33 @@ pub(super) fn convert(
             } else {
                 json!(payload.get("input").and_then(Value::as_str).unwrap_or(""))
             };
+            let mut block = json!({ "type": "tool_use", "id": call_id, "name": name, "input": input });
+            if let Some(op) = tools::describe(name, &input) {
+                block["ops"] = json!([op]);
+            }
             out.push(json!({
                 "type": "assistant",
                 "timestamp": ts,
                 "cwd": cwd,
-                "message": {
-                    "role": "assistant",
-                    "content": [{ "type": "tool_use", "id": call_id, "name": name, "input": input }],
-                },
+                "message": { "role": "assistant", "content": [block] },
             }));
         }
         "function_call_output" | "custom_tool_call_output" => {
             let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
             let output = &payload["output"];
-            let is_error = payload.get("output").is_some_and(tool_output::failed);
-            let content = tool_output::content(output);
+            let status = tool_output::status(output);
+            let mut result = json!({"type":"tool_result", "tool_use_id":call_id,
+                "content":tool_output::content(output), "is_error":status.failed});
+            if let Some(exit) = status.exit_code.filter(|_| payload["type"] == "function_call_output") {
+                result["exit_code"] = json!(exit);
+            }
             out.push(json!({
                 "type": "user",
                 "timestamp": ts,
                 "cwd": cwd,
                 "message": {
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
-                        "content": content,
-                        "is_error": is_error,
-                    }],
+                    "content": [result],
                 },
             }));
         }

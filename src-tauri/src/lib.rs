@@ -365,19 +365,30 @@ async fn delete_session(
     agent: String,
     project_dir: String,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<agents::SessionDeletion, String> {
     run_backend(move || {
         let source = agents::find_source(&agent)?;
         if source.delete_policy() == agents::DeletePolicy::ReadOnly {
             return Err("该 Agent 的会话为只读".into());
         }
+        if agent == "codex" {
+            let home = source.data_dir().ok_or("缺少 Codex 数据目录")?;
+            let plan = agents::codex::deletion::Plan::for_session(&home, &project_dir, &session_id)?;
+            let failure_history = usage::codex_failure_database(&home);
+            return plan.run(&failure_history, &|files, validate, mutate| {
+                usage::preserve_codex_deletion(files, validate, mutate)
+            });
+        }
         let targets = source.deletion_targets(&project_dir, &session_id)?;
         usage::preserve_before_delete(&agent, targets.as_deref(), || {
-            // 保存期间可能新建主日志或状态目录；实际删除集合必须仍与已保存的范围一致。
             if targets.is_some() && source.deletion_targets(&project_dir, &session_id)? != targets {
                 return Err("会话文件已变化，请重新确认后删除".into());
             }
             source.delete_session(&project_dir, &session_id)
+        })?;
+        Ok(agents::SessionDeletion {
+            removed: vec![agents::search::SessionRef { project_dir, session_id }],
+            error: None,
         })
     })
     .await
@@ -389,11 +400,30 @@ async fn set_session_archived(
     project_dir: String,
     session_id: String,
     archived: bool,
-) -> Result<(), String> {
+) -> Result<ArchiveOutcome, String> {
     run_backend(move || {
-        agents::find_source(&agent)?.set_session_archived(&project_dir, &session_id, archived)
+        let source = agents::find_source(&agent)?;
+        if agent == "codex" {
+            let before = agents::codex::archive_snapshot()?.into_iter().map(|change| (change.session, change.archived))
+                .collect::<std::collections::HashMap<_, _>>();
+            let result = source.set_session_archived(&project_dir, &session_id, archived);
+            let changed = agents::codex::archive_snapshot()?.into_iter()
+                .filter(|change| before.get(&change.session) == Some(&!change.archived)).collect();
+            return Ok(ArchiveOutcome { changed, error: result.err() });
+        }
+        source.set_session_archived(&project_dir, &session_id, archived)?;
+        Ok(ArchiveOutcome { changed: vec![agents::ArchiveChange {
+            session: agents::search::SessionRef { project_dir, session_id },
+            archived,
+        }], error: None })
     })
     .await
+}
+
+#[derive(serde::Serialize)]
+struct ArchiveOutcome {
+    changed: Vec<agents::ArchiveChange>,
+    error: Option<String>,
 }
 
 #[tauri::command]

@@ -114,7 +114,7 @@ try {
   await assertProjectDetail("cached refresh retried");
   pass("refresh failure and retry retain the project, detail and cached list");
 
-  await page.getByLabel("显示空会话").check();
+  await page.getByLabel("空会话").check();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await assertProjectDetail("uncached empty-session filter pending");
   assert.equal(await cards.count(), 2);
@@ -131,7 +131,7 @@ try {
   await assertProjectDetail("uncached empty-session filter loaded");
   pass("first empty-session filter preserves project and detail during loading, failure and successful retry");
 
-  await page.getByLabel("显示空会话").uncheck();
+  await page.getByLabel("空会话").uncheck();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 2, undefined, { timeout: 750 });
   await assertProjectDetail("cached filter switch pending");
@@ -146,7 +146,10 @@ try {
   const readsBeforeShortcuts = await page.evaluate(() => window.__CACHE_TEST__.calls.filter(call => call.command === "read_session").length);
   const targetCard = cards.filter({ hasText: /^Qoder question/ });
   const shortcuts = targetCard.getByRole("group", { name: "会话快捷操作" });
+  const cardTime = targetCard.locator(".session-card-time");
+  assert.ok(await cardTime.isVisible());
   await targetCard.hover();
+  assert.equal(await cardTime.isVisible(), false);
   const copy = shortcuts.getByRole("button", { name: "复制恢复命令（Qoder question）" });
   await copy.hover();
   assert.ok(await copy.locator(".session-action-tooltip", { hasText: "复制恢复命令" }).isVisible());
@@ -172,7 +175,7 @@ try {
   await project.click();
   await cards.filter({ hasText: "New Qoder question" }).click();
   await page.locator(".detail-title").waitFor();
-  await page.getByLabel("显示空会话").check();
+  await page.getByLabel("空会话").check();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   await codex();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "codex"));
@@ -202,7 +205,7 @@ try {
   assert.equal(await page.locator(".detail-actions").count(), 0);
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
   await waitLoaded();
-  await page.getByLabel("显示空会话").uncheck();
+  await page.getByLabel("空会话").uncheck();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.some(p => p.agent === "qoder"));
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));
   await waitLoaded();
@@ -229,7 +232,7 @@ try {
   await cards.filter({ hasText: /^Qoder question/ }).click();
   await page.locator(".detail-title").waitFor();
   await page.evaluate(() => { window.__CACHE_TEST__.hold.qoder = true; });
-  await page.getByLabel("显示空会话").check();
+  await page.getByLabel("空会话").check();
   await page.waitForFunction(() => window.__CACHE_TEST__.pending.length === 1);
   await assertProjectDetail("first successful filter pending");
   await page.evaluate(() => window.__CACHE_TEST__.release("qoder"));

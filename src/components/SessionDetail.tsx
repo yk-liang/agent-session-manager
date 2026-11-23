@@ -7,7 +7,8 @@ import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
 import { useSessionOutline } from "./SessionOutline";
 import { useConversationScroll } from "../useConversationScroll";
-import { DetailState, EventView, RowKey } from "./SessionEvent";
+import { DetailState } from "./DetailState";
+import { EventView } from "./SessionEvent";
 import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
 import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
@@ -23,15 +24,18 @@ interface Props {
   agent: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
   onToggleArchive: (session: SessionMeta) => void;
+  onOpenParent?: (id: string) => void;
+  onReveal?: () => void;
   actionsDisabled: boolean;
   toast: (msg: string, isError?: boolean) => void;
   searchTarget?: ConversationSearchTarget | null;
   onRetryRead?: () => void;
 }
 
-export default function SessionDetailView({ detail, reading, agent, onRequestDelete, onToggleArchive, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
+export default function SessionDetailView({ detail, reading, agent, onRequestDelete, onToggleArchive, onOpenParent, onReveal, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
   const key = sessionKey(meta);
+  const parentId = meta.codex?.parentId;
   const reportCopyError = useCallback((error: unknown) => toast(`复制失败：${String(error)}`, true), [toast]);
   const [{ tool: showTools, thinking: showThinking, context: showContext, markdown: renderMarkdown }, setConversation] = useUiPreference("conversation");
 
@@ -56,20 +60,22 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
     return detail.events.findIndex((event) => eventMatches(event, searchTarget.query));
   }, [detail.events, searchTarget]);
 
-  const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, onCopyError: reportCopyError }),
-    [reading, renderMarkdown, reportCopyError]);
+  const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, cwd: meta.cwd, onCopyError: reportCopyError }),
+    [reading, renderMarkdown, meta.cwd, reportCopyError]);
   const visible = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
     : visibleSessionRows(content.rows, visibility), [content, visibility]);
-  const itemKey = useCallback((index: number) => visible[index], [visible]);
+  const heads = useMemo(() => visible.map(row => row.index), [visible]);
+  const groups = useMemo(() => visible.map(({ index, members }) => [index, ...members].map(i => rows[i])), [visible, rows]);
+  const itemKey = useCallback((index: number) => heads[index], [heads]);
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
     estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 8, useAnimationFrameWithResizeObserver: true });
-  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, visible, virtual, bodyRef, contentRef);
+  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, heads, virtual, bodyRef, contentRef);
   const outline = useSessionOutline(toc, key, position, jumpTo);
   const markdownAnchor = useRef<number | null>(null);
   const changeMarkdown = (enabled: boolean) => {
     const offset = virtual.scrollOffset ?? 0;
     const first = virtual.getVirtualItems().find((row) => row.end > offset);
-    markdownAnchor.current = first ? visible[first.index] : null;
+    markdownAnchor.current = first ? heads[first.index] : null;
     setConversation(current => ({ ...current, markdown: enabled }));
   };
   useLayoutEffect(() => {
@@ -83,10 +89,10 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
       virtual.resizeItem(Number(row.dataset.index), row.getBoundingClientRect().height);
     });
     if (!searchTarget) {
-      const position = visible.indexOf(index);
+      const position = heads.indexOf(index);
       if (position >= 0) virtual.scrollToIndex(position, { align: "start" });
     }
-  }, [renderMarkdown, virtual, visible, searchTarget]);
+  }, [renderMarkdown, virtual, heads, searchTarget]);
   // 正文刷新只更新定位数据，避免把读者拉回搜索命中处。
   const latestHit = useRef({ hitIndex, jumpTo });
   useLayoutEffect(() => { latestHit.current = { hitIndex, jumpTo }; }, [hitIndex, jumpTo]);
@@ -103,22 +109,34 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
           {meta.archived && <span className="status-tag">已归档</span>}
+          {meta.codex?.orphan && <span className="status-tag" data-tone="warning">孤儿子会话</span>}
           <CopyButton key={`copy:${key}`} className="session-id btn-ghost btn-sm" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
             <span>ID:</span>
             <code>{meta.sessionId}</code>
           </CopyButton>
+          {meta.codex?.subagent && (parentId ? (
+            <span className="parent-session">
+              <span>父会话 ID</span>
+              {onOpenParent
+                ? <button type="button" className="session-id btn-ghost btn-sm" onClick={() => onOpenParent(parentId)} disabled={actionsDisabled}
+                    aria-label={`打开父会话 ${parentId}`}><code>{parentId}</code></button>
+                : <code>{parentId}</code>}
+              <CopyButton className="btn-icon btn-ghost" value={parentId} label="复制父会话 ID" onError={reportCopyError} />
+            </span>
+          ) : <span>父会话 ID 未知</span>)}
           {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${formatLocalDateTime(meta.firstTs)} ~ ${formatLocalDateTime(meta.lastTs)}`}>
             {formatLocalDateTime(meta.lastTs)}
           </time>}
           <div className="detail-meta-actions">
             {outline.trigger}
-            <SessionInfo key={`info:${key}`} meta={meta} agentName={agent.displayName} models={models} />
+            <SessionInfo key={`info:${key}`} meta={meta} agentName={agent.displayName} models={models} onCopyError={reportCopyError} />
           </div>
         </div>
         <div className="detail-toolbar">
           <div className="detail-actions">
             <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete}
               onToggleArchive={onToggleArchive} toast={toast} disabled={actionsDisabled} />
+            {onReveal && <button type="button" onClick={onReveal} disabled={actionsDisabled}>在列表定位</button>}
           </div>
           {meta.hasTranscript && (
             <div className="view-toggles" role="group" aria-label="对话显示选项">
@@ -136,17 +154,18 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           <div className="detail-body" ref={bodyRef} tabIndex={-1}>
             <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
               {virtual.getVirtualItems().map((row) => {
-                const i = visible[row.index];
-                const previous = rows[visible[row.index - 1]];
+                const i = heads[row.index];
+                const previous = visible[row.index - 1];
                 return <div data-index={row.index} tabIndex={-1} title={eventModelTitle(detail.events[i])} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
-                  data-follows-activity={previous && !rowEndsWithMessage(previous, visibility) || undefined}
+                  data-follows-activity={previous && !rowEndsWithMessage(rows, previous, visibility) || undefined}
                   className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
-                  <RowKey.Provider value={String(i)}><EventView
-                    row={rows[i]}
+                  <EventView
+                    index={i}
+                    rows={groups[row.index]}
                     visibility={visibility}
                     renderMarkdown={renderMarkdown}
                     highlightQuery={i === hitIndex ? searchTarget?.query : undefined}
-                  /></RowKey.Provider>
+                  />
                 </div>;
               })}
             </div>

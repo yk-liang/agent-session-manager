@@ -5,9 +5,10 @@ import { AgentCatalogCache, catalogFilterFor, EMPTY_CATALOG } from "./catalogCac
 import { observeSessionChanges } from "./sessionWatch";
 import type { AgentInfo, CatalogFilter } from "./types";
 
-export function useSessionCounts(agents: AgentInfo[], filter: CatalogFilter, cache: AgentCatalogCache, activeAgent: string | null) {
+export function useSessionCounts(agents: AgentInfo[], filter: CatalogFilter, cache: AgentCatalogCache, activeAgent: string | null, activeFilter: CatalogFilter) {
   useSyncExternalStore(cache.subscribe, cache.countVersion);
-  const scopes = agents.map(agent => ({ id: agent.id, filter: catalogFilterFor(filter, agent.supportsArchivedSessions) }));
+  const scopes = agents.map(agent => ({ id: agent.id,
+    filter: agent.id === activeAgent ? activeFilter : catalogFilterFor(filter, agent.supportsArchivedSessions) }));
   return {
     counts: new Map(scopes.map(({ id, filter }) => [id, cache.count(id, filter) ?? null] as const)),
     refresh() {

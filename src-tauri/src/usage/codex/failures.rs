@@ -12,16 +12,8 @@ pub(in crate::usage) const DATABASE: &str = "thread_history_1.sqlite";
 pub(in crate::usage) const PARSER_VERSION: u8 = 1;
 const TURN_KEY: &str = "codex-turn-failure:";
 
-pub(in crate::usage) fn database(codex_home: &Path) -> PathBuf {
-    let configured = std::fs::read_to_string(codex_home.join("config.toml"))
-        .ok()
-        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
-        .and_then(|config| config.get("sqlite_home")?.as_str().map(str::to_owned));
-    configured
-        .or_else(|| std::env::var("CODEX_SQLITE_HOME").ok())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| codex_home.join(crate::agents::expand_tilde(value.trim())))
-        .unwrap_or_else(|| codex_home.to_path_buf())
+pub(crate) fn database(codex_home: &Path) -> PathBuf {
+    crate::agents::codex::sqlite_home(codex_home)
         .join(DATABASE)
 }
 
