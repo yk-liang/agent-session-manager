@@ -12,8 +12,10 @@ pub(super) struct Summary {
     cwd: Option<String>,
     modified: Option<i64>,
     pub(super) parent_id: Option<String>,
-    child: bool,
+    pub(super) child: bool,
 }
+
+pub(super) type Index = HashMap<String, Summary>;
 
 pub(super) fn path(root: &Path) -> PathBuf {
     if root.ends_with("conversations") {
@@ -24,7 +26,7 @@ pub(super) fn path(root: &Path) -> PathBuf {
     root.join(DATABASE)
 }
 
-pub(super) fn read(path: &Path) -> Result<HashMap<String, Summary>, String> {
+pub(super) fn read(path: &Path) -> Result<Index, String> {
     if path.metadata().is_err_and(|error| error.kind() == ErrorKind::NotFound) {
         return Ok(HashMap::new());
     }
@@ -54,20 +56,9 @@ pub(super) fn read(path: &Path) -> Result<HashMap<String, Summary>, String> {
     }).map_err(|error| format!("无法读取 Antigravity 会话索引 {}：{error}", path.display()))
 }
 
-pub(super) fn apply(meta: &mut SessionMeta, path: &Path, index: &HashMap<String, Summary>) {
+pub(super) fn apply(meta: &mut SessionMeta, path: &Path, index: &Index) {
     let summary = index.get(&meta.session_id);
     if let Some(summary) = summary {
-        if summary.child {
-            let parent_exists = summary.parent_id.as_deref()
-                .filter(|id| *id != meta.session_id && crate::agents::claude_family::is_session_id(id))
-                .and_then(|id| path.parent().map(|dir| dir.join(format!("{id}.db"))))
-                .is_some_and(|path| path.symlink_metadata().is_ok_and(|meta| meta.is_file()));
-            meta.subagent = Some(crate::agents::Subagent {
-                parent_id: summary.parent_id.clone(),
-                orphan: !parent_exists,
-                ..Default::default()
-            });
-        }
         if !summary.title.trim().is_empty() {
             meta.title = Some(summary.title.clone());
         }
@@ -85,8 +76,4 @@ pub(super) fn apply(meta: &mut SessionMeta, path: &Path, index: &HashMap<String,
         });
         meta.last_ts = modified.and_then(ms_to_iso);
     }
-}
-
-pub(super) fn is_subagent(index: &HashMap<String, Summary>, id: &str) -> bool {
-    index.get(id).is_some_and(|summary| summary.child)
 }

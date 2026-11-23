@@ -9,6 +9,7 @@ pub mod claude;
 pub mod claude_family;
 pub mod codex;
 pub mod ids;
+pub(crate) mod lineage;
 pub mod opencode;
 pub mod pi;
 pub mod profiles;
@@ -91,6 +92,22 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    pub(crate) fn location(&self) -> SessionLocation {
+        SessionLocation { session_id: self.session_id.clone(), project_dir: self.project_dir.clone(), cwd: self.cwd.clone() }
+    }
+
+    /// 换用新的项目目录标识，子会话关系中指向同一目录的引用随之更新。
+    pub(crate) fn relocate(&mut self, project_dir: String) {
+        if let Some(relation) = &mut self.subagent {
+            let parent = relation.parent.iter_mut().map(|parent| &mut parent.project_dir);
+            let owner = relation.project_owner.iter_mut().map(|owner| &mut owner.project_dir);
+            for dir in parent.chain(owner).filter(|dir| **dir == self.project_dir) {
+                dir.clone_from(&project_dir);
+            }
+        }
+        self.project_dir = project_dir;
+    }
+
     fn is_empty(&self) -> bool {
         self.codex.as_ref()
             .filter(|thread| !thread.can_resume || matches!(thread.source.as_deref(), Some("exec" | "mcp" | "appServer")))
@@ -110,18 +127,18 @@ pub struct Subagent {
     pub parent: Option<search::SessionRef>,
     pub orphan: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_owner: Option<SessionProjectOwner>,
+    pub project_owner: Option<SessionLocation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionProjectOwner {
+pub struct SessionLocation {
     pub session_id: String,
     pub project_dir: String,
     pub cwd: Option<String>,
 }
 
-impl SessionProjectOwner {
+impl SessionLocation {
     fn session_ref(&self) -> search::SessionRef {
         search::SessionRef {
             project_dir: self.project_dir.clone(),
@@ -144,6 +161,8 @@ pub struct Project {
 pub struct SessionDetail {
     pub meta: SessionMeta,
     pub events: Vec<serde_json::Value>,
+    /// 开头这些事件是子会话分叉时从父会话继承的上下文。
+    pub inherited: usize,
     /// 可读取当前片段，但历史分页缺失时在打开详情后提示，不阻断已有内容。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -386,9 +405,10 @@ pub trait AgentSource: Send + Sync {
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String>;
     /// 使用目录扫描时确认的定位信息读取正文，避免逐会话重新遍历全部数据目录。
+    /// 不含继承自父会话的上下文，同一段内容只在父会话中命中。
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<serde_json::Value>, String> {
         self.read_session(&meta.project_dir, &meta.session_id)
-            .map(|detail| detail.events)
+            .map(|mut detail| detail.events.split_off(detail.inherited))
     }
     fn delete_session(&self, _project_dir: &str, _session_id: &str, _preserved: Option<&[PathBuf]>) -> Result<SessionDeletion, String> {
         Err("该 Agent 的会话为只读".into())

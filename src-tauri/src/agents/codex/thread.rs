@@ -1,5 +1,5 @@
-use super::{history::Page, sqlite_home, ParsedRollout};
-use crate::agents::{SessionMeta, SessionProjectOwner, Subagent};
+use super::{history::Page, sqlite_home};
+use crate::agents::{lineage::{Lineage, Node}, SessionLocation, SessionMeta};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -108,17 +108,6 @@ impl Link {
         }
         link
     }
-
-    fn parent(&self) -> Option<&str> {
-        (self.parents.len() == 1).then(|| self.parents.first().unwrap().as_str())
-    }
-}
-
-pub(super) fn metadata(latest: &ParsedRollout, pages: &[Page]) -> ThreadMeta {
-    let mut meta = latest.thread.meta.clone();
-    let link = Link::from_pages(pages);
-    meta.can_resume &= !link.subagent;
-    meta
 }
 
 pub(super) type SpawnEdges = Vec<(String, String)>;
@@ -170,123 +159,37 @@ pub(super) fn spawn_edges_warned(root: &Path, warnings: &mut Vec<String>) -> Spa
     }
 }
 
-pub(super) struct Relations {
-    links: BTreeMap<String, Link>,
-    projects: BTreeMap<String, SessionProjectOwner>,
-    cycles: HashSet<String>,
-    owners: BTreeMap<String, SessionProjectOwner>,
-}
+pub(super) struct Relations(Lineage);
 
 impl Relations {
     pub fn new(groups: &BTreeMap<String, Vec<Page>>, edges: SpawnEdges) -> Self {
-        let mut links: BTreeMap<_, _> = groups
-            .iter()
-            .map(|(id, pages)| (id.clone(), Link::from_pages(pages)))
-            .collect();
-        for (child, parent) in edges {
-            let link = links.entry(child).or_default();
-            link.parents.insert(parent);
-            link.subagent = true;
-        }
-        let mut cycles = HashSet::new();
-        let mut visited = HashSet::new();
-        for id in links.keys() {
-            let mut chain = Vec::new();
-            let mut path = HashSet::new();
-            let mut current = id.as_str();
-            while !visited.contains(current) {
-                if !path.insert(current) {
-                    cycles.extend(
-                        chain
-                            .iter()
-                            .skip_while(|&&id| id != current)
-                            .map(|&id: &&str| id.to_owned()),
-                    );
-                    break;
-                }
-                chain.push(current);
-                let Some(parent) = links.get(current).and_then(Link::parent) else {
-                    break;
-                };
-                current = parent;
-            }
-            visited.extend(chain);
-        }
-        let projects: BTreeMap<_, _> = groups.iter().map(|(id, pages)| {
+        let threads = groups.iter().map(|(id, pages)| {
+            let link = Link::from_pages(pages);
             let cwd = pages.last().and_then(|page| page.header.cwd.clone());
             let project_dir = cwd.as_deref().map(super::escape_cwd).unwrap_or_else(|| "-unknown".into());
-            let project = SessionProjectOwner { session_id: id.clone(), project_dir, cwd };
-            (id.clone(), project)
-        }).collect();
-        let mut owners = BTreeMap::<String, SessionProjectOwner>::new();
-        for id in groups.keys() {
-            let mut current = id.as_str();
-            let mut path = Vec::new();
-            let owner = loop {
-                if let Some(owner) = owners.get(current) {
-                    break owner.clone();
-                }
-                let parent = links[current]
-                    .parent()
-                    .filter(|parent| !cycles.contains(current) && groups.contains_key(*parent));
-                let Some(parent) = parent else {
-                    break projects[current].clone();
-                };
-                path.push(current);
-                current = parent;
-            };
-            for id in path {
-                owners.insert(id.into(), owner.clone());
+            Node {
+                id: id.clone(),
+                location: Some(SessionLocation { session_id: id.clone(), project_dir, cwd }),
+                parents: link.parents.into_iter().collect(),
+                child: link.subagent,
             }
-        }
-        Self {
-            links,
-            projects,
-            cycles,
-            owners,
-        }
+        });
+        let spawned = edges.into_iter().map(|(child, parent)| Node { id: child, location: None, parents: vec![parent], child: true });
+        Self(Lineage::new(threads.chain(spawned)))
     }
 
     pub fn is_subagent(&self, id: &str) -> bool {
-        self.links[id].subagent
+        self.0.is_child(id)
     }
 
     pub fn apply(&self, id: &str, meta: &mut SessionMeta) {
-        let link = &self.links[id];
-        if link.subagent {
-            let parent = link.parent().and_then(|parent| self.projects.get(parent));
+        meta.subagent = self.0.subagent(id);
+        if meta.subagent.is_some() {
             meta.codex.as_mut().unwrap().can_resume = false;
-            meta.subagent = Some(Subagent {
-                parent_id: link.parent().map(str::to_owned),
-                parent: parent.map(SessionProjectOwner::session_ref),
-                orphan: self.cycles.contains(id) || parent.is_none(),
-                project_owner: self.owners.get(id).cloned(),
-                ..Subagent::default()
-            });
         }
     }
 
     pub fn subtree<'a>(&'a self, root: &'a str) -> Result<Vec<&'a str>, String> {
-        if !self.links.contains_key(root) {
-            return Err("未找到该 Codex 会话".into());
-        }
-        let mut children = BTreeMap::<&str, Vec<&str>>::new();
-        for (id, link) in &self.links {
-            for parent in &link.parents {
-                children.entry(parent).or_default().push(id);
-            }
-        }
-        let mut ordered = Vec::new();
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
-            if self.cycles.contains(id) || self.links[id].parents.len() > 1 {
-                return Err(format!(
-                    "Codex 会话 {id} 的父子关系存在冲突，无法确认删除范围"
-                ));
-            }
-            ordered.push(id);
-            pending.extend(children.get(id).into_iter().flatten().rev().copied());
-        }
-        Ok(ordered)
+        self.0.subtree(root)
     }
 }

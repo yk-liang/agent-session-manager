@@ -44,7 +44,8 @@ impl Activity {
         }
     }
 
-    pub fn remove_redundant_scripts(&self, events: &mut Vec<Value>) {
+    /// `prefix` 是开头继承自父会话的事件数，随前缀内被折叠的事件一起减少。
+    pub fn remove_redundant_scripts(&self, events: &mut Vec<Value>, prefix: &mut usize) {
         let mut by_turn: HashMap<&str, Vec<(&String, &ExecSpan)>> = HashMap::new();
         for (id, span) in &self.scripts {
             by_turn.entry(&span.turn).or_default().push((id, span));
@@ -72,7 +73,11 @@ impl Activity {
             return;
         }
         let mut outputs = HashMap::new();
+        let boundary = *prefix;
+        let mut position = 0;
         events.retain_mut(|event| {
+            let inherited = position < boundary;
+            position += 1;
             let Some(block) = event.pointer_mut("/message/content/0") else { return true };
             let id = match block["type"].as_str() {
                 Some("tool_use") => &block["id"],
@@ -83,6 +88,7 @@ impl Activity {
             if block["type"] == "tool_result" {
                 outputs.insert(execution.as_str(), block.take());
             }
+            *prefix -= usize::from(inherited);
             false
         });
         for event in events {

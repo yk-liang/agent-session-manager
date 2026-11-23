@@ -9,13 +9,20 @@ use crate::agents::{context, escape_path_id, ms_to_iso, SessionDetail, SessionMe
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, HashMap}, path::Path};
 
-fn generation_models(
+#[derive(Default)]
+struct Generations {
+    models: BTreeMap<i64, Model>,
+    /// 只有最近一次生成请求保留完整系统提示词，较早的记录会被精简。
+    system_prompt: Option<String>,
+}
+
+fn generations(
     connection: &rusqlite::Connection,
     warnings: &mut Vec<String>,
-) -> storage::ReadResult<BTreeMap<i64, Model>> {
+) -> storage::ReadResult<Generations> {
     let mut stmt = connection.prepare("SELECT idx,data FROM gen_metadata ORDER BY idx")?;
     let mut rows = stmt.query([])?;
-    let mut models = BTreeMap::new();
+    let mut generations = Generations::default();
     while let Some(row) = rows.next()? {
         let index = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
@@ -23,13 +30,16 @@ fn generation_models(
             Ok(request) => {
                 let model = Model::generation(&request);
                 if model.is_recorded() {
-                    models.insert(index, model);
+                    generations.models.insert(index, model);
+                }
+                if let Some(prompt) = request.text(1).filter(|prompt| !prompt.trim().is_empty()) {
+                    generations.system_prompt = Some(prompt.to_owned());
                 }
             }
             Err(error) => warnings.push(format!("Antigravity 生成记录 {index} 的模型无法读取：{error}")),
         }
     }
-    Ok(models)
+    Ok(generations)
 }
 
 fn count_message(meta: &mut SessionMeta, kind: i64, blocks: &[Value]) {
@@ -87,14 +97,19 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         };
         let mut detail_events = Vec::new();
         let mut warnings = Vec::new();
-        let generation = if schema.generations {
-            generation_models(connection, &mut warnings).unwrap_or_else(|error| {
+        let Generations { models: generation, system_prompt } = if schema.generations {
+            generations(connection, &mut warnings).unwrap_or_else(|error| {
                 warnings.push(format!("Antigravity 会话模型无法读取：{error}"));
-                BTreeMap::new()
+                Generations::default()
             })
         } else {
-            BTreeMap::new()
+            Generations::default()
         };
+        if let Some(prompt) = system_prompt.filter(|_| events) {
+            detail_events.push(json!({"uuid":format!("{session_id}:system-prompt"),"type":"context",
+                "context":{"kind":"instructions","label":"系统提示词"},
+                "message":{"role":"system","content":prompt}}));
+        }
         let mut names = HashMap::new();
         for model in generation.values() {
             model.remember(&mut names);
@@ -189,7 +204,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         }
         meta.model = current_model.filter(|name| name != "unknown");
         crate::agents::tool_ops::describe_tools(&mut detail_events, super::tools::describe);
-        Ok(SessionDetail { meta, events: detail_events, warnings })
+        Ok(SessionDetail { meta, events: detail_events, inherited: 0, warnings })
     })
 }
 

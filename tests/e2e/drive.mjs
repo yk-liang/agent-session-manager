@@ -194,7 +194,7 @@ const initScript = `
       if (cmd === "plugin:clipboard-manager|write_text") { window.__COPIED_TEXT__ = args.text; return null; }
       if (cmd === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
       if (cmd === "cancel_conversation_search") return null;
-      if (cmd === "set_batch_delete_guard") {
+      if (cmd === "set_delete_guard") {
         if (args.active && window.__HOLD_BATCH_GUARD__) {
           await new Promise((resolve, reject) => { window.__BATCH_GUARD_START__ = { resolve, reject }; });
         }
@@ -595,8 +595,7 @@ await page.locator(".session-card", { hasText: "保留的会话" }).locator("inp
 assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 3);
-assert.ok((await page.locator(".modal-body").textContent()).includes("将删除 Qoder 的 3 个会话。"));
-assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("已选 3 项，每项包含所列会话及其所有子会话。"));
 assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "无法恢复" : "废纸篓还原"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
 const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
@@ -680,7 +679,7 @@ await page.evaluate(() => {
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
 await progressDialog.waitFor({ state: "detached" });
 const guardedOperations = await page.evaluate((before) => window.__INVOKE_LOG__.slice(before)
-  .filter(x => x.cmd === "set_batch_delete_guard" || x.cmd === "delete_session")
+  .filter(x => x.cmd === "set_delete_guard" || x.cmd === "delete_session")
   .map(x => x.cmd === "delete_session" ? x.cmd : x.args.active), guardedBatchStart);
 assert.deepEqual(guardedOperations, [true, "delete_session", "delete_session", "delete_session", false]);
 assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true }))), true);
@@ -725,8 +724,8 @@ await page.getByRole("button", { name: "批量管理", exact: true }).click();
 await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.ok((await page.locator(".modal-body").textContent()).includes("删除后无法恢复"));
-assert.ok((await page.locator(".modal-body").textContent()).includes("子会话也会一并删除"));
-assert.ok((await page.locator(".modal-actions .danger").textContent()).includes("永久删除（1）"));
+assert.ok((await page.locator(".modal-body").textContent()).includes("每项包含所列会话及其所有子会话"));
+assert.ok((await page.locator(".modal-actions .danger").textContent()).includes("永久删除（1 项）"));
 await page.locator(".modal-actions .danger").click();
 await page.locator(".session-cards .empty-hint", { hasText: "暂无会话" }).waitFor();
 assert.ok(await page.getByRole("button", { name: "全选结果", exact: true }).isDisabled());

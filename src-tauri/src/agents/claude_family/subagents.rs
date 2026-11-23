@@ -1,5 +1,5 @@
 use super::{is_session_id, DeletionPlan, SessionMeta};
-use crate::agents::{self, search::SessionRef, Subagent, TargetKind};
+use crate::agents::{self, lineage::{Lineage, Node}, SessionLocation, TargetKind};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -13,7 +13,6 @@ pub(super) struct Child {
     pub id: String,
     pub log: PathBuf,
     root_id: String,
-    root_exists: bool,
     parent: Parent,
     description: Option<String>,
     tool_use_id: Option<String>,
@@ -40,7 +39,7 @@ fn valid_agent_id(id: &str) -> bool {
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-pub(super) fn child_id(root: &str, id: &str) -> String {
+fn child_id(root: &str, id: &str) -> String {
     format!("subagent:{root}:{id}")
 }
 
@@ -53,28 +52,61 @@ pub(super) fn child_log(project: &Path, root: &str, id: &str) -> PathBuf {
     project.join(root).join("subagents").join(format!("agent-{id}.jsonl"))
 }
 
+/// 子会话的 ID 带根会话前缀，展示时只用 Agent 记录的原始 ID。
+fn display_id(id: &str) -> &str {
+    child_identity(id).map_or(id, |(_, id)| id)
+}
+
+/// 根会话目录下的全部子会话摘要。嵌套子会话的父会话都在同一组内，关系按整组解析。
+pub(super) fn group(
+    project: &Path,
+    root: Option<&SessionMeta>,
+    root_id: &str,
+    summary: impl Fn(&Path) -> Result<(SessionMeta, Vec<String>), String>,
+    warnings: &mut Vec<String>,
+) -> Vec<(Child, SessionMeta)> {
+    let mut members = Vec::new();
+    for child in children(project, root_id, warnings) {
+        match summary(&child.log) {
+            Ok((mut meta, ws)) => {
+                warnings.extend(ws);
+                meta.session_id = child.session_id();
+                members.push((child, meta));
+            }
+            Err(error) => warnings.push(error),
+        }
+    }
+    let root = root.map(|meta| Node::new(meta.location(), None));
+    let lineage = Lineage::new(root.into_iter().chain(members.iter().map(|(child, meta)| child.node(Some(meta.location())))));
+    for (child, meta) in &mut members {
+        child.relate(meta, &lineage);
+    }
+    members
+}
+
 impl Child {
-    pub fn apply(&self, meta: &mut SessionMeta, project_dir: &str) {
-        meta.session_id = child_id(&self.root_id, &self.id);
-        let (parent_id, session_id) = match &self.parent {
-            Parent::Root => (Some(self.root_id.clone()), self.root_exists.then(|| self.root_id.clone())),
-            Parent::Child(id) => (Some(id.clone()), Some(child_id(&self.root_id, id))),
-            Parent::Unknown => (None, None),
+    fn session_id(&self) -> String {
+        child_id(&self.root_id, &self.id)
+    }
+
+    fn node(&self, location: Option<SessionLocation>) -> Node {
+        let parent = match &self.parent {
+            Parent::Root => Some(self.root_id.clone()),
+            Parent::Child(id) => Some(child_id(&self.root_id, id)),
+            Parent::Unknown => None,
         };
-        meta.subagent = Some(Subagent {
-            id: Some(self.id.clone()),
-            parent_id,
-            orphan: session_id.is_none(),
-            parent: session_id.map(|session_id| SessionRef { session_id, project_dir: project_dir.to_owned() }),
-            project_owner: None,
+        Node { id: self.session_id(), location, parents: parent.into_iter().collect(), child: true }
+    }
+
+    fn relate(&self, meta: &mut SessionMeta, lineage: &Lineage) {
+        meta.subagent = lineage.subagent(&meta.session_id).map(|mut relation| {
+            relation.id = Some(self.id.clone());
+            relation.parent_id = relation.parent_id.map(|id| display_id(&id).to_owned());
+            relation
         });
         if meta.title.is_none() {
             meta.title.clone_from(&self.description);
         }
-    }
-
-    fn metadata_path(&self) -> PathBuf {
-        self.log.with_extension("meta.json")
     }
 
     fn verify(&self, project: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
@@ -100,7 +132,7 @@ impl Child {
         if !confirmed {
             return Err(format!("子会话 {log:?} 缺少身份记录，已中止删除"));
         }
-        let sidecar = self.metadata_path();
+        let sidecar = sidecar(&self.log);
         let sidecar = agents::present(&sidecar)?
             .then(|| agents::verify_within_root(project, &sidecar, TargetKind::File))
             .transpose()?;
@@ -108,7 +140,7 @@ impl Child {
     }
 }
 
-pub(super) fn child_logs(project: &Path, root_id: &str, warnings: &mut Vec<String>) -> Vec<(String, PathBuf)> {
+fn child_logs(project: &Path, root_id: &str, warnings: &mut Vec<String>) -> Vec<(String, PathBuf)> {
     let state = project.join(root_id);
     let dir = state.join("subagents");
     if !state.symlink_metadata().is_ok_and(|meta| meta.is_dir())
@@ -129,11 +161,14 @@ pub(super) fn child_logs(project: &Path, root_id: &str, warnings: &mut Vec<Strin
     logs
 }
 
-pub(super) fn children(project: &Path, root_id: &str, warnings: &mut Vec<String>) -> Vec<Child> {
-    let root_exists = project.join(format!("{root_id}.jsonl")).symlink_metadata().is_ok_and(|meta| meta.is_file());
+fn sidecar(log: &Path) -> PathBuf {
+    log.with_extension("meta.json")
+}
+
+fn children(project: &Path, root_id: &str, warnings: &mut Vec<String>) -> Vec<Child> {
     let mut children: Vec<_> = child_logs(project, root_id, warnings).into_iter()
         .map(|(id, log)| {
-            let (parent, metadata, missing_sidecar) = match read_metadata(&log.with_extension("meta.json")) {
+            let (parent, metadata, missing_sidecar) = match read_metadata(&sidecar(&log)) {
                 Ok(None) => (Parent::Root, None, true),
                 Ok(Some(meta)) => {
                     let parent = if meta.spawn_depth.is_some_and(|depth| depth > 1) { Parent::Unknown } else { Parent::Root };
@@ -147,7 +182,6 @@ pub(super) fn children(project: &Path, root_id: &str, warnings: &mut Vec<String>
             Child {
                 id,
                 root_id: root_id.to_owned(),
-                root_exists,
                 parent,
                 description: metadata.as_ref().and_then(|meta| meta.description.clone()).filter(|text| !text.trim().is_empty()),
                 tool_use_id: metadata.and_then(|meta| meta.tool_use_id).filter(|text| !text.trim().is_empty()),
@@ -227,22 +261,33 @@ fn cached_spawn_calls(path: &Path) -> Result<SpawnCalls, String> {
     }, |(_, warning)| warning.is_none())
 }
 
-pub(super) fn deletion_plan(project: &Path, group: &[Child], id: &str) -> Result<DeletionPlan, String> {
+/// 删除范围必须基于完整读取的子会话目录。
+fn complete_children(project: &Path, root_id: &str) -> Result<Vec<Child>, String> {
+    let mut warnings = Vec::new();
+    let children = children(project, root_id, &mut warnings);
+    if warnings.is_empty() { Ok(children) } else { Err(warnings.join("；")) }
+}
+
+/// 根会话的状态目录整体移入废纸篓前，逐个复核其中子会话日志的身份。
+pub(super) fn verified_logs(project: &Path, root_id: &str) -> Result<Vec<(String, PathBuf)>, String> {
+    complete_children(project, root_id)?.iter()
+        .map(|child| child.verify(project).map(|(log, _)| (child.session_id(), log)))
+        .collect()
+}
+
+pub(super) fn deletion_plan(project: &Path, root_id: &str, id: &str) -> Result<DeletionPlan, String> {
+    let group = complete_children(project, root_id)?;
     if group.iter().any(|child| child.parent == Parent::Unknown) {
         return Err("无法确认项目内嵌套子会话的父子关系，已中止删除".into());
     }
-    let root = group.iter().find(|child| child.id == id).ok_or("未找到该子会话")?;
-    let mut seen = HashSet::new();
-    let mut pending = vec![root];
+    let members: HashMap<_, _> = group.iter().map(|child| (child.session_id(), child)).collect();
+    let lineage = Lineage::new(group.iter().map(|child| child.node(None)));
+    let target = child_id(root_id, id);
     let mut plan = DeletionPlan::default();
-    while let Some(child) = pending.pop() {
-        if !seen.insert(&child.id) {
-            return Err("子会话父子关系存在循环，已中止删除".into());
-        }
-        let (log, sidecar) = child.verify(project)?;
-        plan.add_session(child_id(&child.root_id, &child.id), log);
+    for session_id in lineage.subtree(&target)? {
+        let (log, sidecar) = members[session_id].verify(project)?;
+        plan.add_session(session_id.to_owned(), log);
         plan.targets.extend(sidecar);
-        pending.extend(group.iter().filter(|next| matches!(&next.parent, Parent::Child(parent) if parent == &child.id)));
     }
     Ok(plan)
 }

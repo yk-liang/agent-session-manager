@@ -31,6 +31,7 @@ pub(super) fn check_and_export(
             Ok(SessionDetail {
                 meta: self.0.meta.clone(),
                 events: self.0.events.clone(),
+                inherited: 0,
                 warnings: vec![],
             })
         }

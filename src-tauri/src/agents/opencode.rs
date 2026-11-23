@@ -10,6 +10,7 @@ pub(crate) mod deferred;
 #[cfg(test)]
 mod event_tests;
 mod events;
+mod instructions;
 #[cfg(test)]
 mod model_tests;
 mod message_meta;
@@ -22,6 +23,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use super::lineage::{Lineage, Node};
 use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
 pub(crate) use message_meta::{client_id, model_id};
 pub(crate) use storage::MESSAGE_ERROR_SQL;
@@ -527,7 +529,7 @@ fn scan_catalog_at(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> b
     let mut sizes = storage::session_sizes(conn, None);
     let mut missing_id = 0u32;
     let mut items = Vec::new();
-    let parents: std::collections::HashMap<_, _> = rows.iter().map(|row| (row.id.as_str(), row)).collect();
+    let lineage = lineage(&rows);
     for row in &rows {
         super::check_catalog_cancelled(cancelled)?;
         if row.id.is_empty() {
@@ -570,13 +572,7 @@ fn scan_catalog_at(path: &Path, filter: CatalogFilter, cancelled: &dyn Fn() -> b
             &mut warnings,
         );
         let Some(mut meta) = meta else { continue };
-        meta.subagent = subagent(row, |id| parents.get(id).map(|parent| project_id(parent)));
-        if let Some(relation) = &mut meta.subagent {
-            relation.project_owner = project_owner(row, &parents);
-            if relation.project_owner.is_none() && relation.parent.is_some() {
-                relation.orphan = true;
-            }
-        }
+        meta.subagent = lineage.subagent(&row.id);
         if let Some(message) = message_metadata.remove(&row.id) {
             meta.model = message.model;
             meta.client = message.client;
@@ -640,17 +636,24 @@ fn read_session_mode_at(
     });
     let mut meta =
         build_meta(conn, &row, counts, true, &mut warnings).ok_or("未找到该 OpenCode 会话")?;
-    meta.subagent = subagent(&row, |id| session_row(conn, id).ok().map(|(parent, _)| project_id(&parent)));
+    // 关系以目录扫描为准；这里只补全打开详情时的子会话标记，会话表的读取告警已在目录中提示。
+    let rows = load_session_rows(conn).split().0.unwrap_or_default();
+    meta.subagent = lineage(&rows).subagent(&row.id);
     if let Some(message) = message_meta::latest(conn, Some(session_id), &mut warnings).remove(session_id) {
         meta.model = message.model;
         meta.client = message.client;
     }
     meta.size_bytes = storage::session_sizes(conn, Some(session_id)).remove(session_id);
-    let (events, issues) = events::read(conn, path, session_id, view)?;
+    let instructions = instructions::baseline(conn, session_id).unwrap_or_else(|error| {
+        warnings.push(format!("OpenCode 会话指令无法读取：{error}"));
+        None
+    });
+    let (events, issues) = events::read(conn, path, session_id, view, instructions)?;
     warnings.extend(issues);
     Ok(SessionDetail {
         meta,
         events,
+        inherited: 0,
         warnings,
     })
 }
@@ -667,7 +670,7 @@ fn search_events_at(path: &Path, meta: &SessionMeta) -> Result<Vec<Value>, Strin
     {
         return Err("会话来源已变化，请刷新后重试".into());
     }
-    let (events, issues) = events::read(&snapshot, path, &meta.session_id, false)?;
+    let (events, issues) = events::read(&snapshot, path, &meta.session_id, false, None)?;
     warnings.extend(issues);
     if !warnings.is_empty() {
         return Err(warnings.join("；"));
@@ -823,57 +826,30 @@ fn project_id(row: &SessionRow) -> String {
     escape_dir(row.directory.as_deref().filter(|d| !d.is_empty()).unwrap_or("(unknown)"))
 }
 
+fn lineage(rows: &[SessionRow]) -> Lineage {
+    Lineage::new(rows.iter().filter(|row| !row.id.is_empty()).map(|row| Node::new(
+        super::SessionLocation { session_id: row.id.clone(), project_dir: project_id(row), cwd: row.directory.clone() },
+        row.parent_id.clone(),
+    )))
+}
+
 fn deletion_subtree(conn: &Connection, root: &SessionRow) -> Result<Vec<super::search::SessionRef>, String> {
     let (rows, warnings) = load_session_rows(conn).split();
     if !warnings.is_empty() {
         return Err(warnings.join("；"));
     }
     let rows = rows.ok_or("无法读取 OpenCode 子会话关系")?;
-    let mut children = std::collections::HashMap::<_, Vec<_>>::new();
-    for row in &rows {
-        if let Some(parent) = &row.parent_id {
-            children.entry(parent.as_str()).or_default().push(row);
-        }
-    }
-    let mut visited = std::collections::HashSet::new();
-    let mut pending = vec![root];
-    let mut sessions = Vec::new();
-    while let Some(row) = pending.pop() {
-        if !visited.insert(row.id.as_str()) || !is_valid_session_id(&row.id) {
-            return Err("OpenCode 子会话父子关系有冲突，无法确认删除范围".into());
-        }
-        sessions.push(super::search::SessionRef { session_id: row.id.clone(), project_dir: project_id(row) });
-        pending.extend(children.get(row.id.as_str()).into_iter().flatten().copied());
-    }
-    Ok(sessions)
+    let lineage = lineage(&rows);
+    lineage.subtree(&root.id)?.into_iter().map(|id| match lineage.location(id) {
+        Some(location) if is_valid_session_id(id) => Ok(location.session_ref()),
+        _ => Err(format!("OpenCode 子会话 {id} 的 ID 无效，无法确认删除范围")),
+    }).collect()
 }
 
-fn project_owner(row: &SessionRow, rows: &std::collections::HashMap<&str, &SessionRow>) -> Option<super::SessionProjectOwner> {
-    let mut current = row;
-    let mut visited = std::collections::HashSet::new();
-    while let Some(parent) = current.parent_id.as_deref().and_then(|id| rows.get(id)) {
-        if !visited.insert(current.id.as_str()) {
-            return None;
-        }
-        current = parent;
-    }
-    (current.id != row.id).then(|| super::SessionProjectOwner {
-        session_id: current.id.clone(),
-        project_dir: project_id(current),
-        cwd: current.directory.clone(),
-    })
-}
-
-fn subagent(row: &SessionRow, parent_project: impl FnOnce(&str) -> Option<String>) -> Option<super::Subagent> {
-    let parent_id = row.parent_id.as_ref()?;
-    let parent = (parent_id != &row.id).then(|| parent_project(parent_id)).flatten()
-        .map(|project_dir| super::search::SessionRef { session_id: parent_id.clone(), project_dir });
-    Some(super::Subagent {
-        parent_id: Some(parent_id.clone()),
-        orphan: parent.is_none(),
-        parent,
-        ..super::Subagent::default()
-    })
+fn has_assistant_activity(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE session_id=?1
+        AND CASE WHEN json_valid(data) THEN json_extract(data,'$.role') IN ('assistant', 'tool', 'shell') ELSE 0 END)",
+        [session_id], |row| row.get(0))
 }
 
 fn build_meta(
@@ -884,14 +860,12 @@ fn build_meta(
     warnings: &mut Vec<String>,
 ) -> Option<SessionMeta> {
     let (real_user, assistant_text) = counts;
-    let assistant_activity = assistant_text == 0 && real_user == 0 && row.parent_id.is_some()
-        && conn.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE session_id=?1
-            AND CASE WHEN json_valid(data) THEN json_extract(data,'$.role') IN ('assistant', 'tool', 'shell') ELSE 0 END)",
-            [&row.id], |result| result.get::<_, bool>(0))
-            .unwrap_or_else(|error| {
-                warnings.push(format!("OpenCode 子会话 {} 的活动无法读取：{error}", row.id));
-                false
-            });
+    // 子会话的任务由父会话下发，只有工具调用等助手活动时也不算空会话。
+    let assistant_activity = row.parent_id.is_some() && real_user == 0 && assistant_text == 0
+        && has_assistant_activity(conn, &row.id).unwrap_or_else(|error| {
+            warnings.push(format!("OpenCode 子会话 {} 的活动无法读取：{error}", row.id));
+            false
+        });
     if !include_empty && real_user == 0 && (row.parent_id.is_none() || assistant_text == 0 && !assistant_activity) {
         return None;
     }

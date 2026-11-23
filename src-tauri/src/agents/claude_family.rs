@@ -24,6 +24,14 @@ pub struct FamilyOptions {
     pub filter_non_cli_entrypoint: bool,
 }
 
+/// 子会话日志和元数据位于 `projects/<项目>/<会话>/subagents/` 下。
+pub(super) fn watch_paths() -> super::AgentWatchPaths {
+    super::AgentWatchPaths {
+        extra_transcript_suffixes: vec![".meta.json"],
+        ..super::AgentWatchPaths::transcripts("projects", Some(4))
+    }
+}
+
 pub fn is_safe_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('\0') && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
 }
@@ -299,8 +307,9 @@ fn project_display_path(dir_name: &str, sessions: &[SessionMeta]) -> String {
         .unwrap_or_else(|| unescape_dir_name(dir_name))
 }
 
-fn cached_meta(kind: &str, path: &Path, project_dir: &str, opts: FamilyOptions) -> Result<(SessionMeta, Vec<String>), String> {
-    super::catalog_cache::summary(kind, &[path.to_path_buf()], || match parse_meta(path, project_dir, opts) {
+fn cached_meta(path: &Path, project_dir: &str, opts: FamilyOptions) -> Result<(SessionMeta, Vec<String>), String> {
+    let kind = summary_cache_kind(project_dir, opts);
+    super::catalog_cache::summary(&kind, &[path.to_path_buf()], || match parse_meta(path, project_dir, opts) {
         super::ParseOutcome::Ok(meta) => Ok((meta, Vec::new())),
         super::ParseOutcome::Degraded(meta, warning) => Ok((meta, vec![warning])),
         super::ParseOutcome::Failed(error) => Err(error),
@@ -318,7 +327,8 @@ fn sessions_in_dir(
     let dir = base.join(dir_name);
     let entries: Vec<_> = super::read_dir_warned(&dir, warnings);
     let mut sessions = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut roots = std::collections::HashMap::new();
+    let summary = |path: &Path| cached_meta(path, dir_name, opts);
 
     for entry in &entries {
         super::check_catalog_cancelled(cancelled)?;
@@ -327,18 +337,12 @@ fn sessions_in_dir(
         if name.strip_suffix(".jsonl").is_some_and(is_session_id)
             && !entry.file_type().is_ok_and(|kind| kind.is_symlink() || kind.is_dir())
         {
-            let kind = summary_cache_kind(dir_name, opts);
-            let (parsed, ws) = match cached_meta(&kind, &path, dir_name, opts) {
-                Ok((meta, ws)) => (Some(meta), ws),
-                Err(error) => (None, vec![error]),
-            };
-            warnings.extend(ws);
-            if let Some(meta) = parsed {
-                seen_ids.insert(meta.session_id.clone());
-                // 不相关会话（QoderWork/云端/空）静默跳过，不算错误
-                if is_relevant(&meta, opts) && (include_empty || meta.real_user_count > 0) {
-                    sessions.push(meta);
+            match summary(&path) {
+                Ok((meta, ws)) => {
+                    warnings.extend(ws);
+                    roots.insert(meta.session_id.clone(), meta);
                 }
+                Err(error) => warnings.push(error),
             }
         }
     }
@@ -349,18 +353,9 @@ fn sessions_in_dir(
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        for child in subagents::children(&dir, root_id, warnings) {
-            super::check_catalog_cancelled(cancelled)?;
-            let kind = summary_cache_kind(dir_name, opts);
-            match cached_meta(&kind, &child.log, dir_name, opts) {
-                Ok((mut meta, ws)) => {
-                    warnings.extend(ws);
-                    child.apply(&mut meta, dir_name);
-                    if is_relevant(&meta, opts) && (include_empty || !meta.is_empty()) {
-                        sessions.push(meta);
-                    }
-                }
-                Err(error) => warnings.push(error),
+        for (_, meta) in subagents::group(&dir, roots.get(root_id), root_id, summary, warnings) {
+            if is_relevant(&meta, opts) && (include_empty || !meta.is_empty()) {
+                sessions.push(meta);
             }
         }
     }
@@ -369,7 +364,7 @@ fn sessions_in_dir(
         for entry in &entries {
             let name = entry.file_name().to_string_lossy().to_string();
             if entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && is_session_id(&name) && !seen_ids.contains(&name) {
+                && is_session_id(&name) && !roots.contains_key(&name) {
                 sessions.push(SessionMeta {
                     session_id: name,
                     project_dir: dir_name.to_string(),
@@ -397,6 +392,8 @@ fn sessions_in_dir(
             }
         }
     }
+    // 不相关会话（QoderWork/云端/空）静默跳过，不算错误
+    sessions.extend(roots.into_values().filter(|meta| is_relevant(meta, opts) && (include_empty || meta.real_user_count > 0)));
     Ok(sessions)
 }
 
@@ -413,11 +410,20 @@ pub fn read_session(
     if let Some((root_id, id)) = subagents::child_identity(session_id) {
         let project = super::verify_within_root(base, &project, super::TargetKind::Dir)?;
         let mut warnings = Vec::new();
-        let children = subagents::children(&project, root_id, &mut warnings);
-        let child = children.iter().find(|child| child.id == id).ok_or("未找到该子会话")?;
+        let summary = |path: &Path| cached_meta(path, project_dir, opts);
+        // 与目录扫描一致：只有普通文件才算根会话日志。
+        let root_log = project.join(format!("{root_id}.jsonl"));
+        let root = root_log.symlink_metadata().is_ok_and(|meta| meta.is_file())
+            .then(|| summary(&root_log).ok()).flatten().map(|(meta, _)| meta);
+        let group = subagents::group(&project, root.as_ref(), root_id, summary, &mut warnings);
+        let (child, known) = group.iter().find(|(child, _)| child.id == id).ok_or("未找到该子会话")?;
         let log = super::verify_within_root(&project, &child.log, super::TargetKind::File)?;
         let mut detail = read_transcript(&log, project_dir, opts)?;
-        child.apply(&mut detail.meta, project_dir);
+        detail.meta.session_id.clone_from(&known.session_id);
+        detail.meta.subagent.clone_from(&known.subagent);
+        if detail.meta.title.is_none() {
+            detail.meta.title.clone_from(&known.title);
+        }
         detail.warnings.extend(warnings);
         return Ok(detail);
     }
@@ -444,6 +450,7 @@ pub fn read_session(
         if state_exists {
             return Ok(SessionDetail {
                 warnings: Vec::new(),
+                inherited: 0,
                 meta: SessionMeta {
                     session_id: session_id.to_string(),
                     project_dir: project_dir.to_string(),
@@ -516,6 +523,7 @@ fn read_transcript(path: &Path, project_dir: &str, opts: FamilyOptions) -> Resul
     Ok(SessionDetail {
         meta,
         events,
+        inherited: 0,
         warnings,
     })
 }
@@ -525,16 +533,6 @@ pub fn delete_session(base: &Path, project_dir: &str, session_id: &str, preserve
     let plan = deletion_plan(base, project_dir, session_id)?;
     super::check_preserved_targets(&plan.targets, preserved)?;
     Ok(super::trash_session_files(project_dir, &plan.targets, plan.sessions))
-}
-
-#[cfg(test)]
-fn delete_session_with(
-    base: &Path,
-    project_dir: &str,
-    session_id: &str,
-    remove: impl FnOnce(&[PathBuf]) -> Result<(), String>,
-) -> Result<(), String> {
-    remove(&deletion_targets(base, project_dir, session_id)?)
 }
 
 /// 与实际删除共用校验和目标集合，供删除前用量保存使用。
@@ -566,12 +564,7 @@ fn deletion_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<Del
     let dir = base.join(project_dir);
     let project = super::verify_within_root(base, &dir, super::TargetKind::Dir)?;
     if let Some((root_id, id)) = subagents::child_identity(session_id) {
-        let mut warnings = Vec::new();
-        let children = subagents::children(&project, root_id, &mut warnings);
-        if !warnings.is_empty() {
-            return Err(warnings.join("；"));
-        }
-        return subagents::deletion_plan(&project, &children, id);
+        return subagents::deletion_plan(&project, root_id, id);
     }
     if !is_session_id(session_id) {
         return Err("会话 ID 无效".into());
@@ -597,12 +590,7 @@ fn deletion_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<Del
             &state_dir,
             super::TargetKind::Dir,
         )?);
-        let mut warnings = Vec::new();
-        plan.sessions.extend(subagents::child_logs(&project, session_id, &mut warnings).into_iter()
-            .map(|(id, path)| (subagents::child_id(session_id, &id), path)));
-        if !warnings.is_empty() {
-            return Err(warnings.join("；"));
-        }
+        plan.sessions.extend(subagents::verified_logs(&project, session_id)?);
     }
     if jsonl_present {
         // 结构校验通过后再复核内容身份：sessionId 必须与文件名一致
@@ -785,7 +773,9 @@ mod tests {
             let catalog = catalog(temp.path(), opts, false, &|| false).unwrap();
             assert_eq!(catalog.projects[0].session_count, 3);
             let detail = read_session(temp.path(), "project", "subagent:aaaa:reviewer", opts).unwrap();
-            assert_eq!(detail.meta.subagent.unwrap().parent_id.as_deref(), Some("worker"));
+            let relation = detail.meta.subagent.unwrap();
+            assert_eq!(relation.parent_id.as_deref(), Some("worker"));
+            assert_eq!(relation.project_owner.unwrap().session_id, "aaaa");
             assert_eq!(detail.events.len(), 1);
         }
         let targets = deletion_targets(temp.path(), "project", "subagent:aaaa:worker").unwrap();
@@ -793,6 +783,9 @@ mod tests {
         assert!(targets.contains(&worker.canonicalize().unwrap()));
         assert!(targets.contains(&reviewer.canonicalize().unwrap()));
         assert!(!targets.contains(&project.join("aaaa.jsonl").canonicalize().unwrap()));
+        assert_eq!(deletion_targets(temp.path(), "project", "aaaa").unwrap().len(), 2);
+        fs::write(&reviewer, r#"{"type":"assistant","sessionId":"bbbb","agentId":"reviewer","message":{"content":"Review"}}"#).unwrap();
+        assert!(deletion_targets(temp.path(), "project", "aaaa").unwrap_err().contains("身份不符"));
         fs::remove_file(project.join("aaaa.jsonl")).unwrap();
         let relation = read_session(temp.path(), "project", "subagent:aaaa:worker", CLAUDE_OPTS).unwrap().meta.subagent.unwrap();
         assert!(relation.orphan);
@@ -1028,11 +1021,7 @@ mod tests {
             let jsonl = proj.join(format!("{id}.jsonl"));
             fs::write(&jsonl, contents).unwrap();
             assert!(read_session(tmp.path(), "-tmp-proj", id, CLAUDE_OPTS).unwrap().events.is_empty());
-            delete_session_with(tmp.path(), "-tmp-proj", id, |targets| {
-                assert_eq!(targets, &[jsonl.canonicalize().unwrap()]);
-                fs::remove_file(&targets[0]).map_err(|error| error.to_string())
-            }).unwrap();
-            assert!(!jsonl.exists());
+            assert_eq!(deletion_targets(tmp.path(), "-tmp-proj", id).unwrap(), [jsonl.canonicalize().unwrap()]);
         }
     }
 

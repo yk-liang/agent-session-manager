@@ -79,10 +79,7 @@ impl AgentSource for ClaudeSource {
         Some(claude_dir())
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
-        super::AgentWatchPaths {
-            extra_transcript_suffixes: vec![".meta.json"],
-            ..super::AgentWatchPaths::transcripts("projects", Some(4))
-        }
+        claude_family::watch_paths()
     }
     fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
         distinct_project_roots().filter_map(|(_, root)| {
@@ -100,10 +97,7 @@ impl AgentSource for ClaudeSource {
             let mut sessions = claude_family::catalog_items(&root, OPTS, filter.include_empty, &mut warnings, cancelled)?;
             if index > 0 {
                 for (meta, _) in &mut sessions {
-                    meta.project_dir = format!("{}/{}", root.display(), meta.project_dir);
-                    if let Some(parent) = meta.subagent.as_mut().and_then(|child| child.parent.as_mut()) {
-                        parent.project_dir.clone_from(&meta.project_dir);
-                    }
+                    meta.relocate(format!("{}/{}", root.display(), meta.project_dir));
                 }
             }
             items.extend(sessions);
@@ -115,10 +109,7 @@ impl AgentSource for ClaudeSource {
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
         let (root, name) = project_location(project_dir)?;
         let mut detail = claude_family::read_session(&root, name, session_id, OPTS)?;
-        detail.meta.project_dir = project_dir.to_owned();
-        if let Some(parent) = detail.meta.subagent.as_mut().and_then(|child| child.parent.as_mut()) {
-            parent.project_dir = project_dir.to_owned();
-        }
+        detail.meta.relocate(project_dir.to_owned());
         Ok(detail)
     }
     fn search_events(&self, meta: &super::SessionMeta) -> Result<Vec<serde_json::Value>, String> {

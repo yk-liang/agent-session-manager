@@ -6,6 +6,8 @@ use std::{collections::{HashMap, HashSet}, path::Path};
 pub(super) struct ParsedPi {
     pub(super) meta: SessionMeta,
     pub(super) events: Vec<Value>,
+    /// 开头复制自父会话分支的条目生成的事件数。
+    pub(super) inherited: usize,
 }
 
 fn active_branch(entries: &[Value], version: i64) -> Vec<&Value> {
@@ -33,7 +35,8 @@ fn nonempty(value: &Value) -> Option<&str> {
     value.as_str().map(str::trim).filter(|text| !text.is_empty())
 }
 
-pub(super) fn parse(path: &Path, project_dir: &str, collect_events: bool) -> ParseOutcome<ParsedPi> {
+/// `parent_ids` 是父会话的条目 ID；fork 子会话开头沿用这些 ID 的条目属于继承的上下文。
+pub(super) fn parse(path: &Path, project_dir: &str, collect_events: bool, parent_ids: &HashSet<String>) -> ParseOutcome<ParsedPi> {
     let (header, lines, size_bytes) = match storage::open(path) {
         Ok(file) => file,
         Err(error) => return ParseOutcome::Failed(error),
@@ -73,7 +76,10 @@ pub(super) fn parse(path: &Path, project_dir: &str, collect_events: bool) -> Par
     let mut name = None;
     let mut first_user_text = None;
     let mut events = Vec::new();
+    let mut inherited = 0;
+    let mut forked = !parent_ids.is_empty();
     for entry in active_branch(&entries, version) {
+        forked &= entry["id"].as_str().is_some_and(|id| parent_ids.contains(id));
         if events::is_conversation_message(entry) {
             if let Some(timestamp) = events::timestamp(entry) {
                 if meta.first_ts.is_none() {
@@ -120,10 +126,13 @@ pub(super) fn parse(path: &Path, project_dir: &str, collect_events: bool) -> Par
                 events.push(event);
             }
         }
+        if forked {
+            inherited = events.len();
+        }
     }
     meta.title = name.map(str::to_owned).or(first_user_text);
     agents::tool_ops::describe_tools(&mut events, super::tools::describe);
-    let parsed = ParsedPi { meta, events };
+    let parsed = ParsedPi { meta, events, inherited };
     if bad_lines > 0 {
         ParseOutcome::Degraded(parsed, agents::degraded_message(path, bad_lines))
     } else {

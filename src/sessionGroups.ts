@@ -21,7 +21,7 @@ function buildCatalogGroups(catalog: Catalog) {
 
   for (const session of catalog.sessions) {
     const key = sessionKey(session);
-    const projectOwner = session.subagent?.projectOwner ?? tree.owner(session);
+    const projectOwner = session.subagent?.projectOwner ?? session;
     const root = hints.get(sessionKey(projectOwner));
     const projectless = root === null || root === undefined && projectlessIds.has(projectOwner.sessionId);
     const dirName = projectless ? PROJECTLESS_GROUP : root === undefined ? projectOwner.projectDir : `group:root:${root}`;

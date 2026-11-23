@@ -538,3 +538,53 @@
   .toc .toc-collapse { display: none; }
   .toc .toc-close { display: inline-flex; }
 }
+
+/* 子会话分叉时继承的父会话上下文：默认折叠为一行，展开后以左侧竖线与淡化气泡区分。 */
+.inherited-head {
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-raised);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  text-align: left;
+}
+.inherited-head:hover { background: var(--bg-hover); }
+.inherited-head:focus-visible { outline-offset: 2px; }
+.inherited-head strong { color: var(--text); font-weight: 600; white-space: nowrap; }
+.inherited-head[aria-expanded="true"] .inherited-chevron { transform: rotate(90deg); }
+.inherited-count, .inherited-action { font-size: var(--text-meta); white-space: nowrap; }
+.inherited-action { margin-left: auto; }
+
+.virtual-events > .event-group.inherited { padding-left: 14px; }
+.event-group.inherited::before,
+.event-group.inherited-end::before {
+  content: "";
+  position: absolute;
+  inset: -8px auto 0 1px;
+  border-left: 2px solid var(--border-raised);
+}
+.event-group.inherited-end::before { bottom: auto; height: 8px; }
+.event-group.inherited .msg.user {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-elevated));
+  color: var(--text);
+}
+.event-group.inherited .msg.user .content-action,
+.event-group.inherited .msg.user .markdown-body a { color: var(--info); }
+.event-group.inherited .msg.assistant { color: color-mix(in srgb, var(--text) 82%, var(--bg)); }
+
+.virtual-events > .event-group.inherited-end { align-items: center; gap: 12px; padding-block: 4px 8px; }
+.inherited-boundary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+}
+.inherited-boundary::before,
+.inherited-boundary::after { content: ""; flex: 1; height: 1px; background: var(--border); }

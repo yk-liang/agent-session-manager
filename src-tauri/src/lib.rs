@@ -18,12 +18,12 @@ use tauri::{Emitter, Manager};
 #[derive(Default)]
 struct ConfigEditGuard(AtomicU8);
 
-/// 从第一条删除前持续到整批结束；配置编辑的状态更新不会覆盖它。
+/// 从第一条删除前持续到全部删除结束；配置编辑的状态更新不会覆盖它。
 #[derive(Default)]
-struct BatchDeleteGuard(AtomicBool);
+struct DeleteGuard(AtomicBool);
 
 fn exit_blocked(app: &tauri::AppHandle) -> bool {
-    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
+    if app.state::<DeleteGuard>().0.load(Ordering::SeqCst) {
         return true;
     }
     if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
@@ -74,7 +74,7 @@ fn set_config_guard(state: tauri::State<'_, ConfigEditGuard>, dirty: bool, busy:
 }
 
 #[tauri::command]
-fn set_batch_delete_guard(state: tauri::State<'_, BatchDeleteGuard>, active: bool) {
+fn set_delete_guard(state: tauri::State<'_, DeleteGuard>, active: bool) {
     state.0.store(active, Ordering::SeqCst);
 }
 
@@ -83,8 +83,8 @@ fn confirm_config_exit(
     app: tauri::AppHandle,
     state: tauri::State<'_, ConfigEditGuard>,
 ) -> Result<(), String> {
-    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
-        return Err("批量删除仍在进行，请稍后退出。".into());
+    if app.state::<DeleteGuard>().0.load(Ordering::SeqCst) {
+        return Err("删除仍在进行，请稍后退出。".into());
     }
     if state.0.load(Ordering::SeqCst) & 2 != 0 {
         return Err("配置操作仍在进行，请稍后退出。".into());
@@ -569,7 +569,7 @@ mod command_tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(ConfigEditGuard::default())
-        .manage(BatchDeleteGuard::default())
+        .manage(DeleteGuard::default())
         .manage(session_watch::SessionWatcher::default())
         .manage(std::sync::Arc::new(SessionCatalogs::default()))
         .setup(|app| {
@@ -654,7 +654,7 @@ pub fn run() {
             preview_config_change,
             apply_config_change,
             set_config_guard,
-            set_batch_delete_guard,
+            set_delete_guard,
             confirm_config_exit,
             delete_profile,
             update_config_file

@@ -43,35 +43,25 @@ use storage::is_valid_session_id;
 fn read_session_in(root: &Path, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
     let project = ProjectSessions::open(root, project_dir, session_id)?;
     let location = project.locate(session_id)?;
-    let (parsed, warnings) = parse(&location.path, project_dir, true).split();
+    let parent_ids = project.parent_file(location).map(storage::entry_ids).transpose()?.unwrap_or_default();
+    let (parsed, warnings) = parse(&location.path, project_dir, true, &parent_ids).split();
     let mut parsed = parsed.ok_or_else(|| warnings.join("；"))?;
     if parsed.meta.session_id != session_id || parsed.meta.project_dir != project_dir {
         return Err("Pi 会话来源已变化，请刷新后重试".into());
     }
-    parsed.meta.subagent = project.subagent(location, project_dir);
-    Ok(SessionDetail { warnings, meta: parsed.meta, events: parsed.events })
+    parsed.meta.subagent = project.subagent(location);
+    Ok(SessionDetail { warnings, meta: parsed.meta, events: parsed.events, inherited: parsed.inherited })
 }
 
-#[cfg(test)]
-fn delete_session_with(
-    root: &Path,
-    project_dir: &str,
-    session_id: &str,
-    remove: impl FnOnce(Vec<PathBuf>) -> Result<(), String>,
-) -> Result<(), String> {
-    remove(pi_deletion_paths(root, project_dir, session_id)?)
+fn deletion_targets_in(root: &Path, project_dir: &str, session_id: &str) -> Result<Vec<(String, PathBuf)>, String> {
+    ProjectSessions::open(root, project_dir, session_id)?.deletion_targets(session_id)
 }
 
 fn delete_session_in(root: &Path, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<super::SessionDeletion, String> {
-    let sources = ProjectSessions::open(root, project_dir, session_id)?.deletion_targets(session_id)?;
+    let sources = deletion_targets_in(root, project_dir, session_id)?;
     let paths: Vec<_> = sources.iter().map(|(_, path)| path.clone()).collect();
     super::check_preserved_targets(&paths, preserved)?;
     Ok(super::trash_session_files(project_dir, &paths, sources))
-}
-
-fn pi_deletion_paths(root: &Path, project_dir: &str, session_id: &str) -> Result<Vec<PathBuf>, String> {
-    let targets = ProjectSessions::open(root, project_dir, session_id)?.deletion_targets(session_id)?;
-    Ok(targets.into_iter().map(|(_, path)| path).collect())
 }
 
 pub(crate) fn transcript_session_id(path: &Path) -> Result<String, String> {
@@ -107,13 +97,13 @@ impl AgentSource for PiSource {
         let mut warnings = Vec::new();
         let mut items = Vec::new();
         for (project_dir, project_path) in storage::projects(&sessions_dir(), &mut warnings) {
-            let project = ProjectSessions::scan(project_path, cancelled)?;
+            let project = ProjectSessions::scan(&project_dir, project_path, cancelled)?;
             warnings.extend(project.warnings().cloned());
             for location in project.files.values() {
                 super::check_catalog_cancelled(cancelled)?;
                 let path = &location.path;
                 let result = super::catalog_cache::summary(SUMMARY_CACHE_KIND, std::slice::from_ref(path), || {
-                    let (parsed, warnings) = parse(path, &project_dir, false).split();
+                    let (parsed, warnings) = parse(path, &project_dir, false, &Default::default()).split();
                     let parsed = parsed.ok_or_else(|| warnings.join("；"))?;
                     Ok((parsed.meta, warnings))
                 });
@@ -133,7 +123,9 @@ impl AgentSource for PiSource {
                     continue;
                 }
                 meta.project_dir.clone_from(&project_dir);
-                meta.subagent = project.subagent(location, &project_dir);
+                meta.subagent = project.subagent(location);
+                // fork 子会话的继承前缀取决于父会话日志，搜索缓存随它一同失效。
+                meta.source_files.extend(project.parent_file(location).map(Path::to_path_buf));
                 if !filter.include_empty && meta.is_empty() {
                     continue;
                 }
@@ -153,19 +145,23 @@ impl AgentSource for PiSource {
         read_session_in(&sessions_dir(), project_dir, session_id)
     }
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
-        let path = meta.source_files.first().ok_or("缺少会话文件定位信息")?;
-        let (parsed, _) = parse(path, &meta.project_dir, true).split();
-        let p = parsed.ok_or("无法解析该 Pi 会话")?;
+        let [path, parent @ ..] = meta.source_files.as_slice() else {
+            return Err("缺少会话文件定位信息".into());
+        };
+        let parent_ids = parent.first().map(|parent| storage::entry_ids(parent)).transpose()?.unwrap_or_default();
+        let (parsed, _) = parse(path, &meta.project_dir, true, &parent_ids).split();
+        let mut p = parsed.ok_or("无法解析该 Pi 会话")?;
         if p.meta.session_id != meta.session_id || p.meta.project_dir != meta.project_dir {
             return Err("会话来源已变化，请刷新后重试".into());
         }
-        Ok(p.events)
+        Ok(p.events.split_off(p.inherited))
     }
     fn delete_session(&self, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
         delete_session_in(&sessions_dir(), project_dir, session_id, preserved)
     }
     fn deletion_targets(&self, project_dir: &str, session_id: &str) -> Result<Option<Vec<PathBuf>>, String> {
-        pi_deletion_paths(&sessions_dir(), project_dir, session_id).map(Some)
+        let targets = deletion_targets_in(&sessions_dir(), project_dir, session_id)?;
+        Ok(Some(targets.into_iter().map(|(_, path)| path).collect()))
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         Some(format!(
@@ -188,7 +184,7 @@ mod tests {
     use super::*;
 
     fn session_of(path: &Path) -> ParsedPi {
-        let (parsed, _) = parse(path, "test", true).split();
+        let (parsed, _) = parse(path, "test", true, &Default::default()).split();
         match parsed {
             Some(p) => p,
             None => panic!("解析失败"),
@@ -273,11 +269,8 @@ mod tests {
         )
         .unwrap();
 
-        delete_session_with(tmp.path(), "proj", "good123", |p| {
-            fs::remove_file(&p[0]).map_err(|e| e.to_string())
-        })
-        .unwrap();
-        assert!(!file.exists(), "内嵌 id 的会话应可正常删除");
+        let targets = deletion_targets_in(tmp.path(), "proj", "good123").unwrap();
+        assert_eq!(targets, [("good123".to_owned(), file.canonicalize().unwrap())], "内嵌 id 的会话应可正常删除");
     }
 
     #[test]
@@ -303,7 +296,7 @@ mod tests {
             file
         };
         let file_a = mk("projA", "项目A的问题");
-        let file_b = mk("projB", "项目B的问题");
+        mk("projB", "项目B的问题");
         let proj_a = "projA";
         let proj_b = "projB";
 
@@ -313,13 +306,9 @@ mod tests {
         let db = read_session_in(tmp.path(), &proj_b, "dup").unwrap();
         assert_eq!(db.events[0]["message"]["content"], "项目B的问题");
 
-        // 删除按项目定位：删 A 只动 A，B 完好
-        delete_session_with(tmp.path(), &proj_a, "dup", |p| {
-            fs::remove_file(&p[0]).map_err(|e| e.to_string())
-        })
-        .unwrap();
-        assert!(!file_a.exists(), "应删除项目 A 的会话");
-        assert!(file_b.exists(), "不得误删项目 B 的同名会话");
+        // 删除按项目定位：删 A 只动 A，不得误删项目 B 的同名会话
+        let targets = deletion_targets_in(tmp.path(), &proj_a, "dup").unwrap();
+        assert_eq!(targets, [("dup".to_owned(), file_a.canonicalize().unwrap())]);
     }
 
     #[test]
@@ -348,11 +337,8 @@ mod tests {
 
         let detail = read_session_in(tmp.path(), "proj", "safe").unwrap();
         assert_eq!(detail.events[0]["message"]["content"], "完整会话");
-        delete_session_with(tmp.path(), "proj", "safe", |path| {
-            fs::remove_file(&path[0]).map_err(|error| error.to_string())
-        }).unwrap();
-        assert!(!project.join("one_safe.jsonl").exists());
-        assert!(project.join("other_corrupt.jsonl").is_file());
+        let targets = deletion_targets_in(tmp.path(), "proj", "safe").unwrap();
+        assert_eq!(targets, [("safe".to_owned(), project.join("one_safe.jsonl").canonicalize().unwrap())]);
     }
 
     #[test]
@@ -423,12 +409,7 @@ mod tests {
         }
 
         let read_error = read_session_in(tmp.path(), "proj", "dup").err();
-        let removed = std::cell::Cell::new(false);
-        let delete_error = delete_session_with(tmp.path(), "proj", "dup", |_| {
-            removed.set(true);
-            Ok(())
-        })
-        .err();
+        let delete_error = deletion_targets_in(tmp.path(), "proj", "dup").err();
 
         assert!(
             read_error
@@ -442,7 +423,6 @@ mod tests {
                 .is_some_and(|error| error.contains("多个")),
             "删除必须拒绝歧义：{delete_error:?}"
         );
-        assert!(!removed.get(), "歧义时不得执行删除");
     }
 
     #[test]
@@ -462,17 +442,11 @@ mod tests {
         let fifo = project.join("two_safe.jsonl");
         let fifo_c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
-        let removed = std::cell::Cell::new(false);
 
         let detail = read_session_in(tmp.path(), "proj", "safe").unwrap();
         assert_eq!(detail.events[0]["message"]["content"], "hello");
-        let err = delete_session_with(tmp.path(), "proj", "safe", |_| {
-            removed.set(true);
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(err.contains("无法读取"), "{err}");
-        assert!(!removed.get(), "扫描不完整时不得删除任何文件");
+        let err = deletion_targets_in(tmp.path(), "proj", "safe").unwrap_err();
+        assert!(err.contains("无法读取"), "扫描不完整时不得删除任何文件：{err}");
     }
 
     #[test]
@@ -501,13 +475,15 @@ mod tests {
 
     #[test]
     fn nested_extension_sessions_resolve_by_header_and_cascade_without_user_forks() {
+        use std::io::Write;
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let parent = project.join("2026-11-23_parent.jsonl");
         let child = project.join("2026-11-23_parent/run-id/run-0/session.jsonl");
         let leaf = child.with_extension("").join("forks/next/2026-11-23_leaf.jsonl");
         let user_fork = project.join("2026-11-23_user-fork.jsonl");
-        let (parent, child, leaf, user_fork) = (&parent, &child, &leaf, &user_fork);
+        let custom = project.join("custom/run-id/run-0/session.jsonl");
+        let (parent, child, leaf, user_fork, custom) = (&parent, &child, &leaf, &user_fork, &custom);
 
         let write = |path: &Path, id, parent: Option<&Path>| {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -520,20 +496,27 @@ mod tests {
         write(child, "child", Some(parent));
         write(leaf, "leaf", Some(child));
         write(user_fork, "user-fork", Some(parent));
+        write(custom, "custom", Some(parent));
+        let mut own = fs::OpenOptions::new().append(true).open(leaf).unwrap();
+        writeln!(own, "{}", serde_json::json!({"type":"message","id":"own","parentId":"task","message":{"role":"user","content":"Own"}})).unwrap();
 
         let detail = read_session_in(tmp.path(), "project", "leaf").unwrap();
+        assert_eq!((detail.events.len(), detail.inherited), (2, 1), "forked children reuse the parent's entry IDs");
         let relation = detail.meta.subagent.unwrap();
         assert_eq!(relation.parent_id.as_deref(), Some("child"));
+        assert_eq!(relation.project_owner.unwrap().session_id, "parent");
         assert!(!relation.orphan);
-        assert!(read_session_in(tmp.path(), "project", "user-fork").unwrap().meta.subagent.is_none());
-        let sessions = ProjectSessions::open(tmp.path(), "project", "parent").unwrap();
-        let targets = sessions.deletion_targets("parent").unwrap();
-        assert_eq!(targets, [("parent", parent), ("child", child), ("leaf", leaf)].map(|(id, path)| (id.to_owned(), path.canonicalize().unwrap())));
+        let user_fork = read_session_in(tmp.path(), "project", "user-fork").unwrap();
+        assert!(user_fork.meta.subagent.is_none() && user_fork.inherited == 0);
+        let custom_relation = read_session_in(tmp.path(), "project", "custom").unwrap().meta.subagent.unwrap();
+        assert_eq!((custom_relation.parent_id.as_deref(), custom_relation.orphan), (Some("parent"), false), "custom session directories keep the recorded parent");
+        let targets = deletion_targets_in(tmp.path(), "project", "parent").unwrap();
+        assert_eq!(targets, [("parent", parent), ("child", child), ("leaf", leaf), ("custom", custom)].map(|(id, path)| (id.to_owned(), path.canonicalize().unwrap())));
         fs::remove_file(parent).unwrap();
         let orphan = read_session_in(tmp.path(), "project", "child").unwrap().meta.subagent.unwrap();
         assert!(orphan.orphan);
         assert_eq!(orphan.parent_id.as_deref(), Some("parent"));
-        assert_eq!(read_session_in(tmp.path(), "project", "leaf").unwrap().events.len(), 1);
+        assert_eq!(read_session_in(tmp.path(), "project", "leaf").unwrap().events.len(), 2);
     }
 
     #[test]
@@ -561,7 +544,7 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
 
-        let summary = parse(f.path(), "test", false).split().0.unwrap();
+        let summary = parse(f.path(), "test", false, &Default::default()).split().0.unwrap();
         let p = session_of(f.path());
         assert_eq!(p.meta.session_id, "pi-001");
         assert_eq!(p.meta.cwd.as_deref(), Some("/tmp/pi-proj"));

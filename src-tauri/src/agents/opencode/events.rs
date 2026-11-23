@@ -120,12 +120,13 @@ pub(super) fn read(
     path: &Path,
     session_id: &str,
     view: bool,
+    mut instructions: Option<super::instructions::Baseline>,
 ) -> Result<(Vec<Value>, Vec<String>), String> {
     // 同毫秒写入依靠 OpenCode 的单调 ID 稳定排序，不能按类型分组后再拼接。
     let order = storage::order_column(conn);
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT m.id,m.data,p.id,p.data,COALESCE(p.time_created,m.time_created)
+            "SELECT m.id,m.data,p.id,p.data,COALESCE(p.time_created,m.time_created),m.{order}
         FROM message m LEFT JOIN part p ON p.message_id=m.id WHERE m.session_id=?1
         ORDER BY m.{order},m.id,p.time_created,p.id"
         ))
@@ -138,6 +139,7 @@ pub(super) fn read(
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -152,7 +154,7 @@ pub(super) fn read(
     let mut current_model = None;
     let mut message_error = None;
     for row in rows {
-        let (msg_id, msg_data, part_id, part_data, created) = match row {
+        let (msg_id, msg_data, part_id, part_data, created, position) = match row {
             Ok(row) => row,
             Err(_) => {
                 bad += 1;
@@ -161,6 +163,9 @@ pub(super) fn read(
         };
         if msg_id != current_msg {
             events.extend(message_error.take());
+            if let Some(baseline) = instructions.take_if(|baseline| position.is_some_and(|position| position > baseline.epoch)) {
+                events.push(instruction_event(session_id, baseline.text));
+            }
             user_index = None;
             current_msg = msg_id;
             let message = serde_json::from_str::<Value>(&msg_data).unwrap_or(Value::Null);
@@ -334,10 +339,16 @@ pub(super) fn read(
         }
     }
     events.extend(message_error);
+    events.extend(instructions.map(|baseline| instruction_event(session_id, baseline.text)));
     if bad > 0 {
         warnings.push(format!(
             "OpenCode 会话有 {bad} 处消息或分段无法解析，当前显示可读取内容"
         ));
     }
     Ok((events, warnings))
+}
+
+fn instruction_event(session_id: &str, text: String) -> Value {
+    let source = event("system", &format!("{session_id}:instructions"), None, Value::Null);
+    super::super::context::record(&source, "instructions", "系统指令", &json!(text))
 }

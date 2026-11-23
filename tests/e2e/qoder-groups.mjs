@@ -61,7 +61,7 @@ try{
   pass("project search targets source directories and locates the matched message");
   await page.getByRole("searchbox").fill("");await page.getByRole("button",{name:"批量管理",exact:true}).click();
   await page.getByRole("button",{name:"全选结果",exact:true}).click();await page.getByRole("button",{name:"删除所选",exact:true}).click();
-  await page.getByRole("dialog").getByRole("button",{name:"移入废纸篓（2）",exact:true}).click();
+  await page.getByRole("dialog").getByRole("button",{name:"移入废纸篓（2 项）",exact:true}).click();
   await page.waitForFunction(()=>window.__QODER_GROUP__.deleted.length===2);
   assert.deepEqual((await page.evaluate(()=>window.__QODER_GROUP__.deleted)).map(t=>[t.projectDir,t.sessionId]).sort(),[["run-a","shared"],["run-b","b"]]);
   await page.waitForFunction(()=>document.querySelectorAll(".session-card").length===2);

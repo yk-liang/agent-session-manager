@@ -112,6 +112,8 @@ export interface SessionGroupHint {
 export interface SessionDetail {
   meta: SessionMeta;
   events: SessionEvent[];
+  /** 开头这些事件是子会话分叉时继承自父会话的上下文。 */
+  inherited: number;
   warnings?: string[];
 }
 

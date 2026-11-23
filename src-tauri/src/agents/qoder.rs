@@ -78,10 +78,7 @@ impl AgentSource for QoderSource {
         Some(qoder_dir())
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
-        super::AgentWatchPaths {
-            extra_transcript_suffixes: vec![".meta.json"],
-            ..super::AgentWatchPaths::transcripts("projects", Some(4))
-        }
+        claude_family::watch_paths()
     }
     fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
         let mut locations = vec![(qoder_dir(), self.watch_paths())];

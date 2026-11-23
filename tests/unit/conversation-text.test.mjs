@@ -46,6 +46,9 @@ test('tool results pair in source order and unmatched results stay visible', () 
   assert.equal(rows[0].blocks[0].linked, undefined);
   assert.equal(rows[3].blocks[1].linked, undefined);
   assert.equal(rows[3].blocks[0].linked, true);
+  const forked = sessionRows([assistant(call), user(result('child result'))], 1);
+  assert.equal(forked[0].blocks[0].result, undefined);
+  assert.equal(forked[1].blocks[0].linked, undefined);
 
   assert.equal(toolDescription({ type: 'tool_use', input: { toolSummary: 'List\n  files' } }), 'List files');
   assert.equal(toolDescription({ type: 'tool_use', input: { Description: 'Subagent task' } }), 'Subagent task');

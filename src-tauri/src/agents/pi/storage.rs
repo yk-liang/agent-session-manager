@@ -1,7 +1,7 @@
-use crate::agents::{self, search::SessionRef, Subagent, TargetKind};
+use crate::agents::{self, lineage::{Lineage, Node}, SessionLocation, Subagent, TargetKind};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     io::{BufRead, BufReader, Lines},
     path::{Component, Path, PathBuf},
@@ -62,6 +62,17 @@ fn in_project(project: &Path, path: &Path) -> bool {
     })
 }
 
+pub(super) fn entry_ids(path: &Path) -> Result<HashSet<String>, String> {
+    let (_, lines, _) = open(path)?;
+    let mut ids = HashSet::new();
+    agents::for_each_jsonl_line(lines, |entry| {
+        if let Some(id) = entry["id"].as_str() {
+            ids.insert(id.to_owned());
+        }
+    });
+    Ok(ids)
+}
+
 fn recorded_parent(path: &Path, header: &Value) -> Option<PathBuf> {
     let recorded = header["parentSession"].as_str().filter(|path| !path.is_empty()).map(Path::new)?;
     let absolute = if recorded.is_absolute() {
@@ -95,22 +106,32 @@ fn layout_parent(project: &Path, path: &Path) -> Option<PathBuf> {
 pub(super) struct Location {
     pub(super) path: PathBuf,
     pub(super) id: String,
+    cwd: Option<String>,
+    /// 按子代理日志的存储结构推断的父会话文件；有值即为子会话。
     layout_parent: Option<PathBuf>,
-    parent_confirmed: bool,
+    /// 会话头记录的父会话文件。自定义会话目录下它与存储结构不一致，以它为准。
+    recorded_parent: Option<PathBuf>,
     parent_id_hint: Option<String>,
     embedded_id: bool,
+}
+
+/// 子会话的父会话以会话头记录为准，且须是本项目中已扫描的会话。
+fn parent_of<'a>(files: &'a BTreeMap<PathBuf, Location>, file: &Location) -> Option<&'a Location> {
+    file.layout_parent.as_ref()?;
+    files.get(file.recorded_parent.as_ref()?)
 }
 
 pub(super) struct ProjectSessions {
     project: PathBuf,
     pub(super) files: BTreeMap<PathBuf, Location>,
     ids: BTreeMap<String, Vec<PathBuf>>,
+    lineage: Lineage,
     unreadable: BTreeMap<PathBuf, String>,
     directory_warnings: Vec<String>,
 }
 
 impl ProjectSessions {
-    pub(super) fn scan(project: PathBuf, cancelled: &dyn Fn() -> bool) -> Result<Self, String> {
+    pub(super) fn scan(name: &str, project: PathBuf, cancelled: &dyn Fn() -> bool) -> Result<Self, String> {
         let project = project.canonicalize().unwrap_or(project);
         let mut files = BTreeMap::new();
         let mut ids = BTreeMap::<String, Vec<PathBuf>>::new();
@@ -144,7 +165,8 @@ impl ProjectSessions {
                         let pathname = header["parentSession"].as_str().map(Path::new);
                         let location = Location {
                             id: id.to_owned(),
-                            parent_confirmed: layout_parent.as_ref().is_some_and(|parent| recorded_parent(&path, &header).as_ref() == Some(parent)),
+                            cwd: header["cwd"].as_str().filter(|cwd| !cwd.trim().is_empty()).map(str::to_owned),
+                            recorded_parent: recorded_parent(&path, &header),
                             parent_id_hint: pathname.and_then(filename_id)
                                 .or_else(|| layout_parent.as_deref().and_then(filename_id)).map(str::to_owned),
                             layout_parent,
@@ -160,7 +182,17 @@ impl ProjectSessions {
                 }
             }
         }
-        Ok(Self { project, files, ids, unreadable, directory_warnings })
+        let nodes = files.values().map(|file| {
+            let unique = ids[&file.id].len() == 1;
+            let parent = parent_of(&files, file);
+            Node {
+                id: file.id.clone(),
+                location: unique.then(|| SessionLocation { session_id: file.id.clone(), project_dir: name.to_owned(), cwd: file.cwd.clone() }),
+                parents: parent.map(|parent| parent.id.clone()).into_iter().collect(),
+                child: file.layout_parent.is_some(),
+            }
+        }).collect::<Vec<_>>();
+        Ok(Self { project, lineage: Lineage::new(nodes), files, ids, unreadable, directory_warnings })
     }
 
     pub(super) fn open(root: &Path, project_dir: &str, id: &str) -> Result<Self, String> {
@@ -171,7 +203,7 @@ impl ProjectSessions {
             return Err("会话 ID 无效".into());
         }
         let project = agents::verify_within_root(root, &root.join(project_dir), TargetKind::Dir)?;
-        Self::scan(project, &|| false)
+        Self::scan(project_dir, project, &|| false)
     }
 
     pub(super) fn warnings(&self) -> impl Iterator<Item = &String> {
@@ -187,51 +219,47 @@ impl ProjectSessions {
         }
     }
 
-    pub(super) fn subagent(&self, location: &Location, project_dir: &str) -> Option<Subagent> {
-        let parent_path = location.layout_parent.as_ref()?;
-        let parent = self.files.get(parent_path)
-            .filter(|parent| location.parent_confirmed && self.locate(&parent.id).is_ok());
-        Some(Subagent {
-            parent_id: parent.map(|file| file.id.clone()).or_else(|| location.parent_id_hint.clone()),
-            parent: parent.map(|file| SessionRef {
-                session_id: file.id.clone(),
-                project_dir: project_dir.to_owned(),
-            }),
-            orphan: parent.is_none(),
-            ..Subagent::default()
-        })
+    pub(super) fn subagent(&self, location: &Location) -> Option<Subagent> {
+        let mut relation = self.lineage.subagent(&location.id)?;
+        if relation.parent_id.is_none() {
+            relation.parent_id.clone_from(&location.parent_id_hint);
+        }
+        Some(relation)
     }
 
+    /// 父会话可用（非孤儿）时它的日志文件；fork 子会话的继承前缀要与它比对。
+    pub(super) fn parent_file(&self, location: &Location) -> Option<&Path> {
+        let relation = self.lineage.subagent(&location.id)?;
+        relation.parent.and(parent_of(&self.files, location)).map(|parent| parent.path.as_path())
+    }
+
+    /// 会话及其全部子会话的日志（父在前）。存储在它之下却无法归属的子会话日志会中止删除。
     pub(super) fn deletion_targets(&self, id: &str) -> Result<Vec<(String, PathBuf)>, String> {
-        let root = self.locate(id)?;
+        self.locate(id)?;
         if let Some(error) = self.directory_warnings.first() {
             return Err(error.clone());
         }
-        let mut children = BTreeMap::<_, Vec<_>>::new();
-        for file in self.files.values() {
-            if let Some(parent) = &file.layout_parent {
-                children.entry(parent).or_default().push(file);
-            }
-        }
         let mut targets = Vec::new();
-        let mut pending = vec![root];
-        while let Some(location) = pending.pop() {
+        for id in self.lineage.subtree(id)? {
+            let location = self.locate(id)?;
             if !location.embedded_id {
                 return Err("Pi 会话头部缺少内嵌 id，无法确认删除目标".into());
             }
-            self.locate(&location.id)?;
             let child_dir = location.path.with_extension("");
             if let Some((_, error)) = self.unreadable.iter().find(|(path, _)| {
-                path.starts_with(&child_dir) || filename_id(path) == Some(&location.id)
+                path.starts_with(&child_dir) || filename_id(path) == Some(id)
             }) {
                 return Err(error.clone());
             }
+            if let Some(stray) = self.files.values().find(|file| {
+                file.layout_parent.as_ref() == Some(&location.path) && parent_of(&self.files, file).is_none()
+            }) {
+                return Err(format!("Pi 子会话 {:?} 的父会话与存储位置不符，已中止删除", stray.path));
+            }
             let target = agents::verify_within_root(&self.project, &location.path, TargetKind::File)?;
             let (header, lines, _) = open(&target)?;
-            if header["id"].as_str() != Some(&location.id)
-                || location.layout_parent.as_ref().is_some_and(|parent| {
-                    (recorded_parent(&location.path, &header).as_ref() == Some(parent)) != location.parent_confirmed
-                })
+            if header["id"].as_str() != Some(id)
+                || recorded_parent(&location.path, &header) != location.recorded_parent
             {
                 return Err("Pi 会话身份或父子关系已变化，请刷新后重试".into());
             }
@@ -241,13 +269,7 @@ impl ProjectSessions {
                     return Err(format!("{target:?} 含无法解析的行，无法完成身份复核"));
                 }
             }
-            targets.push((location.id.clone(), target));
-            for child in children.get(&location.path).into_iter().flatten().rev() {
-                if !child.parent_confirmed {
-                    return Err(format!("Pi 子会话 {:?} 的父会话与存储位置不符，已中止删除", child.path));
-                }
-                pending.push(child);
-            }
+            targets.push((id.to_owned(), target));
         }
         Ok(targets)
     }

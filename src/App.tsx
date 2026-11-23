@@ -64,7 +64,7 @@ export default function App() {
   const [operation, setOperation] = useState<SessionOperation | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
   const mutationRunning = useRef(false);
-  const batchDeleting = useRef(false);
+  const deleting = useRef(false);
   const batchDeleteProgress = operation?.kind === "delete" ? operation.progress : null;
   const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
@@ -97,13 +97,13 @@ export default function App() {
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (batchDeleting.current || configActivityRef.current.dirty || configActivityRef.current.busy) {
+      if (deleting.current || configActivityRef.current.dirty || configActivityRef.current.busy) {
         event.preventDefault(); event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", beforeUnload);
     const unlisten = isTauri() ? listen("config-exit-requested", () => {
-      if (batchDeleting.current) return;
+      if (deleting.current) return;
       const activity = configActivityRef.current;
       if (activity.busy) { showToast("配置操作仍在进行，请稍后退出。", true); return; }
       const exit = () => { void api.confirmConfigExit().catch((e) => showToast(String(e), true)); };
@@ -463,13 +463,13 @@ export default function App() {
     const total = targets.length;
     const useNativeGuard = isTauri();
     mutationRunning.current = true;
-    batchDeleting.current = true;
+    deleting.current = true;
     setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
     const removed = new Map<string, SessionRef>();
     const failures: SessionDeleteFailure[] = [];
     try {
       if (useNativeGuard) {
-        try { await api.setBatchDeleteGuard(true); }
+        try { await api.setDeleteGuard(true); }
         catch (error) { showToast(`无法启用${batch ? "批量" : ""}删除保护：${String(error)}`, true); return; }
       }
       if (batch) setBatchFailures([]);
@@ -505,9 +505,9 @@ export default function App() {
       }
       refreshCatalog();
     } finally {
-      if (useNativeGuard) await api.setBatchDeleteGuard(false)
+      if (useNativeGuard) await api.setDeleteGuard(false)
         .catch(error => showToast(`无法解除删除保护：${String(error)}`, true));
-      batchDeleting.current = false;
+      deleting.current = false;
       setOperation(null);
       mutationRunning.current = false;
     }

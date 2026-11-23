@@ -58,7 +58,14 @@ try {
       if (cmd === 'read_session') {
         if (window.__HIERARCHY__) return {
           meta: window.__HIERARCHY_ROWS__.find(row => row.sessionId === args.sessionId),
-          events: [{ type: 'assistant', message: { content: '子会话正文样例' } }],
+          events: [
+            ...(args.sessionId === 'leaf' ? [
+              { type: 'user', message: { content: '父会话的提问' } },
+              { type: 'assistant', message: { content: '父会话的回答' } },
+            ] : []),
+            { type: 'assistant', message: { content: '子会话正文样例' } },
+          ],
+          inherited: args.sessionId === 'leaf' ? 2 : 0,
         };
         const detail = structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
         detail.meta.archived = archived.has(args.sessionId);
@@ -202,6 +209,17 @@ try {
   assert.equal(await parentId.locator('.copy-id-icon').count(), 1);
   assert.equal(await header.getByRole('button', { name: '在终端恢复' }).count(), 0);
   assert.equal(await header.getByRole('button', { name: '归档', exact: true }).count(), 1);
+  const inherited = page.locator('.inherited-head');
+  await inherited.getByText('2 条消息', { exact: true }).waitFor();
+  await page.getByText('子会话正文样例', { exact: true }).waitFor();
+  assert.equal(await page.getByText('父会话的回答', { exact: true }).count(), 0);
+  await inherited.click();
+  await page.getByText('父会话的回答', { exact: true }).waitFor();
+  assert.equal(await page.locator('.event-group.inherited').count(), 2);
+  await page.getByText('子会话开始', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '收起继承内容' }).click();
+  await page.getByText('父会话的回答', { exact: true }).waitFor({ state: 'detached' });
+  assert.equal(await inherited.getAttribute('aria-expanded'), 'false');
   await card('父任务').getByRole('button', { name: '收起 父任务 的 1 个子会话' }).click();
   await header.getByRole('button', { name: '在列表定位' }).click();
   await card('二级子任务').locator('.session-card-open').waitFor();
@@ -212,7 +230,7 @@ try {
   await page.locator('.sidebar-project-list .project-meta').getByText('2 个会话', { exact: true }).waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   assert.deepEqual(errors, []);
-  console.log(`PASS: nested Codex sessions, orphans, all-session counts, and cascade deletion (${engine})`);
+  console.log(`PASS: nested Codex sessions, inherited fork context, orphans, all-session counts, and cascade deletion (${engine})`);
 } finally {
   await browser?.close();
   rmSync(dir, { recursive: true, force: true });

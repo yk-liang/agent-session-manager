@@ -96,7 +96,6 @@ impl Scan {
 fn preview(pages: &[history::Page], paths: Vec<PathBuf>) -> SessionMeta {
     let latest = &pages.last().unwrap().header;
     let mut meta = to_meta(latest, None);
-    meta.codex = Some(super::thread::metadata(latest, pages));
     meta.size_bytes = Some(pages.iter().map(|page| page.header.size_bytes).sum());
     meta.last_ts = paths
         .iter()

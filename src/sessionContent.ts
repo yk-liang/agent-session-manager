@@ -37,9 +37,11 @@ function blocks(content: unknown, row: number): SessionBlock[] {
   });
 }
 
-export function sessionRows(events: SessionEvent[]): SessionRow[] {
+/** 工具调用与结果只在同一段内配对，子会话自己的结果不会并入继承的调用。 */
+export function sessionRows(events: SessionEvent[], inherited = 0): SessionRow[] {
   const calls = new Map<string, SessionBlock>();
   return events.map((event, row) => {
+    if (row === inherited) calls.clear();
     const content = event.type === "assistant" || event.type === "user" && !event.isMeta
       ? blocks(event.message?.content, row) : [];
     for (const part of content) {
@@ -113,18 +115,27 @@ function lastKind({ blocks }: SessionRow, visibility: Visibility) {
 /** 一个虚拟行最多合并的事件数，避免长串工具调用绕过列表虚拟化。 */
 const MAX_MERGED_ROWS = 40;
 
-export function visibleSessionRows(rows: SessionRow[], visibility: Visibility): VisibleRow[] {
+export function visibleSessionRows(rows: SessionRow[], visibility: Visibility, from = 0, to = rows.length): VisibleRow[] {
   const visible: VisibleRow[] = [];
   let openActivity = false;
-  rows.forEach((row, index) => {
-    if (!rowVisible(row, visibility)) return;
+  for (let index = from; index < to; index++) {
+    const row = rows[index];
+    if (!rowVisible(row, visibility)) continue;
     const onlyActivity = row.blocks.every(part => visibleBlockKind(part, visibility) !== "message");
     const open = visible[visible.length - 1];
     if (openActivity && onlyActivity && row.blocks.length && open.members.length < MAX_MERGED_ROWS) open.members.push(index);
     else visible.push({ index, members: [] });
     openActivity = lastKind(row, visibility) === "activity";
-  });
+  }
   return visible;
+}
+
+/** 子会话开头继承自父会话的事件单独成段，活动不跨段合并。 */
+export function visibleSegments(rows: SessionRow[], visibility: Visibility, inherited: number) {
+  return {
+    inherited: visibleSessionRows(rows, visibility, 0, inherited),
+    own: visibleSessionRows(rows, visibility, inherited),
+  };
 }
 
 export function rowEndsWithMessage(rows: SessionRow[], { index, members }: VisibleRow, visibility: Visibility) {
@@ -134,28 +145,32 @@ export function rowEndsWithMessage(rows: SessionRow[], { index, members }: Visib
 /** 展开状态和已读取的工具正文；虚拟行卸载后仍保留，同一会话的正文刷新也沿用。 */
 export type SessionReading = { expanded: Map<string, boolean>; payloads: Map<string, Promise<ContentBlock>> };
 
-function createSessionContent(events: SessionEvent[]) {
-  const rows = sessionRows(events);
+function createSessionContent(events: SessionEvent[], inherited: number) {
+  const rows = sessionRows(events, inherited);
   const toc: { idx: number; text: string }[] = [];
   let hasContext = false;
+  let inheritedMessages = 0;
   rows.forEach(({ event, blocks }, idx) => {
     if (event.type === "context") hasContext = true;
-    if (event.type !== "user" || event.isMeta) return;
+    if (event.type !== "user" && event.type !== "assistant" || event.isMeta) return;
     const text = blocks.flatMap(({ content }) => messageBlockText(content)?.trim() || []).join("\n");
-    if (text) toc.push({ idx, text });
+    if (!text) return;
+    if (idx < inherited) inheritedMessages++;
+    else if (event.type === "user") toc.push({ idx, text });
   });
   return {
-    rows, toc, hasContext,
-    visible: visibleSessionRows(rows, DEFAULT_VISIBILITY),
+    rows, toc, hasContext, inherited, inheritedMessages,
+    visible: visibleSegments(rows, DEFAULT_VISIBILITY, inherited),
   };
 }
 
 const sessionContents = new WeakMap<SessionEvent[], ReturnType<typeof createSessionContent>>();
 
-export function sessionContent(events: SessionEvent[]) {
+/** `inherited` 是开头继承自父会话的事件数；同一份事件只按首次传入的值切分。 */
+export function sessionContent(events: SessionEvent[], inherited = 0) {
   let content = sessionContents.get(events);
   if (!content) {
-    content = createSessionContent(events);
+    content = createSessionContent(events, Math.min(inherited, events.length));
     sessionContents.set(events, content);
   }
   return content;

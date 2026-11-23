@@ -160,4 +160,4 @@ export const setConfigGuard = (activity: ConfigActivity) =>
     busy: activity.busy,
   });
 export const confirmConfigExit = () => invoke<void>("confirm_config_exit");
-export const setBatchDeleteGuard = (active: boolean) => invoke<void>("set_batch_delete_guard", { active });
+export const setDeleteGuard = (active: boolean) => invoke<void>("set_delete_guard", { active });

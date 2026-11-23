@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowDown } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
+import { ArrowDown, ChevronRight, History } from "lucide-react";
 import CopyButton from "./CopyButton";
 import { CheckboxField } from "./Checkbox";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -9,7 +9,7 @@ import { useSessionOutline } from "./SessionOutline";
 import { useConversationScroll } from "../useConversationScroll";
 import { DetailState } from "./DetailState";
 import { EventView } from "./SessionEvent";
-import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
+import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSegments, type SessionReading, type VisibleRow } from "../sessionContent";
 import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
@@ -32,6 +32,25 @@ interface Props {
   onRetryRead?: () => void;
 }
 
+/** 虚拟列表的一行：会话事件，或继承上下文的折叠条与结尾。 */
+type ListItem =
+  | { key: number; row: VisibleRow; inherited: boolean }
+  | { key: "inherited" | "inherited-end"; row?: undefined };
+
+const INHERITED_OPEN = "inherited";
+
+function InheritedHead({ open, messages, onToggle }: { open: boolean; messages: number; onToggle: () => void }) {
+  return (
+    <button type="button" className="inherited-head" aria-expanded={open} onClick={onToggle}>
+      <UiIcon icon={ChevronRight} size={14} className="inherited-chevron" />
+      <UiIcon icon={History} size={14} />
+      <strong>继承自父会话</strong>
+      <span className="inherited-count">{messages} 条消息</span>
+      <span className="inherited-action">{open ? "收起" : "展开"}</span>
+    </button>
+  );
+}
+
 function SessionId({ id, parent = false, onError }: { id: string; parent?: boolean; onError: (error: unknown) => void }) {
   const label = parent ? "父会话 ID" : "会话 ID";
   return (
@@ -50,48 +69,66 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
   const reportCopyError = useCallback((error: unknown) => toast(`复制失败：${String(error)}`, true), [toast]);
   const [{ tool: showTools, thinking: showThinking, context: showContext, markdown: renderMarkdown }, setConversation] = useUiPreference("conversation");
 
-  const content = sessionContent(detail.events);
-  const { rows, toc, hasContext } = content;
+  const content = sessionContent(detail.events, detail.inherited);
+  const { rows, toc, hasContext, inherited } = content;
   const visibility = useMemo(() => showTools && showThinking && !showContext ? DEFAULT_VISIBILITY
     : { tool: showTools, thinking: showThinking, context: showContext }, [showTools, showThinking, showContext]);
 
   const models = useMemo(() => historicalModels(detail.events), [detail.events]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  // 正文搜索不含继承的上下文：命中序号从子会话自己的事件算起，也只在这些事件中查找。
   const hitIndex = useMemo(() => {
     if (!searchTarget) return -1;
-    const matches = (index: number) => index >= 0 && !!detail.events[index] && eventMatches(detail.events[index], searchTarget.query);
-    const byId = searchTarget.eventId ? detail.events.findIndex((event) => event.uuid === searchTarget.eventId) : -1;
+    const matches = (index: number) => !!detail.events[index] && eventMatches(detail.events[index], searchTarget.query);
+    const find = (predicate: (index: number) => boolean) => {
+      for (let index = inherited; index < detail.events.length; index++) if (predicate(index)) return index;
+      return -1;
+    };
+    const byId = searchTarget.eventId ? find(index => detail.events[index].uuid === searchTarget.eventId) : -1;
     if (matches(byId)) return byId;
     const anchor = searchTarget.snippet.replace(/^…|…$/g, "");
     const anchored = (index: number) => matches(index) && eventTextParts(detail.events[index]).some((text) => text.includes(anchor));
-    if (anchored(searchTarget.eventIndex)) return searchTarget.eventIndex;
-    const bySnippet = detail.events.findIndex((_, index) => anchored(index));
-    if (bySnippet >= 0) return bySnippet;
-    return detail.events.findIndex((event) => eventMatches(event, searchTarget.query));
-  }, [detail.events, searchTarget]);
+    if (anchored(searchTarget.eventIndex + inherited)) return searchTarget.eventIndex + inherited;
+    const bySnippet = find(anchored);
+    return bySnippet >= 0 ? bySnippet : find(matches);
+  }, [detail.events, inherited, searchTarget]);
 
   const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, cwd: meta.cwd, onCopyError: reportCopyError }),
     [reading, renderMarkdown, meta.cwd, reportCopyError]);
-  const visible = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
-    : visibleSessionRows(content.rows, visibility), [content, visibility]);
-  const heads = useMemo(() => visible.map(row => row.index), [visible]);
-  const groups = useMemo(() => visible.map(({ index, members }) => [index, ...members].map(i => rows[i])), [visible, rows]);
-  const itemKey = useCallback((index: number) => heads[index], [heads]);
-  const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
+  const segments = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
+    : visibleSegments(content.rows, visibility, inherited), [content, visibility, inherited]);
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const inheritedOpen = reading.expanded.get(INHERITED_OPEN) ?? false;
+  const toggleInherited = () => {
+    reading.expanded.set(INHERITED_OPEN, !inheritedOpen);
+    rerender();
+  };
+  const items = useMemo((): ListItem[] => {
+    const own = segments.own.map(row => ({ key: row.index, row, inherited: false }));
+    if (!inherited) return own;
+    const head: ListItem = { key: "inherited" };
+    if (!inheritedOpen) return [head, ...own];
+    const parent = segments.inherited.map(row => ({ key: row.index, row, inherited: true }));
+    return [head, ...parent, { key: "inherited-end" }, ...own];
+  }, [segments, inherited, inheritedOpen]);
+  const heads = useMemo(() => items.map(item => item.row?.index ?? -1), [items]);
+  const groups = useMemo(() => items.map(({ row }) => row ? [row.index, ...row.members].map(i => rows[i]) : []), [items, rows]);
+  const itemKey = useCallback((index: number) => items[index].key, [items]);
+  const virtual = useVirtualizer({ count: items.length, getScrollElement: () => bodyRef.current,
     estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 8, useAnimationFrameWithResizeObserver: true });
   const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, heads, virtual, bodyRef, contentRef);
   const outline = useSessionOutline(toc, key, position, jumpTo);
-  const markdownAnchor = useRef<number | null>(null);
+  const markdownAnchor = useRef<ListItem["key"] | null>(null);
   const changeMarkdown = (enabled: boolean) => {
     const offset = virtual.scrollOffset ?? 0;
     const first = virtual.getVirtualItems().find((row) => row.end > offset);
-    markdownAnchor.current = first ? heads[first.index] : null;
+    markdownAnchor.current = first ? items[first.index].key : null;
     setConversation(current => ({ ...current, markdown: enabled }));
   };
   useLayoutEffect(() => {
-    const index = markdownAnchor.current;
-    if (index === null) return;
+    const anchor = markdownAnchor.current;
+    if (anchor === null) return;
     markdownAnchor.current = null;
     virtual.measure();
     virtual.getVirtualItems();
@@ -100,10 +137,10 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
       virtual.resizeItem(Number(row.dataset.index), row.getBoundingClientRect().height);
     });
     if (!searchTarget) {
-      const position = heads.indexOf(index);
+      const position = items.findIndex(item => item.key === anchor);
       if (position >= 0) virtual.scrollToIndex(position, { align: "start" });
     }
-  }, [renderMarkdown, virtual, heads, searchTarget]);
+  }, [renderMarkdown, virtual, items, searchTarget]);
   // 正文刷新只更新定位数据，避免把读者拉回搜索命中处。
   const latestHit = useRef({ hitIndex, jumpTo });
   useLayoutEffect(() => { latestHit.current = { hitIndex, jumpTo }; }, [hitIndex, jumpTo]);
@@ -157,11 +194,23 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           <div className="detail-body" ref={bodyRef} tabIndex={-1}>
             <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
               {virtual.getVirtualItems().map((row) => {
-                const i = heads[row.index];
-                const previous = visible[row.index - 1];
-                return <div data-index={row.index} tabIndex={-1} title={eventModelTitle(detail.events[i])} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
+                const item = items[row.index];
+                const placement = { "data-index": row.index, ref: virtual.measureElement, style: { transform: `translateY(${row.start}px)` } };
+                if (!item.row) {
+                  return item.key === "inherited"
+                    ? <div {...placement} className="event-group" key={row.key}>
+                      <InheritedHead open={inheritedOpen} messages={content.inheritedMessages} onToggle={toggleInherited} />
+                    </div>
+                    : <div {...placement} className="event-group inherited-end" key={row.key}>
+                      <button type="button" className="btn-ghost btn-sm" onClick={toggleInherited}>收起继承内容</button>
+                      <div className="inherited-boundary">子会话开始</div>
+                    </div>;
+                }
+                const i = item.row.index;
+                const previous = items[row.index - 1]?.row;
+                return <div {...placement} tabIndex={-1} title={eventModelTitle(detail.events[i])}
                   data-follows-activity={previous && !rowEndsWithMessage(rows, previous, visibility) || undefined}
-                  className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
+                  className={`event-group${item.inherited ? " inherited" : ""}${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
                   <EventView
                     index={i}
                     rows={groups[row.index]}
@@ -172,7 +221,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
                 </div>;
               })}
             </div>
-            {visible.length === 0 && (
+            {items.length === 0 && (
               <div className="empty-hint">
                 {hasContext && !showContext ? "勾选「上下文」查看运行记录。" : detail.events.length > 0
                   ? "当前筛选下没有消息" : meta.hasTranscript
@@ -181,7 +230,7 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
               </div>
             )}
           </div>
-          {visible.length > 0 && !position.atBottom && (
+          {items.length > 0 && !position.atBottom && (
             <button type="button" className="detail-jump-bottom btn-icon" title="回到底部" aria-label="回到底部" onClick={jumpToBottom}>
               <UiIcon icon={ArrowDown} size={16} />
             </button>
