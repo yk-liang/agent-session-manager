@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import UiIcon from "./UiIcon";
-import { configDiff } from "../configDiff";
+import { foldUnchanged, lineDiff } from "../diff";
 import type { ConfigFileChange } from "../types";
 
 const actionTones = { create: "success", replace: "warning", remove: "error", unchanged: undefined };
@@ -15,27 +15,14 @@ const actionLabels = {
 
 export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
   const rows = useMemo(
-    () => configDiff(file.before, file.after),
+    () => lineDiff(file.before, file.after),
     [file.before, file.after],
   );
   const [showAll, setShowAll] = useState(false);
-  const visible = useMemo(() => {
-    if (showAll || rows.length < 24)
-      return rows.map((row, index) => ({ row, index }));
-    const indexes = new Set<number>();
-    rows.forEach((row, index) => {
-      if (row.kind !== "same")
-        for (
-          let i = Math.max(0, index - 3);
-          i <= Math.min(rows.length - 1, index + 3);
-          i++
-        )
-          indexes.add(i);
-    });
-    return [...indexes]
-      .sort((a, b) => a - b)
-      .map((index) => ({ row: rows[index], index }));
-  }, [rows, showAll]);
+  const visible = useMemo(
+    () => (showAll || rows.length < 24 ? rows : foldUnchanged(rows, 3)),
+    [rows, showAll],
+  );
 
   return (
     <details className="config-diff-file" open={file.action !== "unchanged"}>
@@ -63,16 +50,13 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
               <span>新行</span>
               <span>− 删除 / + 新增</span>
             </div>
-            {visible.map(({ row, index }, position) => (
-              <div key={index}>
-                {index > (position ? visible[position - 1].index + 1 : 0) && (
-                  <div className="diff-gap">
-                    … 省略{" "}
-                    {index - (position ? visible[position - 1].index + 1 : 0)}{" "}
-                    行未改动内容
-                  </div>
-                )}
-                <div className={`diff-line ${row.kind}`}>
+            {visible.map((row, index) =>
+              row.kind === "skip" ? (
+                <div key={index} className="diff-gap">
+                  … 省略 {row.count} 行未改动内容
+                </div>
+              ) : (
+                <div key={index} className={`diff-line ${row.kind}`}>
                   <span>{row.before ?? ""}</span>
                   <span>{row.after ?? ""}</span>
                   <code>
@@ -84,12 +68,8 @@ export default function ConfigFileDiff({ file }: { file: ConfigFileChange }) {
                     {row.text || " "}
                   </code>
                 </div>
-              </div>
-            ))}
-            {visible.length > 0 &&
-              visible[visible.length - 1].index < rows.length - 1 && (
-                <div className="diff-gap">… 其余行未改动</div>
-              )}
+              ),
+            )}
           </div>
           {rows.length >= 24 && (
             <button

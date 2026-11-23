@@ -279,7 +279,7 @@ export default function App() {
       }
       setLoadedSession(current => ({
         detail: d,
-        reading: keep && current ? current.reading : { expanded: new Set(), payloads: new Map() },
+        reading: keep && current ? current.reading : { expanded: new Map(), payloads: new Map() },
       }));
     } catch (e) {
       if (generation !== detailRequestGeneration.current) return;

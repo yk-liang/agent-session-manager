@@ -46,7 +46,8 @@ try {
   assert.ok(fixture.detail.meta.sizeBytes > 0);
   assert.match(await page.locator('.session-card-size').textContent(), /^[1-9]\d*(?:\.\d+)? (?:B|KB|MB)$/);
   await page.locator('.session-card').click();
-  await page.getByRole('button',{name:/^工具调用 read.*已完成$/}).waitFor();
+  const readCard=page.getByRole('button',{name:/^读取文件\s*example.*read$/});
+  await readCard.waitFor();
   const ids=await page.locator('.event-group').evaluateAll(rows=>rows.map(el=>Number(el.id.slice(3))));
   assert.deepEqual(ids,[...ids].sort((a,b)=>a-b));
   assert.ok(ids.indexOf(1)<ids.indexOf(2)&&ids.indexOf(2)<ids.indexOf(3)&&ids.indexOf(3)<ids.indexOf(5));
@@ -62,13 +63,13 @@ try {
   console.log(`PASS: latest model badge, provider-scoped history and per-message model hints (${engine})`);
   console.log(`PASS: source part order, grouped user prompt and folded tools/reasoning (${engine})`);
 
-  await page.getByRole('button',{name:/^工具调用 read.*已完成$/}).click();
+  assert.equal(await readCard.locator('.op-name').getAttribute('title'),'/tmp/example');
+  await readCard.click();
   await page.getByText('Tool output',{exact:true}).waitFor();
-  assert.ok((await page.locator('.collapsible.tool .code').first().textContent()).includes('/tmp/example'));
-  assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),2);
+  assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),1);
   await page.getByRole('button',{name:/思考过程.*Stored reasoning/}).click();
   await page.locator('.collapsible.thinking .collapsible-body').getByText('Stored reasoning',{exact:true}).waitFor();
-  console.log(`PASS: input/output load only after expansion; stored reasoning expands (${engine})`);
+  console.log(`PASS: file reads show the path up front and load only their content on expansion; stored reasoning expands (${engine})`);
 
   await page.locator('.detail-body').evaluate(el=>el.scrollTo(0,el.scrollHeight));
   await page.getByRole('button',{name:/^工具调用 bash.*失败$/}).click();

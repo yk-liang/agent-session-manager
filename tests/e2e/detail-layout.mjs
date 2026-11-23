@@ -26,7 +26,7 @@ const compact=async()=>{
 };
 const alignedActivity=async()=>{
   const { count, misaligned }=await page.evaluate(()=>{
-    const cards=[...document.querySelectorAll('.event-group > :is(.collapsible, .response-group)')];
+    const cards=[...document.querySelectorAll('.event-group > .collapsible')];
     const assistant=document.querySelector('.event-group > .message.assistant');
     const width=assistant && getComputedStyle(assistant).maxWidth;
     return { count:cards.length, misaligned:cards.flatMap(card=>{
@@ -42,7 +42,7 @@ const messageSpacing=async()=>{
   const message=page.locator('#ev-1 .message');
   const geometry=()=>message.evaluate(el=>{
     const cards=[...document.querySelectorAll('.event-group[data-index]')].slice(0,8)
-      .flatMap(row=>[...row.querySelectorAll(':scope > :is(.message, .collapsible, .response-group)')]);
+      .flatMap(row=>[...row.querySelectorAll(':scope > :is(.message, .collapsible)')]);
     const gaps=cards.slice(1).map((next,index)=>{
       const previous=cards[index];
       const rect=node=>(node.querySelector(':scope > .msg')??node).getBoundingClientRect();
@@ -55,7 +55,7 @@ const messageSpacing=async()=>{
       actionHeight:Math.round(footer.height),opacity:getComputedStyle(actions).opacity};
   });
   const before=await geometry();
-  assert.deepEqual(before,{gaps:[32,32,32,32,32,32,32,32,8],actionGap:4,actionHeight:20,opacity:'0'});
+  assert.deepEqual(before,{gaps:[32,32,32,32,32,32,32,32,8,32],actionGap:4,actionHeight:20,opacity:'0'});
   await message.locator('.msg').hover();
   assert.deepEqual(await geometry(),{...before,opacity:'1'});
 };

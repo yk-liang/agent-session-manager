@@ -130,7 +130,100 @@ export interface ContentBlock {
   tool_use_id?: string;
   content?: unknown;
   is_error?: boolean;
+  script_result?: ContentBlock;
+  /** 后端给出的操作描述；延迟加载时只带标题所需字段，正文随原始数据一起读取。 */
+  ops?: ToolOp[];
 }
+
+/** 行以空格、`-`、`+` 开头；起始行号未知时为空。 */
+export interface DiffHunk {
+  old_start: number | null;
+  new_start: number | null;
+  lines: string[];
+}
+
+/** 一个文件里的搜索命中；`context` 是 `-A`、`-B` 带出的上下文行。 */
+export interface SearchHits {
+  path: string;
+  lines: { line?: number; text: string; context?: boolean }[];
+}
+
+export type BrowseOp =
+  | { kind: "read"; path: string; start?: number; end?: number; total?: number; tail?: number }
+  | { kind: "search"; pattern: string; paths?: string[]; in_file?: boolean; matches?: number; files?: number; hits?: SearchHits[] }
+  | { kind: "find"; pattern?: string; paths?: string[]; count?: number }
+  | { kind: "list"; paths?: string[]; count?: number };
+
+export type ChangeOp =
+  | { kind: "edit"; path: string; added: number; removed: number; hunks?: DiffHunk[] }
+  | { kind: "write"; path: string; lines: number; created?: boolean; content?: string }
+  | { kind: "delete"; path: string };
+
+export type ShellFilter =
+  | { kind: "head" | "tail"; value: number }
+  | { kind: "include" | "exclude"; value: string }
+  | { kind: "count" };
+
+export type ShellIntent =
+  | "read" | "search" | "find" | "list" | "write" | "modify" | "script" | "run"
+  | "git_diff" | "git_log" | "git_commit" | "git" | "github"
+  | "test" | "build" | "install" | "remote" | "http" | "browser" | "database"
+  | "mkdir" | "remove" | "copy" | "move" | "process" | "kill" | "wait" | "open" | "count" | "other";
+
+/** heredoc、`-c`/`-e` 参数或脚本工具的代码；`first` 是第一行有意义的代码。 */
+export interface ScriptInfo {
+  lang?: string;
+  title?: string;
+  lines: number;
+  first: string;
+  body?: string;
+}
+
+/** 只读、搜、找、列的命令带 `steps`，按文件操作展示；其余命令按第一步的意图展示。 */
+export interface ShellOp {
+  kind: "shell";
+  command?: string;
+  description?: string;
+  exit_code?: number;
+  no_match?: boolean;
+  cwd?: string;
+  intent: ShellIntent;
+  head?: string;
+  filters?: ShellFilter[];
+  more?: number;
+  looped?: boolean;
+  target?: string;
+  append?: boolean;
+  script?: ScriptInfo;
+  steps?: (BrowseOp & { program: string; filters?: ShellFilter[] })[];
+}
+
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  options: { label: string; description?: string }[];
+  answer?: string;
+}
+
+export type ToolOp =
+  | BrowseOp
+  | ChangeOp
+  | ShellOp
+  | ({ kind: "script" } & ScriptInfo)
+  | { kind: "skill"; name: string; args?: string; path?: string; description?: string; body?: string }
+  | { kind: "web_search"; query: string; domain?: string; results?: number }
+  | { kind: "web_fetch"; url: string; prompt?: string }
+  | { kind: "ask"; questions: AskQuestion[] }
+  | { kind: "agent"; agent?: string; task: string; background?: boolean }
+  | { kind: "message"; to: string; summary?: string }
+  | { kind: "wait"; seconds?: number; target?: string }
+  | { kind: "wake"; seconds: number; reason?: string }
+  | { kind: "stop"; task: string; detail?: string }
+  | { kind: "monitor"; description: string; minutes?: number }
+  | { kind: "load_tools"; names: string[] }
+  | { kind: "todo"; items: { text: string; status: string }[] }
+  | { kind: "image"; path: string }
+  | { kind: "mcp"; server: string; tool: string; title?: string };
 
 export interface FilePresence {
   key: string;

@@ -7,7 +7,8 @@ import SessionActions from "./SessionActions";
 import SessionInfo from "./SessionInfo";
 import { useSessionOutline } from "./SessionOutline";
 import { useConversationScroll } from "../useConversationScroll";
-import { DetailState, EventView, RowKey } from "./SessionEvent";
+import { DetailState } from "./DetailState";
+import { EventView } from "./SessionEvent";
 import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionRows, type SessionReading } from "../sessionContent";
 import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
@@ -56,20 +57,22 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
     return detail.events.findIndex((event) => eventMatches(event, searchTarget.query));
   }, [detail.events, searchTarget]);
 
-  const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, onCopyError: reportCopyError }),
-    [reading, renderMarkdown, reportCopyError]);
+  const state = useMemo(() => ({ ...reading, markdown: renderMarkdown, cwd: meta.cwd, onCopyError: reportCopyError }),
+    [reading, renderMarkdown, meta.cwd, reportCopyError]);
   const visible = useMemo(() => visibility === DEFAULT_VISIBILITY ? content.visible
     : visibleSessionRows(content.rows, visibility), [content, visibility]);
-  const itemKey = useCallback((index: number) => visible[index], [visible]);
+  const heads = useMemo(() => visible.map(row => row.index), [visible]);
+  const groups = useMemo(() => visible.map(({ index, members }) => [index, ...members].map(i => rows[i])), [visible, rows]);
+  const itemKey = useCallback((index: number) => heads[index], [heads]);
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => bodyRef.current,
     estimateSize: () => 120, overscan: 5, getItemKey: itemKey, gap: 8, useAnimationFrameWithResizeObserver: true });
-  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, visible, virtual, bodyRef, contentRef);
+  const { position, jumpTo, jumpToBottom } = useConversationScroll(key, toc, heads, virtual, bodyRef, contentRef);
   const outline = useSessionOutline(toc, key, position, jumpTo);
   const markdownAnchor = useRef<number | null>(null);
   const changeMarkdown = (enabled: boolean) => {
     const offset = virtual.scrollOffset ?? 0;
     const first = virtual.getVirtualItems().find((row) => row.end > offset);
-    markdownAnchor.current = first ? visible[first.index] : null;
+    markdownAnchor.current = first ? heads[first.index] : null;
     setConversation(current => ({ ...current, markdown: enabled }));
   };
   useLayoutEffect(() => {
@@ -83,10 +86,10 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
       virtual.resizeItem(Number(row.dataset.index), row.getBoundingClientRect().height);
     });
     if (!searchTarget) {
-      const position = visible.indexOf(index);
+      const position = heads.indexOf(index);
       if (position >= 0) virtual.scrollToIndex(position, { align: "start" });
     }
-  }, [renderMarkdown, virtual, visible, searchTarget]);
+  }, [renderMarkdown, virtual, heads, searchTarget]);
   // 正文刷新只更新定位数据，避免把读者拉回搜索命中处。
   const latestHit = useRef({ hitIndex, jumpTo });
   useLayoutEffect(() => { latestHit.current = { hitIndex, jumpTo }; }, [hitIndex, jumpTo]);
@@ -136,17 +139,18 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           <div className="detail-body" ref={bodyRef} tabIndex={-1}>
             <div className="virtual-events" ref={contentRef} style={{ height: virtual.getTotalSize() }}>
               {virtual.getVirtualItems().map((row) => {
-                const i = visible[row.index];
-                const previous = rows[visible[row.index - 1]];
+                const i = heads[row.index];
+                const previous = visible[row.index - 1];
                 return <div data-index={row.index} tabIndex={-1} title={eventModelTitle(detail.events[i])} ref={virtual.measureElement} style={{ transform: `translateY(${row.start}px)` }}
-                  data-follows-activity={previous && !rowEndsWithMessage(previous, visibility) || undefined}
+                  data-follows-activity={previous && !rowEndsWithMessage(rows, previous, visibility) || undefined}
                   className={`event-group${i === hitIndex ? " search-target" : ""}`} id={`ev-${i}`} key={row.key}>
-                  <RowKey.Provider value={String(i)}><EventView
-                    row={rows[i]}
+                  <EventView
+                    index={i}
+                    rows={groups[row.index]}
                     visibility={visibility}
                     renderMarkdown={renderMarkdown}
                     highlightQuery={i === hitIndex ? searchTarget?.query : undefined}
-                  /></RowKey.Provider>
+                  />
                 </div>;
               })}
             </div>

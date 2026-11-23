@@ -1,12 +1,17 @@
+import type { DiffHunk } from "./types";
+
 export interface DiffLine {
   kind: "same" | "add" | "remove";
   text: string;
   before: number | null;
   after: number | null;
 }
+/** 折叠掉的未改动行；行数未知时为空。 */
+type DiffSkip = { kind: "skip"; count: number | null };
+export type DiffRow = DiffLine | DiffSkip;
 
 /** 保留空行与文件末尾换行差异；大文件降级为完整替换，避免 LCS 阻塞窗口。 */
-export function configDiff(
+export function lineDiff(
   before: string | null,
   after: string | null,
 ): DiffLine[] {
@@ -95,4 +100,46 @@ export function configDiff(
       after: b.length - i + 1,
     });
   return rows;
+}
+
+const next = (line: number | null) => line === null ? null : line + 1;
+
+/** 工具补丁的 hunk 转为差异行，相邻 hunk 之间标出跳过的行数。 */
+export function hunkRows(hunks: DiffHunk[]): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let lastBefore: number | null = null;
+  hunks.forEach((hunk, index) => {
+    let before = hunk.old_start, after = hunk.new_start;
+    if (index > 0) rows.push({ kind: "skip", count: before !== null && lastBefore !== null ? before - lastBefore - 1 : null });
+    for (const line of hunk.lines) {
+      const text = line.slice(1);
+      if (line[0] === "+") {
+        rows.push({ kind: "add", text, before: null, after });
+        after = next(after);
+      } else {
+        rows.push({ kind: line[0] === "-" ? "remove" : "same", text, before, after: line[0] === "-" ? null : after });
+        lastBefore = before;
+        before = next(before);
+        if (line[0] !== "-") after = next(after);
+      }
+    }
+  });
+  return rows;
+}
+
+/** 只保留改动前后 `context` 行内的未改动行，其余合并为跳过标记。 */
+export function foldUnchanged(rows: DiffRow[], context: number): DiffRow[] {
+  const near = new Uint8Array(rows.length);
+  rows.forEach((row, index) => {
+    if (row.kind === "add" || row.kind === "remove") near.fill(1, Math.max(0, index - context), index + context + 1);
+  });
+  const folded: DiffRow[] = [];
+  rows.forEach((row, index) => {
+    const skip: DiffSkip | undefined = row.kind === "skip" ? row : row.kind === "same" && !near[index] ? { kind: "skip", count: 1 } : undefined;
+    const last = folded[folded.length - 1];
+    if (!skip) folded.push(row);
+    else if (last?.kind === "skip") last.count = last.count === null || skip.count === null ? null : last.count + skip.count;
+    else folded.push({ ...skip });
+  });
+  return folded;
 }

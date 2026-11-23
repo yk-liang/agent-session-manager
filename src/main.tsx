@@ -7,6 +7,7 @@ import "./styles/base.css";
 import "./styles/shell.css";
 import "./styles/catalog.css";
 import "./styles/conversation.css";
+import "./styles/activity.css";
 import "./styles/config.css";
 import "./styles/usage.css";
 
