@@ -44,7 +44,12 @@ fn snapshot(
                 TargetKind::File
             },
         )?;
-        let path = root.join(canonical.strip_prefix(canonical_root).unwrap());
+        let relative = canonical.strip_prefix(canonical_root).unwrap();
+        let path = if relative.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(relative)
+        };
         if is_dir {
             paths.extend(super::discover(agent, &[path], &|| false)?);
         } else {
@@ -137,6 +142,24 @@ mod tests {
             .iter()
             .map(|row| row.usage.total_tokens)
             .sum()
+    }
+
+    #[test]
+    fn deletion_snapshot_includes_codex_history_file_root_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let rollout = sessions.join("rollout.jsonl");
+        let history = temp.path().join("thread_history_1.sqlite");
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&rollout, b"").unwrap();
+        let roots = [sessions, history.clone()];
+
+        let before = snapshot("codex", &roots, std::slice::from_ref(&rollout)).unwrap();
+        assert_eq!(before.into_keys().collect::<Vec<_>>(), [rollout.clone()]);
+
+        fs::write(&history, b"").unwrap();
+        let after = snapshot("codex", &roots, &[rollout.clone(), history.clone()]).unwrap();
+        assert_eq!(after.into_keys().collect::<Vec<_>>(), [rollout, history]);
     }
 
     #[test]
