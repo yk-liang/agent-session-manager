@@ -24,7 +24,7 @@ fn context_visibility_pi_tree_summaries_and_extensions() {
     )
     .unwrap();
     let before = fs::read(&file).unwrap();
-    let (summary, warnings) = parse(&file, false).split();
+    let (summary, warnings) = parse(&file, "test", false).split();
     assert!(warnings.is_empty());
     let summary = summary.unwrap();
     assert_eq!(summary.meta.real_user_count, 2);
@@ -63,7 +63,7 @@ fn context_visibility_actual_pi_log_if_requested() {
     };
     let path = Path::new(&file);
     let before = fs::read(path).unwrap();
-    let (parsed, warnings) = parse(path, true).split();
+    let (parsed, warnings) = parse(path, "test", true).split();
     assert!(warnings.is_empty());
     let parsed = parsed.unwrap();
     assert_eq!(parsed.meta.real_user_count, 1);

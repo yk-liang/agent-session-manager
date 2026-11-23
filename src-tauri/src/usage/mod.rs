@@ -157,11 +157,11 @@ fn store(agent: &str) -> &'static Mutex<Store> {
 }
 
 /// 删除动作必须晚于账本的持久化提交；失败时保留会话，不能静默丢掉最后一轮用量。
-pub fn preserve_before_delete(
+pub fn preserve_before_delete<T>(
     agent: &str,
     targets: Option<&[PathBuf]>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    delete: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     let roots = roots(agent)?;
     let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
     let mut store = store(agent).lock().unwrap_or_else(|e| e.into_inner());
@@ -182,12 +182,12 @@ pub(crate) fn preserve_codex_deletion(
     deletion::preserve_validated_at("codex", &roots, &mut store, targets, validate, delete)
 }
 
-fn preserve_before_delete_at(
+fn preserve_before_delete_at<T>(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    delete: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     ingest::sync_at(agent, roots, store, &|| false)
         .map_err(|e| format!("删除前未能保存累计用量，会话已保留：{e}"))?;
     delete()

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum Revision {
+pub(super) enum Revision {
     Missing,
     File {
         len: u64,
@@ -21,7 +21,7 @@ enum Revision {
     },
 }
 
-fn revisions(paths: &[PathBuf]) -> Option<Vec<Revision>> {
+pub(super) fn revisions(paths: &[PathBuf]) -> Option<Vec<Revision>> {
     paths
         .iter()
         .map(|path| match fs::metadata(path) {

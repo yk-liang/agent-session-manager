@@ -135,8 +135,9 @@ export class AgentCatalogCache {
     const model = latest.statsPending ? meta.model : latest.model;
     const archived = latest.archived ?? false;
     const codex = latest.codex ?? meta.codex;
-    return meta.title === title && meta.model === model && (meta.archived ?? false) === archived && meta.codex === codex
-      ? meta : { ...meta, title, model, archived, codex };
+    const subagent = latest.subagent;
+    return meta.title === title && meta.model === model && (meta.archived ?? false) === archived && meta.codex === codex && meta.subagent === subagent
+      ? meta : { ...meta, title, model, archived, codex, subagent };
   }
 
   /**

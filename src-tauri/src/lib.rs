@@ -381,14 +381,7 @@ async fn delete_session(
         }
         let targets = source.deletion_targets(&project_dir, &session_id)?;
         usage::preserve_before_delete(&agent, targets.as_deref(), || {
-            if targets.is_some() && source.deletion_targets(&project_dir, &session_id)? != targets {
-                return Err("会话文件已变化，请重新确认后删除".into());
-            }
-            source.delete_session(&project_dir, &session_id)
-        })?;
-        Ok(agents::SessionDeletion {
-            removed: vec![agents::search::SessionRef { project_dir, session_id }],
-            error: None,
+            source.delete_session(&project_dir, &session_id, targets.as_deref())
         })
     })
     .await

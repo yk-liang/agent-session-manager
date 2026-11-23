@@ -14,10 +14,14 @@ export function sessionKey(session: SessionRef): string {
   return JSON.stringify([session.projectDir, session.sessionId]);
 }
 
+export function displaySessionId(session: SessionMeta): string {
+  return session.subagent?.id ?? session.sessionId;
+}
+
 export function isEmptySession(session: SessionMeta) {
   const thread = session.codex;
   return thread && (!thread.canResume || ["exec", "mcp", "appServer"].includes(thread.source ?? "")) && thread.empty !== undefined
-    ? thread.empty : session.realUserCount === 0;
+    ? thread.empty : session.realUserCount === 0 && (!session.subagent || session.assistantCount === 0);
 }
 
 export function compareTimestamps(a: string | null, b: string | null): number {

@@ -34,7 +34,7 @@ pub(super) fn check_and_export(
                 warnings: vec![],
             })
         }
-        fn delete_session(&self, _: &str, _: &str) -> Result<(), String> {
+        fn delete_session(&self, _: &str, _: &str, _: Option<&[std::path::PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
             panic!("read-only test")
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {

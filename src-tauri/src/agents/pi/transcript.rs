@@ -33,7 +33,7 @@ fn nonempty(value: &Value) -> Option<&str> {
     value.as_str().map(str::trim).filter(|text| !text.is_empty())
 }
 
-pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi> {
+pub(super) fn parse(path: &Path, project_dir: &str, collect_events: bool) -> ParseOutcome<ParsedPi> {
     let (header, lines, size_bytes) = match storage::open(path) {
         Ok(file) => file,
         Err(error) => return ParseOutcome::Failed(error),
@@ -44,8 +44,7 @@ pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi>
     let first_ts = events::timestamp(&header);
     let mut meta = SessionMeta {
         session_id: id.to_owned(),
-        project_dir: path.parent().and_then(Path::file_name)
-            .map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        project_dir: project_dir.to_owned(),
         cwd: nonempty(&header["cwd"]).map(str::to_owned),
         title: None,
         model: None,
@@ -54,6 +53,7 @@ pub(super) fn parse(path: &Path, collect_events: bool) -> ParseOutcome<ParsedPi>
         git_branch: None,
         entrypoint: None,
         codex: None,
+        subagent: None,
         last_ts: first_ts.clone(),
         first_ts,
         user_count: 0,

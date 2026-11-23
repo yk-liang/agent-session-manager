@@ -1,6 +1,11 @@
-use crate::agents::{self, TargetKind};
+use crate::agents::{self, search::SessionRef, Subagent, TargetKind};
 use serde_json::Value;
-use std::{fs, io::{BufRead, BufReader, Lines}, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{BufRead, BufReader, Lines},
+    path::{Component, Path, PathBuf},
+};
 
 const SUBAGENT_ARTIFACTS: &str = "subagent-artifacts";
 
@@ -13,7 +18,7 @@ pub(super) fn is_valid_session_id(id: &str) -> bool {
 }
 
 fn is_project_name(name: &str) -> bool {
-    agents::claude_family::is_safe_name(name) && name != SUBAGENT_ARTIFACTS
+    agents::claude_family::is_safe_name(name) && !name.starts_with('.') && name != SUBAGENT_ARTIFACTS
 }
 
 pub(super) fn open(path: &Path) -> Result<(Value, Lines<BufReader<fs::File>>, Option<u64>), String> {
@@ -32,7 +37,8 @@ pub(super) fn open(path: &Path) -> Result<(Value, Lines<BufReader<fs::File>>, Op
 
 fn filename_id(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
-    Some(stem.rsplit_once('_').map_or(stem, |(_, id)| id))
+    let id = stem.rsplit_once('_').map_or(stem, |(_, id)| id);
+    (stem != "session" && is_valid_session_id(id)).then_some(id)
 }
 
 pub(super) fn session_id<'a>(header: &'a Value, path: &'a Path) -> Option<&'a str> {
@@ -40,81 +46,209 @@ pub(super) fn session_id<'a>(header: &'a Value, path: &'a Path) -> Option<&'a st
         .or_else(|| filename_id(path)).filter(|id| is_valid_session_id(id))
 }
 
-fn is_transcript(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| extension == "jsonl")
+pub(super) fn projects(root: &Path, warnings: &mut Vec<String>) -> Vec<(String, PathBuf)> {
+    agents::read_dir_warned(root, warnings).into_iter()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            (is_project_name(&name) && entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .then(|| (name, entry.path()))
+        })
+        .collect()
 }
 
-pub(super) fn session_files(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in agents::read_dir_warned(root, warnings) {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir())
-            && entry.file_name().to_str().is_some_and(is_project_name)
-        {
-            files.extend(agents::read_dir_warned(&entry.path(), warnings).into_iter()
-                .map(|entry| entry.path()).filter(|path| is_transcript(path)));
-        }
+fn in_project(project: &Path, path: &Path) -> bool {
+    path.strip_prefix(project).is_ok_and(|relative| {
+        relative.components().all(|part| matches!(part, Component::Normal(_)))
+    })
+}
+
+fn recorded_parent(path: &Path, header: &Value) -> Option<PathBuf> {
+    let recorded = header["parentSession"].as_str().filter(|path| !path.is_empty()).map(Path::new)?;
+    let absolute = if recorded.is_absolute() {
+        recorded.to_path_buf()
+    } else {
+        path.parent()?.join(recorded)
+    };
+    Some(absolute.parent()?.canonicalize().ok()?.join(absolute.file_name()?))
+}
+
+fn layout_parent(project: &Path, path: &Path) -> Option<PathBuf> {
+    let folder = path.parent()?;
+    let run = folder.parent()?;
+    let is_run = path.file_name().is_some_and(|name| name == "session.jsonl")
+        && folder.file_name()?.to_str()?.strip_prefix("run-")
+            .is_some_and(|step| !step.is_empty() && step.bytes().all(|byte| byte.is_ascii_digit()));
+    let is_fork = run.file_name().is_some_and(|name| name == "forks") && filename_id(path).is_some();
+    if !is_run && !is_fork {
+        return None;
     }
-    files
+    let owner = run.parent()?;
+    if !in_project(project, owner) || owner == project {
+        return None;
+    }
+    let mut filename = owner.file_name()?.to_os_string();
+    filename.push(".jsonl");
+    Some(owner.with_file_name(filename))
 }
 
+#[derive(Debug)]
 pub(super) struct Location {
     pub(super) path: PathBuf,
-    project: PathBuf,
+    pub(super) id: String,
+    layout_parent: Option<PathBuf>,
+    parent_confirmed: bool,
+    parent_id_hint: Option<String>,
     embedded_id: bool,
-    unreadable_candidate: Option<String>,
 }
 
-pub(super) fn locate(root: &Path, project_dir: &str, id: &str) -> Result<Location, String> {
-    if !is_project_name(project_dir) {
-        return Err("项目目录名无效".into());
-    }
-    if !is_valid_session_id(id) {
-        return Err("会话 ID 无效".into());
-    }
-    let project = agents::verify_within_root(root, &root.join(project_dir), TargetKind::Dir)?;
-    let entries = fs::read_dir(&project).map_err(|error| format!("无法读取 Pi 项目 {project_dir}：{error}"))?;
-    let mut found = None;
-    let mut unreadable_candidate = None;
-    for entry in entries {
-        let path = entry.map_err(|error| format!("无法读取 Pi 项目目录项：{error}"))?.path();
-        if !is_transcript(&path) {
-            continue;
-        }
-        match open(&path) {
-            Ok((header, _, _)) if session_id(&header, &path) == Some(id) => {
-                if found.is_some() {
-                    return Err(format!("项目 {project_dir} 中找到多个 ID 为 {id} 的 Pi 会话"));
+pub(super) struct ProjectSessions {
+    project: PathBuf,
+    pub(super) files: BTreeMap<PathBuf, Location>,
+    ids: BTreeMap<String, Vec<PathBuf>>,
+    unreadable: BTreeMap<PathBuf, String>,
+    directory_warnings: Vec<String>,
+}
+
+impl ProjectSessions {
+    pub(super) fn scan(project: PathBuf, cancelled: &dyn Fn() -> bool) -> Result<Self, String> {
+        let project = project.canonicalize().unwrap_or(project);
+        let mut files = BTreeMap::new();
+        let mut ids = BTreeMap::<String, Vec<PathBuf>>::new();
+        let mut unreadable = BTreeMap::new();
+        let mut directory_warnings = Vec::new();
+        let mut pending = vec![project.clone()];
+        while let Some(dir) = pending.pop() {
+            for entry in agents::read_dir_warned(&dir, &mut directory_warnings) {
+                agents::check_catalog_cancelled(cancelled)?;
+                let path = entry.path();
+                let child = dir != project;
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    if entry.file_name().to_str().is_some_and(is_project_name) {
+                        pending.push(path);
+                    }
+                    continue;
                 }
-                found = Some((path, header["id"].as_str() == Some(id)));
+                if path.extension().is_none_or(|ext| ext != "jsonl") {
+                    continue;
+                }
+                let layout_parent = layout_parent(&project, &path);
+                if child && layout_parent.is_none() {
+                    continue;
+                }
+                match open(&path) {
+                    Ok((header, _, _)) => {
+                        let Some(id) = session_id(&header, &path) else {
+                            unreadable.insert(path.clone(), format!("无法解析 Pi 会话 ID：{path:?}"));
+                            continue;
+                        };
+                        let pathname = header["parentSession"].as_str().map(Path::new);
+                        let location = Location {
+                            id: id.to_owned(),
+                            parent_confirmed: layout_parent.as_ref().is_some_and(|parent| recorded_parent(&path, &header).as_ref() == Some(parent)),
+                            parent_id_hint: pathname.and_then(filename_id)
+                                .or_else(|| layout_parent.as_deref().and_then(filename_id)).map(str::to_owned),
+                            layout_parent,
+                            embedded_id: header["id"].as_str() == Some(id),
+                            path: path.clone(),
+                        };
+                        ids.entry(id.to_owned()).or_default().push(path.clone());
+                        files.insert(path, location);
+                    }
+                    Err(error) => {
+                        unreadable.insert(path, error);
+                    }
+                }
             }
-            Err(error) if filename_id(&path) == Some(id) => unreadable_candidate = Some(error),
-            _ => {}
         }
+        Ok(Self { project, files, ids, unreadable, directory_warnings })
     }
-    let Some((path, embedded_id)) = found else {
-        return Err(unreadable_candidate.unwrap_or_else(|| "未找到该 Pi 会话".into()));
-    };
-    Ok(Location { path, project, embedded_id, unreadable_candidate })
-}
 
-pub(super) fn deletion_target(root: &Path, project_dir: &str, id: &str) -> Result<PathBuf, String> {
-    let location = locate(root, project_dir, id)?;
-    if let Some(error) = location.unreadable_candidate {
-        return Err(error);
+    pub(super) fn open(root: &Path, project_dir: &str, id: &str) -> Result<Self, String> {
+        if !is_project_name(project_dir) {
+            return Err("项目目录名无效".into());
+        }
+        if !is_valid_session_id(id) {
+            return Err("会话 ID 无效".into());
+        }
+        let project = agents::verify_within_root(root, &root.join(project_dir), TargetKind::Dir)?;
+        Self::scan(project, &|| false)
     }
-    if !location.embedded_id {
-        return Err("Pi 会话头部缺少内嵌 id，无法确认删除目标".into());
+
+    pub(super) fn warnings(&self) -> impl Iterator<Item = &String> {
+        self.directory_warnings.iter().chain(self.unreadable.values())
     }
-    let target = agents::verify_within_root(&location.project, &location.path, TargetKind::File)?;
-    let (header, lines, _) = open(&target)?;
-    if header["id"].as_str() != Some(id) {
-        return Err("Pi 会话身份已变化，请刷新后重试".into());
-    }
-    for line in lines {
-        let line = line.map_err(|error| format!("读取 Pi 会话 {target:?} 失败：{error}"))?;
-        if !line.trim().is_empty() && serde_json::from_str::<Value>(&line).is_err() {
-            return Err(format!("{target:?} 含无法解析的行，无法完成身份复核"));
+
+    pub(super) fn locate(&self, id: &str) -> Result<&Location, String> {
+        match self.ids.get(id).map(Vec::as_slice) {
+            Some([path]) => Ok(&self.files[path]),
+            Some(_) => Err(format!("项目中找到多个 ID 为 {id} 的 Pi 会话")),
+            None => Err(self.unreadable.iter().find(|(path, _)| filename_id(path) == Some(id))
+                .map(|(_, error)| error.clone()).unwrap_or_else(|| "未找到该 Pi 会话".into())),
         }
     }
-    Ok(target)
+
+    pub(super) fn subagent(&self, location: &Location, project_dir: &str) -> Option<Subagent> {
+        let parent_path = location.layout_parent.as_ref()?;
+        let parent = self.files.get(parent_path)
+            .filter(|parent| location.parent_confirmed && self.locate(&parent.id).is_ok());
+        Some(Subagent {
+            parent_id: parent.map(|file| file.id.clone()).or_else(|| location.parent_id_hint.clone()),
+            parent: parent.map(|file| SessionRef {
+                session_id: file.id.clone(),
+                project_dir: project_dir.to_owned(),
+            }),
+            orphan: parent.is_none(),
+            ..Subagent::default()
+        })
+    }
+
+    pub(super) fn deletion_targets(&self, id: &str) -> Result<Vec<(String, PathBuf)>, String> {
+        let root = self.locate(id)?;
+        if let Some(error) = self.directory_warnings.first() {
+            return Err(error.clone());
+        }
+        let mut children = BTreeMap::<_, Vec<_>>::new();
+        for file in self.files.values() {
+            if let Some(parent) = &file.layout_parent {
+                children.entry(parent).or_default().push(file);
+            }
+        }
+        let mut targets = Vec::new();
+        let mut pending = vec![root];
+        while let Some(location) = pending.pop() {
+            if !location.embedded_id {
+                return Err("Pi 会话头部缺少内嵌 id，无法确认删除目标".into());
+            }
+            self.locate(&location.id)?;
+            let child_dir = location.path.with_extension("");
+            if let Some((_, error)) = self.unreadable.iter().find(|(path, _)| {
+                path.starts_with(&child_dir) || filename_id(path) == Some(&location.id)
+            }) {
+                return Err(error.clone());
+            }
+            let target = agents::verify_within_root(&self.project, &location.path, TargetKind::File)?;
+            let (header, lines, _) = open(&target)?;
+            if header["id"].as_str() != Some(&location.id)
+                || location.layout_parent.as_ref().is_some_and(|parent| {
+                    (recorded_parent(&location.path, &header).as_ref() == Some(parent)) != location.parent_confirmed
+                })
+            {
+                return Err("Pi 会话身份或父子关系已变化，请刷新后重试".into());
+            }
+            for line in lines {
+                let line = line.map_err(|error| format!("读取 Pi 会话 {target:?} 失败：{error}"))?;
+                if !line.trim().is_empty() && serde_json::from_str::<Value>(&line).is_err() {
+                    return Err(format!("{target:?} 含无法解析的行，无法完成身份复核"));
+                }
+            }
+            targets.push((location.id.clone(), target));
+            for child in children.get(&location.path).into_iter().flatten().rev() {
+                if !child.parent_confirmed {
+                    return Err(format!("Pi 子会话 {:?} 的父会话与存储位置不符，已中止删除", child.path));
+                }
+                pending.push(child);
+            }
+        }
+        Ok(targets)
+    }
 }

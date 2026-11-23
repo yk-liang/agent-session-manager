@@ -67,6 +67,8 @@ pub struct SessionMeta {
     pub entrypoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex: Option<codex::ThreadMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<Subagent>,
     pub first_ts: Option<String>,
     pub last_ts: Option<String>,
     pub user_count: u32,
@@ -93,7 +95,38 @@ impl SessionMeta {
         self.codex.as_ref()
             .filter(|thread| !thread.can_resume || matches!(thread.source.as_deref(), Some("exec" | "mcp" | "appServer")))
             .and_then(|thread| thread.empty)
-            .unwrap_or(self.real_user_count == 0)
+            .unwrap_or(self.real_user_count == 0 && (self.subagent.is_none() || self.assistant_count == 0))
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<search::SessionRef>,
+    pub orphan: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_owner: Option<SessionProjectOwner>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectOwner {
+    pub session_id: String,
+    pub project_dir: String,
+    pub cwd: Option<String>,
+}
+
+impl SessionProjectOwner {
+    fn session_ref(&self) -> search::SessionRef {
+        search::SessionRef {
+            project_dir: self.project_dir.clone(),
+            session_id: self.session_id.clone(),
+        }
     }
 }
 
@@ -116,10 +149,36 @@ pub struct SessionDetail {
     pub warnings: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SessionDeletion {
     pub removed: Vec<search::SessionRef>,
     pub error: Option<String>,
+}
+
+pub(super) fn check_preserved_targets(paths: &[PathBuf], preserved: Option<&[PathBuf]>) -> Result<(), String> {
+    if preserved.is_some_and(|expected| paths != expected) {
+        return Err("会话文件已变化，请重新确认后删除".into());
+    }
+    Ok(())
+}
+
+pub(super) fn trash_session_files(
+    project_dir: &str,
+    targets: &[PathBuf],
+    sources: Vec<(String, PathBuf)>,
+) -> SessionDeletion {
+    let result = trash::delete_all(targets.iter().rev());
+    let mut absent = std::collections::BTreeMap::new();
+    for (id, path) in sources {
+        let missing = path.symlink_metadata().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        *absent.entry(id).or_insert(true) &= missing;
+    }
+    SessionDeletion {
+        removed: absent.into_iter().filter(|(_, missing)| *missing)
+            .map(|(session_id, _)| search::SessionRef { session_id, project_dir: project_dir.to_owned() })
+            .collect(),
+        error: result.err().map(|error| format!("移入废纸篓失败：{error}")),
+    }
 }
 
 #[derive(Serialize)]
@@ -331,7 +390,7 @@ pub trait AgentSource: Send + Sync {
         self.read_session(&meta.project_dir, &meta.session_id)
             .map(|detail| detail.events)
     }
-    fn delete_session(&self, _project_dir: &str, _session_id: &str) -> Result<(), String> {
+    fn delete_session(&self, _project_dir: &str, _session_id: &str, _preserved: Option<&[PathBuf]>) -> Result<SessionDeletion, String> {
         Err("该 Agent 的会话为只读".into())
     }
     fn set_session_archived(&self, _: &str, _: &str, _: bool) -> Result<(), String> {
@@ -561,7 +620,7 @@ mod tests {
         fn read_session(&self, _: &str, _: &str) -> Result<SessionDetail, String> {
             unreachable!()
         }
-        fn delete_session(&self, _: &str, _: &str) -> Result<(), String> {
+        fn delete_session(&self, _: &str, _: &str, _: Option<&[std::path::PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
             unreachable!()
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {

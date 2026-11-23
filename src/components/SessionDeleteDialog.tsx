@@ -1,5 +1,5 @@
 import type { AgentInfo, SessionMeta } from "../types";
-import { sessionKey, shortPath } from "../utils";
+import { displaySessionId, sessionKey, shortPath } from "../utils";
 import ConfirmDialog from "./ConfirmDialog";
 
 export type SessionDeleteTarget =
@@ -14,7 +14,7 @@ interface Props {
   onCancel: () => void;
 }
 
-const deletesChildSessions = new Set(["claude", "codex", "opencode", "qoder"]);
+const deletesChildSessions = new Set(["claude", "codex", "opencode", "pi", "qoder"]);
 
 export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: Props) {
   const { agent, sessions } = deletion;
@@ -32,7 +32,7 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
           {batch ? (cascades
             ? <p>已选 <strong className="deletion-count">{sessions.length} 项</strong>，每项包含所列会话及其所有后代。</p>
             : <p>将删除 {agent.displayName} 的 <strong className="deletion-count">{sessions.length} 个会话</strong>。</p>)
-            : <p>「{session.title || session.sessionId.slice(0, 8) + "…"}」</p>}
+            : <p>「{session.title || displaySessionId(session)}」</p>}
           <p>{toTrash ? "可从废纸篓还原。" : "删除后无法恢复。"}</p>
           {deletesChildSessions.has(agent.id) && !(batch && cascades) && <p>子会话也会一并删除。</p>}
           {batch && (
@@ -40,8 +40,8 @@ export default function SessionDeleteDialog({ deletion, onConfirm, onCancel }: P
               <ul className="batch-targets">
                 {sessions.map((target) => (
                   <li key={sessionKey(target)}>
-                    <span>{target.title || target.sessionId}</span>
-                    <small className="session-location"><span>{shortPath(target.cwd) || target.projectDir}</span><code>{target.sessionId}</code></small>
+                    <span>{target.title || displaySessionId(target)}</span>
+                    <small className="session-location"><span>{shortPath(target.cwd) || target.projectDir}</span><code>{displaySessionId(target)}</code></small>
                   </li>
                 ))}
               </ul>

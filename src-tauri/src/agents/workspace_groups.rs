@@ -113,7 +113,7 @@ fn apply_with_environment(catalog: &mut Catalog, home: &Path, temporary_root: &P
     let mut roots = HashMap::new();
     let identities = catalog.sessions.iter().flat_map(|session| {
         let own = (&session.project_dir, &session.session_id, session.cwd.as_deref());
-        let owner = session.codex.as_ref().and_then(|thread| thread.project_owner.as_ref())
+        let owner = session.subagent.as_ref().and_then(|relation| relation.project_owner.as_ref())
             .map(|owner| (&owner.project_dir, &owner.session_id, owner.cwd.as_deref()));
         std::iter::once(own).chain(owner)
     });

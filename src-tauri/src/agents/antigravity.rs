@@ -116,12 +116,9 @@ fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bo
     for root in roots {
         super::check_catalog_cancelled(cancelled)?;
         let index = load_index(root, &mut warnings);
+        let mut root_sessions = Vec::new();
         for path in candidate_files(std::slice::from_ref(root), &mut warnings) {
             super::check_catalog_cancelled(cancelled)?;
-            let summary = path.file_stem().and_then(|name| name.to_str()).and_then(|id| index.get(id));
-            if summary.is_some_and(|entry| entry.child) {
-                continue;
-            }
             let sources = [path.clone(), super::scanning::sqlite_wal_path(&path)];
             match super::catalog_cache::summary(SUMMARY_CACHE_KIND, &sources, || {
                 let detail = transcript::read(&path, false)?;
@@ -129,15 +126,27 @@ fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bo
             }) {
                 Ok((mut meta, ws)) => {
                     warnings.extend(ws);
-                    if include_empty || meta.real_user_count > 0 {
-                        summaries::apply(&mut meta, &path, summary);
-                        let key = (meta.project_dir.clone(), meta.session_id.clone());
-                        if sessions.get(&key).is_none_or(|old| prefer(&meta, old)) {
-                            sessions.insert(key, meta);
-                        }
-                    }
+                    summaries::apply(&mut meta, &path, &index);
+                    root_sessions.push(meta);
                 }
                 Err(error) => warnings.push(error),
+            }
+        }
+        let projects: std::collections::HashMap<_, _> = root_sessions.iter().map(|session| {
+            let owner = super::SessionProjectOwner {
+                session_id: session.session_id.clone(), project_dir: session.project_dir.clone(), cwd: session.cwd.clone(),
+            };
+            (session.session_id.clone(), owner)
+        }).collect();
+        for mut meta in root_sessions {
+            if let Some(relation) = &mut meta.subagent {
+                attach_parent(&meta.session_id, relation, &projects, &index);
+            }
+            if include_empty || !meta.is_empty() {
+                let key = (meta.project_dir.clone(), meta.session_id.clone());
+                if sessions.get(&key).is_none_or(|old| prefer(&meta, old)) {
+                    sessions.insert(key, meta);
+                }
             }
         }
     }
@@ -152,6 +161,36 @@ fn catalog_in(roots: &[PathBuf], include_empty: bool, cancelled: &dyn Fn() -> bo
     );
     catalog.warnings = warnings;
     Ok(catalog)
+}
+
+fn attach_parent(
+    session_id: &str,
+    relation: &mut super::Subagent,
+    projects: &std::collections::HashMap<String, super::SessionProjectOwner>,
+    index: &std::collections::HashMap<String, summaries::Summary>,
+) {
+    let parent = relation.parent_id.as_ref().and_then(|parent| projects.get(parent));
+    let Some(parent) = parent else {
+        relation.orphan = true;
+        return;
+    };
+    relation.parent = Some(parent.session_ref());
+    let mut owner = parent;
+    let mut seen = std::collections::HashSet::from([session_id]);
+    loop {
+        if !seen.insert(owner.session_id.as_str()) {
+            relation.orphan = true;
+            break;
+        }
+        let ancestor = index.get(&owner.session_id)
+            .and_then(|entry| entry.parent_id.as_ref())
+            .and_then(|parent_id| projects.get(parent_id));
+        let Some(ancestor) = ancestor else {
+            relation.project_owner = Some(owner.clone());
+            break;
+        };
+        owner = ancestor;
+    }
 }
 
 fn load_index(root: &Path, warnings: &mut Vec<String>) -> std::collections::HashMap<String, summaries::Summary> {
@@ -229,13 +268,9 @@ impl AgentSource for AntigravitySource {
                 continue;
             }
             let index = path.parent().map(|root| load_index(root, &mut warnings)).unwrap_or_default();
-            let summary = index.get(session_id);
-            if summary.is_some_and(|entry| entry.child) {
-                continue;
-            }
             match transcript::read(&path, true) {
                 Ok(mut next) => {
-                    summaries::apply(&mut next.meta, &path, summary);
+                    summaries::apply(&mut next.meta, &path, &index);
                     if next.meta.project_dir == project_dir
                         && detail.as_ref().is_none_or(|old| prefer(&next.meta, &old.meta))
                     {
@@ -256,11 +291,9 @@ impl AgentSource for AntigravitySource {
         let path = meta.source_files.first().ok_or("缺少会话文件定位信息")?;
         let root = path.parent().ok_or("缺少会话目录")?;
         let index = summaries::read(&summaries::path(root)).unwrap_or_default();
-        let summary = index.get(&meta.session_id);
         let mut detail = transcript::read(path, true)?;
-        summaries::apply(&mut detail.meta, path, summary);
-        if summary.is_some_and(|entry| entry.child)
-            || detail.meta.session_id != meta.session_id || detail.meta.project_dir != meta.project_dir
+        summaries::apply(&mut detail.meta, path, &index);
+        if detail.meta.session_id != meta.session_id || detail.meta.project_dir != meta.project_dir
         {
             return Err("会话来源已变化，请刷新后重试".into());
         }
@@ -278,7 +311,8 @@ impl AgentSource for AntigravitySource {
         }
         conversation_dirs()
             .iter()
-            .any(|root| is_cli(root) && root.join(format!("{session_id}.db")).is_file())
+            .any(|root| is_cli(root) && root.join(format!("{session_id}.db")).is_file()
+                && summaries::read(&summaries::path(root)).is_ok_and(|index| !summaries::is_subagent(&index, session_id)))
             .then(|| {
                 format!(
                     "{} --conversation {}",

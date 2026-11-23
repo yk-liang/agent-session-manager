@@ -671,6 +671,7 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         git_branch: p.git_branch.clone(),
         entrypoint: None,
         codex: Some(p.thread.meta.clone()),
+        subagent: None,
         first_ts: p.first_ts.clone(),
         last_ts: p.last_ts.clone(),
         user_count: p.user_count,
@@ -709,7 +710,7 @@ fn read_session_mode(
     let pages = groups.get(session_id).ok_or("未找到该 Codex 会话")?;
     let (mut detail, ws) = history::read(pages, mode)?;
     thread::Relations::new(&groups, thread::spawn_edges_warned(root, &mut warnings))
-        .apply(session_id, detail.meta.codex.as_mut().unwrap());
+        .apply(session_id, &mut detail.meta);
     detail.meta.archived = storage::is_archived(root, &pages.last().unwrap().path);
     detail.warnings = ws;
     let names = root
@@ -881,10 +882,9 @@ impl AgentSource for CodexSource {
         let groups = history::group_pages(history::read_headers(&paths, &mut warnings, &|| false).ok()?);
         let pages = groups.get(session_id)?;
         let latest = pages.last()?;
-        let mut thread = thread::metadata(&latest.header, pages);
-        thread::Relations::new(&groups, thread::spawn_edges(root.parent()?).ok()?)
-            .apply(session_id, &mut thread);
-        if !thread.can_resume || storage::is_archived(&root, &latest.path) {
+        let relations = thread::Relations::new(&groups, thread::spawn_edges(root.parent()?).ok()?);
+        if !latest.header.thread.meta.can_resume || relations.is_subagent(session_id)
+            || storage::is_archived(&root, &latest.path) {
             return None;
         }
         Some(format!(
@@ -971,10 +971,10 @@ mod tests {
             (json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}), Some("subagent"), true, false),
             (json!({"thread_source":"subagent"}), None, true, false),
         ] {
-            let meta = ThreadHeader::read(&payload).meta;
-            assert_eq!(meta.source.as_deref(), source);
-            assert_eq!(meta.subagent, subagent);
-            assert_eq!(meta.can_resume, can_resume);
+            let header = ThreadHeader::read(&payload);
+            assert_eq!(header.meta.source.as_deref(), source);
+            assert_eq!(header.subagent, subagent);
+            assert_eq!(header.meta.can_resume, can_resume);
         }
     }
 
@@ -1220,16 +1220,16 @@ mod tests {
 
         let detail = read_session_in(&root, &id_main).unwrap();
         assert_eq!(detail.events.len(), 2);
-        let sub = read_session_in(&root, &id_sub).unwrap().meta.codex.unwrap();
-        assert!(sub.subagent && !sub.can_resume);
-        assert_eq!(sub.parent_id.as_deref(), Some(id_main.as_str()));
+        let sub = read_session_in(&root, &id_sub).unwrap().meta;
+        assert!(!sub.codex.unwrap().can_resume);
+        assert_eq!(sub.subagent.unwrap().parent_id.as_deref(), Some(id_main.as_str()));
 
         let archived = storage::archived_root(&root);
         fs::create_dir(&archived).unwrap();
         fs::rename(&main_file, archived.join(main_file.file_name().unwrap())).unwrap();
         let active = catalog_in(&root, false).unwrap();
         assert_eq!(active.sessions.len(), 2);
-        assert_eq!(active.sessions.iter().find(|s| s.session_id == id_sub).unwrap().codex.as_ref().unwrap().orphan, Some(false));
+        assert!(!active.sessions.iter().find(|s| s.session_id == id_sub).unwrap().subagent.as_ref().unwrap().orphan);
 
         let filter = CatalogFilter { include_archived: true, ..Default::default() };
         let scan = catalog::Scan::new(&root, filter, &|| false).unwrap();

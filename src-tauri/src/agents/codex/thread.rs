@@ -1,7 +1,8 @@
 use super::{history::Page, sqlite_home, ParsedRollout};
+use crate::agents::{SessionMeta, SessionProjectOwner, Subagent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -11,29 +12,16 @@ pub struct ThreadMeta {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-    pub subagent: bool,
     pub can_resume: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub empty: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub orphan: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_owner: Option<ProjectOwner>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectOwner {
-    pub session_id: String,
-    pub project_dir: String,
-    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ThreadHeader {
     pub meta: ThreadMeta,
+    pub parent_id: Option<String>,
+    pub subagent: bool,
     pub conflicting_parent: Option<String>,
     pub nickname: Option<String>,
 }
@@ -77,11 +65,11 @@ impl ThreadHeader {
             meta: ThreadMeta {
                 source: origin.map(str::to_owned),
                 thread_source: thread_source.map(str::to_owned),
-                parent_id: parent_id.map(str::to_owned),
-                subagent,
                 can_resume,
                 ..Default::default()
             },
+            parent_id: parent_id.map(str::to_owned),
+            subagent,
             conflicting_parent: spawn_parent
                 .filter(|parent| Some(*parent) != parent_id)
                 .map(str::to_owned),
@@ -109,10 +97,9 @@ impl Link {
         let mut link = Self::default();
         for page in pages {
             let header = &page.header.thread;
-            link.subagent |= header.meta.subagent;
+            link.subagent |= header.subagent;
             link.parents.extend(
                 header
-                    .meta
                     .parent_id
                     .iter()
                     .chain(&header.conflicting_parent)
@@ -130,16 +117,8 @@ impl Link {
 pub(super) fn metadata(latest: &ParsedRollout, pages: &[Page]) -> ThreadMeta {
     let mut meta = latest.thread.meta.clone();
     let link = Link::from_pages(pages);
-    link.apply(&mut meta);
+    meta.can_resume &= !link.subagent;
     meta
-}
-
-impl Link {
-    fn apply(&self, meta: &mut ThreadMeta) {
-        meta.subagent = self.subagent;
-        meta.parent_id = self.parent().map(str::to_owned);
-        meta.can_resume &= !meta.subagent;
-    }
 }
 
 pub(super) type SpawnEdges = Vec<(String, String)>;
@@ -193,9 +172,9 @@ pub(super) fn spawn_edges_warned(root: &Path, warnings: &mut Vec<String>) -> Spa
 
 pub(super) struct Relations {
     links: BTreeMap<String, Link>,
-    local_ids: HashSet<String>,
+    projects: BTreeMap<String, SessionProjectOwner>,
     cycles: HashSet<String>,
-    owners: BTreeMap<String, ProjectOwner>,
+    owners: BTreeMap<String, SessionProjectOwner>,
 }
 
 impl Relations {
@@ -233,8 +212,13 @@ impl Relations {
             }
             visited.extend(chain);
         }
-        let mut owners = BTreeMap::<String, ProjectOwner>::new();
-        let mut roots = HashMap::<&str, ProjectOwner>::new();
+        let projects: BTreeMap<_, _> = groups.iter().map(|(id, pages)| {
+            let cwd = pages.last().and_then(|page| page.header.cwd.clone());
+            let project_dir = cwd.as_deref().map(super::escape_cwd).unwrap_or_else(|| "-unknown".into());
+            let project = SessionProjectOwner { session_id: id.clone(), project_dir, cwd };
+            (id.clone(), project)
+        }).collect();
+        let mut owners = BTreeMap::<String, SessionProjectOwner>::new();
         for id in groups.keys() {
             let mut current = id.as_str();
             let mut path = Vec::new();
@@ -246,23 +230,7 @@ impl Relations {
                     .parent()
                     .filter(|parent| !cycles.contains(current) && groups.contains_key(*parent));
                 let Some(parent) = parent else {
-                    break roots
-                        .entry(current)
-                        .or_insert_with(|| {
-                            let cwd = groups[current]
-                                .last()
-                                .and_then(|page| page.header.cwd.clone());
-                            let project_dir = cwd
-                                .as_deref()
-                                .map(super::escape_cwd)
-                                .unwrap_or_else(|| "-unknown".into());
-                            ProjectOwner {
-                                session_id: current.into(),
-                                project_dir,
-                                cwd,
-                            }
-                        })
-                        .clone();
+                    break projects[current].clone();
                 };
                 path.push(current);
                 current = parent;
@@ -273,24 +241,29 @@ impl Relations {
         }
         Self {
             links,
-            local_ids: groups.keys().cloned().collect(),
+            projects,
             cycles,
             owners,
         }
     }
 
-    pub fn apply(&self, id: &str, meta: &mut ThreadMeta) {
+    pub fn is_subagent(&self, id: &str) -> bool {
+        self.links[id].subagent
+    }
+
+    pub fn apply(&self, id: &str, meta: &mut SessionMeta) {
         let link = &self.links[id];
-        link.apply(meta);
         if link.subagent {
-            meta.orphan = Some(
-                self.cycles.contains(id)
-                    || link
-                        .parent()
-                        .is_none_or(|parent| !self.local_ids.contains(parent)),
-            );
+            let parent = link.parent().and_then(|parent| self.projects.get(parent));
+            meta.codex.as_mut().unwrap().can_resume = false;
+            meta.subagent = Some(Subagent {
+                parent_id: link.parent().map(str::to_owned),
+                parent: parent.map(SessionProjectOwner::session_ref),
+                orphan: self.cycles.contains(id) || parent.is_none(),
+                project_owner: self.owners.get(id).cloned(),
+                ..Subagent::default()
+            });
         }
-        meta.project_owner = self.owners.get(id).cloned();
     }
 
     pub fn subtree<'a>(&'a self, root: &'a str) -> Result<Vec<&'a str>, String> {

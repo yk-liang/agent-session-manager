@@ -13,7 +13,7 @@ import { DEFAULT_VISIBILITY, rowEndsWithMessage, sessionContent, visibleSessionR
 import { useUiPreference } from "../useUiPreference";
 import { eventMatches, eventTextParts } from "../conversationText";
 import type { AgentInfo, ConversationSearchTarget, SessionDetail as Detail, SessionMeta } from "../types";
-import { formatLocalDateTime, sessionKey } from "../utils";
+import { displaySessionId, formatLocalDateTime, sessionKey } from "../utils";
 import { historicalModels, eventModelTitle } from "../models";
 import ReadDiagnostics from "./ReadDiagnostics";
 import UiIcon from "./UiIcon";
@@ -24,7 +24,7 @@ interface Props {
   agent: AgentInfo;
   onRequestDelete: (session: SessionMeta) => void;
   onToggleArchive: (session: SessionMeta) => void;
-  onOpenParent?: (id: string) => void;
+  onOpenParent?: () => void;
   onReveal?: () => void;
   actionsDisabled: boolean;
   toast: (msg: string, isError?: boolean) => void;
@@ -32,10 +32,21 @@ interface Props {
   onRetryRead?: () => void;
 }
 
+function SessionId({ id, parent = false, onError }: { id: string; parent?: boolean; onError: (error: unknown) => void }) {
+  const label = parent ? "父会话 ID" : "会话 ID";
+  return (
+    <CopyButton className="session-id btn-ghost btn-sm" value={id} label={`复制${label}：${id}`}
+      title={`复制${label}`} iconClassName="copy-id-icon" onError={onError}>
+      <span>{parent ? "父会话 ID:" : "ID:"}</span>
+      <code>{id}</code>
+    </CopyButton>
+  );
+}
+
 export default function SessionDetailView({ detail, reading, agent, onRequestDelete, onToggleArchive, onOpenParent, onReveal, actionsDisabled, toast, searchTarget = null, onRetryRead }: Props) {
   const { meta } = detail;
   const key = sessionKey(meta);
-  const parentId = meta.codex?.parentId;
+  const parentId = meta.subagent?.parentId;
   const reportCopyError = useCallback((error: unknown) => toast(`复制失败：${String(error)}`, true), [toast]);
   const [{ tool: showTools, thinking: showThinking, context: showContext, markdown: renderMarkdown }, setConversation] = useUiPreference("conversation");
 
@@ -109,20 +120,10 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
         <div className="detail-title">{meta.title || "无标题"}</div>
         <div className="detail-meta">
           {meta.archived && <span className="status-tag">已归档</span>}
-          {meta.codex?.orphan && <span className="status-tag" data-tone="warning">孤儿子会话</span>}
-          <CopyButton key={`copy:${key}`} className="session-id btn-ghost btn-sm" value={meta.sessionId} label={`复制会话 ID：${meta.sessionId}`} title="复制会话 ID" iconClassName="copy-id-icon" onError={error => toast(`复制会话 ID 失败：${String(error)}`, true)}>
-            <span>ID:</span>
-            <code>{meta.sessionId}</code>
-          </CopyButton>
-          {meta.codex?.subagent && (parentId ? (
-            <span className="parent-session">
-              <span>父会话 ID</span>
-              {onOpenParent
-                ? <button type="button" className="session-id btn-ghost btn-sm" onClick={() => onOpenParent(parentId)} disabled={actionsDisabled}
-                    aria-label={`打开父会话 ${parentId}`}><code>{parentId}</code></button>
-                : <code>{parentId}</code>}
-              <CopyButton className="btn-icon btn-ghost" value={parentId} label="复制父会话 ID" onError={reportCopyError} />
-            </span>
+          {meta.subagent?.orphan && <span className="status-tag" data-tone="warning">孤儿子会话</span>}
+          <SessionId key={key} id={displaySessionId(meta)} onError={reportCopyError} />
+          {meta.subagent && (parentId ? (
+            <SessionId key={`parent:${key}`} id={parentId} parent onError={reportCopyError} />
           ) : <span>父会话 ID 未知</span>)}
           {meta.lastTs && <time className="session-time" dateTime={meta.lastTs} title={`${formatLocalDateTime(meta.firstTs)} ~ ${formatLocalDateTime(meta.lastTs)}`}>
             {formatLocalDateTime(meta.lastTs)}
@@ -136,6 +137,8 @@ export default function SessionDetailView({ detail, reading, agent, onRequestDel
           <div className="detail-actions">
             <SessionActions agent={agent} session={meta} onRequestDelete={onRequestDelete}
               onToggleArchive={onToggleArchive} toast={toast} disabled={actionsDisabled} />
+            {onOpenParent && <button type="button" onClick={onOpenParent} disabled={actionsDisabled}
+              aria-label={`打开父会话 ${parentId}`}>打开父会话</button>}
             {onReveal && <button type="button" onClick={onReveal} disabled={actionsDisabled}>在列表定位</button>}
           </div>
           {meta.hasTranscript && (

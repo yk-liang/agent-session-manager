@@ -17,7 +17,7 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
 import ReadDiagnostics from "./components/ReadDiagnostics";
 import * as api from "./api";
-import { isEmptySession, sessionKey } from "./utils";
+import { displaySessionId, isEmptySession, sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
@@ -217,7 +217,7 @@ export default function App() {
     const q = query.toLowerCase();
     if (!q) return scopedSessions;
     return scopedSessions.filter((s) => {
-      return contentSearch.hits.has(sessionKey(s)) || [s.title, s.sessionId, s.cwd, s.model, s.codex?.source, s.codex?.threadSource]
+      return contentSearch.hits.has(sessionKey(s)) || [s.title, displaySessionId(s), s.cwd, s.model, s.codex?.source, s.codex?.threadSource]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
@@ -246,8 +246,7 @@ export default function App() {
   const hidingSessionKey = !query && selectedSessionKey && scopeKeys.has(selectedSessionKey)
     ? tree.ancestors(selectedSessionKey, scopeKeys).reverse().find(key => !expanded.has(key))
     : undefined;
-  const selectedThread = selectedDetail?.meta.codex;
-  const parent = selectedThread?.parentId && !selectedThread.orphan ? tree.byId.get(selectedThread.parentId) : undefined;
+  const parent = selectedDetail ? tree.parent(selectedDetail.meta) : undefined;
 
   const toggleChildren = (key: string) => {
     setRevealKey(null);
@@ -262,8 +261,7 @@ export default function App() {
     setRevealKey(key => key === activeRevealKey ? null : key);
   }, [activeRevealKey, expanded]);
 
-  function openParentSession(id: string) {
-    const parent = tree.byId.get(id);
+  function openParentSession() {
     if (!parent || !selectedAgent || sessionActionsBusy || mutationRunning.current) return;
     const key = sessionKey(parent);
     if (!scopeKeys.has(key)) selectSessionScope(null);
@@ -290,7 +288,7 @@ export default function App() {
 
   const openSession = (session: SessionMeta, toggleSelection = false) => {
     if (!selectedAgent || sessionActionsBusy || mutationRunning.current || (toggleSelection && batchBusy)) return;
-    setRevealKey(query && session.codex?.subagent ? sessionKey(session) : null);
+    setRevealKey(query && session.subagent ? sessionKey(session) : null);
     if (toggleSelection) {
       const key = sessionKey(session);
       setCheckedSessionKeys(current => {
@@ -374,7 +372,7 @@ export default function App() {
       setSearch("");
       setRequestReveal({ includeEmpty: !session.statsPending && isEmptySession(session), includeArchived: !!session.archived });
       if (agent.id !== selectedAgent) setExpandedSessions(new Set());
-      if (session.codex?.subagent) setRevealKey(sessionKey(session));
+      if (session.subagent) setRevealKey(sessionKey(session));
       setPreferredAgents(current => ({ ...current, local: agent.id }));
       changeTab("sessions");
       void loadSession(agent.id, session);
@@ -463,10 +461,9 @@ export default function App() {
     const { agent, sessions: targets, mode } = operation.request;
     const batch = mode === "batch";
     const total = targets.length;
-    const guardDeletion = batch || agent.id === "codex";
-    const useNativeGuard = guardDeletion && isTauri();
+    const useNativeGuard = isTauri();
     mutationRunning.current = true;
-    batchDeleting.current = guardDeletion;
+    batchDeleting.current = true;
     setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
     const removed = new Map<string, SessionRef>();
     const failures: SessionDeleteFailure[] = [];

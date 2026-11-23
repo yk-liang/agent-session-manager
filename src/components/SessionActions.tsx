@@ -2,6 +2,7 @@ import { Archive, ArchiveRestore, Copy, Terminal, Trash2, type LucideIcon } from
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "../api";
 import type { AgentInfo, SessionMeta } from "../types";
+import { displaySessionId } from "../utils";
 import UiIcon from "./UiIcon";
 
 interface Props {
@@ -15,7 +16,7 @@ interface Props {
 }
 
 export default function SessionActions({ agent, session, onRequestDelete, onToggleArchive, toast, compact = false, disabled }: Props) {
-  const canResume = !session.archived && session.hasTranscript && (session.codex?.canResume ?? true)
+  const canResume = !session.archived && session.hasTranscript && !session.subagent && (session.codex?.canResume ?? true)
     && (!agent.resumeEntrypoint || session.entrypoint === agent.resumeEntrypoint);
   const canDelete = agent.deletePolicy !== "readOnly";
   if (!canResume && !canDelete && !agent.supportsArchive) return null;
@@ -45,7 +46,7 @@ export default function SessionActions({ agent, session, onRequestDelete, onTogg
 
   const button = (label: string, icon: LucideIcon, onClick: () => void, danger = false) => (
     <button type="button" className={compact ? (danger ? "btn-icon btn-ghost danger" : "btn-icon btn-ghost") : danger ? "danger" : undefined} disabled={disabled}
-      aria-label={compact ? `${label}（${session.title || session.sessionId}）` : undefined} onClick={onClick}>
+      aria-label={compact ? `${label}（${session.title || displaySessionId(session)}）` : undefined} onClick={onClick}>
       {compact ? <>
         <UiIcon icon={icon} />
         <span className="session-action-tooltip" aria-hidden="true">{label}</span>

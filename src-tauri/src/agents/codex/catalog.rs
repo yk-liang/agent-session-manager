@@ -69,7 +69,7 @@ impl Scan {
             match result {
                 Ok((mut meta, ws)) => {
                     warnings.extend(ws);
-                    relations.apply(id, meta.codex.as_mut().unwrap());
+                    relations.apply(id, &mut meta);
                     if !self.filter.include_empty && !meta.stats_pending && meta.is_empty() {
                         continue;
                     }

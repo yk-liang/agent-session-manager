@@ -10,16 +10,13 @@ export interface SessionListRow {
 }
 
 export function sessionTree(sessions: SessionMeta[]) {
-  const byId = new Map<string, SessionMeta>();
-  for (const session of sessions) {
-    if (session.codex) byId.set(session.sessionId, session);
-  }
-
+  const byKey = new Map(sessions.map(session => [sessionKey(session), session]));
   const parents = new Map<string, string>();
   for (const session of sessions) {
-    const thread = session.codex;
-    const parent = thread?.parentId && !thread.orphan ? byId.get(thread.parentId) : undefined;
-    if (parent) parents.set(sessionKey(session), sessionKey(parent));
+    const relation = session.subagent;
+    if (!relation?.parent || relation.orphan) continue;
+    const parent = sessionKey(relation.parent);
+    if (byKey.has(parent)) parents.set(sessionKey(session), parent);
   }
 
   const owners = new Map<string, string>();
@@ -87,6 +84,9 @@ export function sessionTree(sessions: SessionMeta[]) {
     return result;
   };
 
-  const byKey = new Map(sessions.map(session => [sessionKey(session), session]));
-  return { byId, byKey, ancestors, rows, owner: (session: SessionMeta) => byKey.get(owners.get(sessionKey(session)) ?? "") ?? session };
+  return {
+    byKey, ancestors, rows,
+    parent: (session: SessionMeta) => byKey.get(parents.get(sessionKey(session)) ?? ""),
+    owner: (session: SessionMeta) => byKey.get(owners.get(sessionKey(session)) ?? "") ?? session,
+  };
 }

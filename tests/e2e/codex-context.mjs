@@ -35,7 +35,8 @@ try {
           const original = catalog.sessions[0];
           const row = (sessionId, title, parentId, options = {}) => ({
             ...original, sessionId, title, archived: false,
-            codex: { source: parentId ? 'subagent' : 'exec', subagent: !!parentId, parentId, canResume: !parentId, empty: false, ...options },
+            codex: { source: options.source ?? (parentId ? 'subagent' : 'exec'), canResume: !parentId, empty: false },
+            subagent: parentId ? { parentId, parent: { sessionId: parentId, projectDir: original.projectDir }, orphan: options.orphan ?? false } : undefined,
           });
           catalog.sessions = [
             row('main', '父任务', undefined, { source: 'cli' }),
@@ -193,7 +194,12 @@ try {
   await card('二级子任务').locator('.session-card-open').click();
   const header = page.locator('.detail-header');
   await header.getByRole('button', { name: '打开父会话 child' }).waitFor();
-  assert.equal(await header.getByRole('button', { name: '复制会话 ID：leaf' }).count(), 1);
+  const sessionId = header.getByRole('button', { name: '复制会话 ID：leaf' });
+  const parentId = header.getByRole('button', { name: '复制父会话 ID：child' });
+  await parentId.waitFor();
+  assert.equal(await parentId.getAttribute('class'), await sessionId.getAttribute('class'));
+  assert.equal(await parentId.locator('code').textContent(), 'child');
+  assert.equal(await parentId.locator('.copy-id-icon').count(), 1);
   assert.equal(await header.getByRole('button', { name: '在终端恢复' }).count(), 0);
   assert.equal(await header.getByRole('button', { name: '归档', exact: true }).count(), 1);
   await card('父任务').getByRole('button', { name: '收起 父任务 的 1 个子会话' }).click();

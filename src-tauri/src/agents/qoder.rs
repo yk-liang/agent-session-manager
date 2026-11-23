@@ -78,7 +78,10 @@ impl AgentSource for QoderSource {
         Some(qoder_dir())
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
-        super::AgentWatchPaths::transcripts("projects", Some(2))
+        super::AgentWatchPaths {
+            extra_transcript_suffixes: vec![".meta.json"],
+            ..super::AgentWatchPaths::transcripts("projects", Some(4))
+        }
     }
     fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
         let mut locations = vec![(qoder_dir(), self.watch_paths())];
@@ -116,12 +119,10 @@ impl AgentSource for QoderSource {
         )
     }
     fn search_events(&self, meta: &super::SessionMeta) -> Result<Vec<serde_json::Value>, String> {
-        // 搜索不需要再次解析模型目录，直接复用统一的会话事件顺序。
-        claude_family::read_session(&projects_dir(), &meta.project_dir, &meta.session_id, OPTS)
-            .map(|detail| detail.events)
+        claude_family::search_events(&projects_dir(), &meta.project_dir, meta, OPTS)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
-        claude_family::delete_session(&projects_dir(), project_dir, session_id)
+    fn delete_session(&self, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
+        claude_family::delete_session(&projects_dir(), project_dir, session_id, preserved)
     }
     fn deletion_targets(
         &self,

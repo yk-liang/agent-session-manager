@@ -11,7 +11,8 @@ pub(super) struct Summary {
     title: String,
     cwd: Option<String>,
     modified: Option<i64>,
-    pub child: bool,
+    pub(super) parent_id: Option<String>,
+    child: bool,
 }
 
 pub(super) fn path(root: &Path) -> PathBuf {
@@ -28,9 +29,12 @@ pub(super) fn read(path: &Path) -> Result<HashMap<String, Summary>, String> {
         return Ok(HashMap::new());
     }
     sqlite_snapshot(path, |connection| {
-        let mut stmt = connection.prepare("SELECT conversation_id,title,workspace_uris,last_modified_time,
-            coalesce(parent_conversation_id,'') != '' OR coalesce(nesting_depth,0) > 0
-            FROM conversation_summaries")?;
+        let schema = connection.prepare("SELECT * FROM conversation_summaries LIMIT 0")?;
+        let columns = schema.column_names();
+        let parent = if columns.contains(&"parent_conversation_id") { "nullif(trim(parent_conversation_id),'')" } else { "NULL" };
+        let nested = if columns.contains(&"nesting_depth") { "coalesce(nesting_depth,0) > 0" } else { "0" };
+        let mut stmt = connection.prepare(&format!("SELECT conversation_id,title,workspace_uris,last_modified_time,
+            {parent}, {nested} FROM conversation_summaries"))?;
         let rows = stmt.query_map([], |row| {
             let workspaces: Option<String> = row.get(2)?;
             let cwd = workspaces.and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
@@ -42,14 +46,28 @@ pub(super) fn read(path: &Path) -> Result<HashMap<String, Summary>, String> {
                     .ok()
                     .map(|date| date.timestamp_millis())
             });
-            Ok((row.get(0)?, Summary { title: row.get(1)?, cwd, modified, child: row.get(4)? }))
+            let parent_id: Option<String> = row.get(4)?;
+            let child = parent_id.is_some() || row.get(5)?;
+            Ok((row.get(0)?, Summary { title: row.get(1)?, cwd, modified, parent_id, child }))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }).map_err(|error| format!("无法读取 Antigravity 会话索引 {}：{error}", path.display()))
 }
 
-pub(super) fn apply(meta: &mut SessionMeta, path: &Path, summary: Option<&Summary>) {
+pub(super) fn apply(meta: &mut SessionMeta, path: &Path, index: &HashMap<String, Summary>) {
+    let summary = index.get(&meta.session_id);
     if let Some(summary) = summary {
+        if summary.child {
+            let parent_exists = summary.parent_id.as_deref()
+                .filter(|id| *id != meta.session_id && crate::agents::claude_family::is_session_id(id))
+                .and_then(|id| path.parent().map(|dir| dir.join(format!("{id}.db"))))
+                .is_some_and(|path| path.symlink_metadata().is_ok_and(|meta| meta.is_file()));
+            meta.subagent = Some(crate::agents::Subagent {
+                parent_id: summary.parent_id.clone(),
+                orphan: !parent_exists,
+                ..Default::default()
+            });
+        }
         if !summary.title.trim().is_empty() {
             meta.title = Some(summary.title.clone());
         }
@@ -67,4 +85,8 @@ pub(super) fn apply(meta: &mut SessionMeta, path: &Path, summary: Option<&Summar
         });
         meta.last_ts = modified.and_then(ms_to_iso);
     }
+}
+
+pub(super) fn is_subagent(index: &HashMap<String, Summary>, id: &str) -> bool {
+    index.get(id).is_some_and(|summary| summary.child)
 }

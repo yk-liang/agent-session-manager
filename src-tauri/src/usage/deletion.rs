@@ -66,24 +66,24 @@ fn snapshot(
         .collect()
 }
 
-pub(super) fn preserve_at(
+pub(super) fn preserve_at<T>(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
     targets: &[PathBuf],
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    delete: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     preserve_validated_at(agent, roots, store, targets, || Ok(()), delete)
 }
 
-pub(super) fn preserve_validated_at(
+pub(super) fn preserve_validated_at<T>(
     agent: &str,
     roots: &[PathBuf],
     store: &mut Store,
     targets: &[PathBuf],
     validate: impl FnOnce() -> Result<(), String>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    delete: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     preserve_with_sync(
         agent,
         roots,
@@ -98,15 +98,18 @@ pub(super) fn preserve_validated_at(
     )
 }
 
-fn preserve_with_sync(
+fn preserve_with_sync<T>(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
     sync: impl FnOnce(&BTreeSet<PathBuf>) -> Result<(), String>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    delete: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     let before = snapshot(agent, roots, targets)?;
-    let paths = before.keys().cloned().collect();
+    let input = source::Source::for_agent(agent);
+    let paths = before.keys().filter(|path| {
+        roots.iter().any(|root| input.changed_file(root, path).as_ref() == Some(*path))
+    }).cloned().collect();
     sync(&paths).map_err(|e| format!("删除前未能保存累计用量，会话已保留：{e}"))?;
     if snapshot(agent, roots, targets)? != before {
         return Err("会话日志在保存用量期间发生变化，请重试删除".into());
@@ -334,12 +337,12 @@ mod tests {
         let outside = temp.path().join("outside.jsonl");
         record(&outside, "cccc", "outside", 100);
         assert!(
-            preserve_at("qoder", &[root.clone()], &mut store, &[outside], || panic!(
+            preserve_at::<()>("qoder", &[root.clone()], &mut store, &[outside], || panic!(
                 "Must not delete outside roots"
             ))
             .is_err()
         );
-        assert!(preserve_at("qoder", &[root], &mut store, &[], || panic!(
+        assert!(preserve_at::<()>("qoder", &[root], &mut store, &[], || panic!(
             "Must not accept empty targets"
         ))
         .is_err());

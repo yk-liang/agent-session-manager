@@ -18,11 +18,15 @@ export interface SessionRef {
 export interface CodexThread {
   source?: string;
   threadSource?: string;
-  parentId?: string;
-  subagent: boolean;
   canResume: boolean;
   empty?: boolean;
-  orphan?: boolean;
+}
+
+export interface Subagent {
+  id?: string;
+  parentId?: string;
+  parent?: SessionRef;
+  orphan: boolean;
   projectOwner?: SessionRef & { cwd: string | null };
 }
 
@@ -35,6 +39,7 @@ export interface SessionMeta extends SessionRef {
   gitBranch: string | null;
   entrypoint: string | null;
   codex?: CodexThread;
+  subagent?: Subagent;
   firstTs: string | null;
   lastTs: string | null;
   userCount: number;
