@@ -9,12 +9,13 @@ interface Props {
   title?: string;
   className: string;
   iconClassName?: string;
+  disabled?: boolean;
   children?: ReactNode;
   onCopied?: () => void;
   onError: (error: unknown) => void;
 }
 
-export default function CopyButton({ value, label, title, className, iconClassName = "", children, onCopied, onError }: Props) {
+export default function CopyButton({ value, label, title, className, iconClassName = "", disabled, children, onCopied, onError }: Props) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const generation = useRef(0);
@@ -39,7 +40,8 @@ export default function CopyButton({ value, label, title, className, iconClassNa
       onError(error);
     }
   };
-  return <button type="button" className={`copy-button ${className}`} onClick={() => void copy()} aria-label={label} title={copied ? "已复制" : title ?? label} data-copied={copied}>
+  return <button type="button" className={`copy-button ${className}`} onClick={() => void copy()} disabled={disabled}
+    aria-label={label} title={copied ? "已复制" : title ?? label} data-copied={copied}>
     {children}<UiIcon icon={copied ? Check : Copy} size={12} className={`copy-feedback-icon ${iconClassName}`} />
     <span className="sr-only" role="status">{copied ? "已复制" : ""}</span>
   </button>;

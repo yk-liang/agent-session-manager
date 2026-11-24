@@ -103,6 +103,39 @@ export function fitPath(path: string, fits: (label: string) => boolean) {
   return suffix;
 }
 
+/** 项目内的路径显示为相对路径，其余缩写用户目录。 */
+export function displayPath(path: string, cwd?: string | null) {
+  const root = cwd?.replace(/\/$/, "");
+  if (root && path === root) return ".";
+  if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1);
+  return shortPath(path);
+}
+
+export function splitPath(path: string) {
+  const slash = path.lastIndexOf("/", path.length - 2);
+  return slash < 0 ? { dir: "", name: path } : { dir: path.slice(0, slash), name: path.slice(slash + 1) };
+}
+
+/** 卡片标题里的长路径只保留末尾放得下的几级，前面以 … 代替。 */
+export function compactPath(path: string, limit = 32) {
+  if (path.length <= limit) return path;
+  const parts = path.replace(/\/$/, "").split("/");
+  for (let start = 1; start < parts.length - 1; start++) {
+    const label = ["…", ...parts.slice(start)].join("/");
+    if (label.length <= limit) return label;
+  }
+  return `…/${parts[parts.length - 1]}`;
+}
+
+/** 命令标题里的路径：项目内转为相对路径，其余长路径只保留末尾几级。 */
+export function titlePaths(text: string, cwd?: string | null) {
+  const root = cwd?.replace(/\/$/, "");
+  return text.replace(/(?<![\w.~:/-])(?:~\/|\/)[^\s'"|;&<>()]+/g, path => {
+    const relative = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : shortPath(path);
+    return compactPath(relative);
+  });
+}
+
 export function projectName(path: string | null): string {
   return path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path || "项目未记录";
 }

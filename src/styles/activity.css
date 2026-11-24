@@ -127,8 +127,8 @@
 .segmented.section-views { height: 22px; gap: 1px; border-radius: var(--radius-sm); background: var(--bg); }
 .segmented.section-views > button { padding: 0 8px; border-radius: 4px; color: var(--text-muted); font-size: 11.5px; }
 
-.segmented.section-views > button:is([aria-pressed="true"], [aria-selected="true"]),
-.segmented.section-views > button:is([aria-pressed="true"], [aria-selected="true"]):hover:not(:disabled) {
+.segmented.section-views > button[aria-selected="true"],
+.segmented.section-views > button[aria-selected="true"]:hover:not(:disabled) {
   background: color-mix(in srgb, var(--tool-section-accent) 16%, transparent);
   color: var(--tool-section-accent);
 }
@@ -151,14 +151,17 @@
   background: color-mix(in srgb, var(--bg) 88%, black);
 }
 
-.tool-command { display: flex; align-items: flex-start; gap: 8px; }
-.tool-command > span { flex: none; color: var(--tool-section-accent); user-select: none; }
-.tool-command > pre { min-width: 0; }
+.tool-commands { display: grid; gap: 6px; }
+.tool-command { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 2px 8px; }
+.tool-command > span { color: var(--tool-section-accent); user-select: none; }
+.tool-command > .tool-command-cwd { grid-column: 1 / -1; overflow: hidden; color: var(--text-muted); font: 11.5px/1.6 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; user-select: text; }
 .tool-token-string { color: #9ac6a4; }
 .tool-token-operator { color: #c0a9ee; }
 .tool-token-flag { color: #deb782; }
 .tool-token-program { color: var(--text); font-weight: 600; }
 .tool-payload-message { padding-block: 5px; }
+.tool-loading { color: var(--text-dim); font-size: 12px; }
+.tool-result-parts { display: grid; gap: 6px; }
 .tool-output-frame { position: relative; }
 
 .tool-output-frame[data-capped]::after {
@@ -239,11 +242,16 @@
 
 .op-dir, .op-detail.code-detail { font: 11.5px var(--font-mono); }
 
+/* 标签和目标一起收缩；放不下的标签整枚换到被裁掉的第二行，目标不会被挤成一两个字。 */
 .op-meta {
   display: inline-flex;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  gap: 0 6px;
   color: var(--text-dim);
   font: 11.5px var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -290,6 +298,8 @@
 .web-arguments ul { margin: 0; padding-inline-start: 1.2em; }
 .web-search-batch { display: grid; gap: 8px; }
 .web-search-batch dl + dl { border-block-start: 1px solid var(--border); padding-block-start: 8px; }
+.exec-call-details { display: grid; gap: 10px; }
+.exec-call-detail-title { margin-bottom: 4px; color: var(--text-dim); font: 11px var(--font-mono); }
 
 .browse-title { flex: none; color: var(--text); font-weight: 600; white-space: nowrap; }
 
@@ -366,12 +376,13 @@
 .search-text mark { padding: 0 1px; border-radius: 2px; background: rgb(164 183 255 / 22%); color: var(--text); }
 .path-list > div { white-space: pre; color: var(--text); }
 
+/* 步骤：图标、动作、目标、补充说明；说明先于目标截断。 */
 .op-steps { display: grid; gap: 3px; padding: 0; list-style: none; font-size: var(--text-meta); }
 .op-steps li { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-dim); }
-.op-steps code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfd3da; font: 11.5px var(--font-mono); }
+.op-step-label { flex: none; }
+.op-steps code { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfd3da; font: 11.5px var(--font-mono); }
 .op-steps code.pattern { color: var(--info); }
-.op-steps span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: 11px var(--font-mono); }
-.command-step-label { flex: none; }
+.op-step-detail { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: 11px var(--font-mono); }
 
 .tool-plain { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .skill-path { display: flex; align-items: center; gap: 5px; margin-bottom: 8px; color: var(--text-muted); font: 11.5px var(--font-mono); }
@@ -395,18 +406,3 @@
 @container (max-width: 560px) {
   .browse-names { display: none; }
 }
-
-.tool-result-parts { display: grid; gap: 6px; }
-
-.exec-calls, .exec-changes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0; padding: 0; list-style: none; }
-.exec-calls > li { border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.exec-calls summary, .exec-calls li > div { padding: 5px 8px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.exec-calls summary { cursor: pointer; }
-.exec-calls summary:hover { background: var(--bg-hover); }
-.exec-calls :is(summary, li > div) > :is(svg, span) { margin-right: 6px; color: var(--text-dim); vertical-align: middle; }
-.exec-changes code { margin-right: 6px; }
-.exec-changes { padding: 0 8px 5px; }
-.exec-calls .tool-command { margin: 0 8px 6px; }
-.exec-note { margin: 0 8px 4px; color: var(--text-muted); overflow-wrap: anywhere; }
-.exec-calls summary > small { margin-left: 8px; color: var(--text-muted); }
-.exec-fields { margin: 0 8px 6px; }

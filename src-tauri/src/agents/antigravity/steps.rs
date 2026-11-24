@@ -126,22 +126,22 @@ fn tool_result(
         .or_else(|| error_details.text(3)).or_else(|| output.text(3))
         .or_else(|| background.text(4)).or_else(|| background.text(3))
         .or_else(|| background.text(7));
-    let cancelled = status == Some(6);
     let status = match status {
         Some(2) => Some("running"),
         Some(3) => Some("completed"),
-        Some(6 | 7) => Some("error"),
+        Some(6) => Some("cancelled"),
+        Some(7) => Some("error"),
         _ if !error.is_empty() => Some("error"),
         _ => None,
     };
     if text.is_none() && (call.text(1).is_none() || status.is_none()) {
         return Ok(Vec::new());
     }
-    let text = match (cancelled, text) {
-        (true, Some(text)) => Some(format!("工具执行已取消\n\n{text}")),
-        (true, None) => Some("工具执行已取消".into()),
-        (false, None) if status == Some("error") => Some("工具执行失败".into()),
-        (false, text) => text.map(str::to_owned),
+    let text = match (status, text) {
+        (Some("cancelled"), Some(text)) => Some(format!("工具执行已取消\n\n{text}")),
+        (Some("cancelled"), None) => Some("工具执行已取消".into()),
+        (Some("error"), None) => Some("工具执行失败".into()),
+        (_, text) => text.map(str::to_owned),
     };
     Ok(vec![json!({"type":"tool_result","tool_use_id":call.text(1),
         "content":text,"status":status,"is_error":status == Some("error")})])

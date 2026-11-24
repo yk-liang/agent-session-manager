@@ -145,7 +145,7 @@ export interface AgentEnvelope {
 
 export interface ContentBlock {
   /** 数据源保存的工具状态；有部分输出不代表已经完成。 */
-  status?: "pending" | "running" | "completed" | "error";
+  status?: "pending" | "running" | "completed" | "error" | "cancelled";
   /** 已确认日志行的引用；展开时向后端取正文。 */
   deferred?: string;
   type: string;
@@ -165,7 +165,10 @@ export interface ContentBlock {
   is_error?: boolean;
   error_summary?: string;
   command_output_kind?: "empty" | "diff";
-  command_output?: string;
+  /** 去掉工具回执、尾注和占位文字后的输出正文；原始结果仍在 `content`。 */
+  output?: string;
+  /** 工具把过长的输出另存到这个文件，结果里只有预览。 */
+  output_file?: string;
   exit_code?: number;
   script_result?: ContentBlock;
   /** 后端给出的操作描述；延迟加载时只带标题所需字段，正文随原始数据一起读取。 */
@@ -208,9 +211,10 @@ export type ShellIntent =
   | "mkdir" | "remove" | "copy" | "move" | "link" | "sign" | "archive" | "permissions" | "process" | "kill" | "wait" | "open" | "count" | "inspect" | "transform" | "other";
 
 type CommandOutcome = "no_match" | "differences";
+type CommandExitOne = CommandOutcome | "silent_differences";
 
 /** heredoc、`-c`/`-e` 参数或脚本工具的代码；`first` 是第一行有意义的代码。 */
-export interface ScriptInfo {
+interface ScriptInfo {
   lang?: string;
   title?: string;
   lines: number;
@@ -224,7 +228,7 @@ export interface ShellOp {
   description?: string;
   exit_code?: number;
   outcome?: CommandOutcome;
-  exit_one?: CommandOutcome;
+  exit_one?: CommandExitOne;
   intent: ShellIntent;
   head?: string;
   more?: number;
@@ -232,36 +236,40 @@ export interface ShellOp {
   target?: string;
   append?: boolean;
   script?: ScriptInfo;
-  steps?: (BrowseOp & { program: string; filters?: ShellFilter[] })[];
+  steps?: (BrowseOp & { filters?: ShellFilter[] })[];
   actions?: { command: string; intent: ShellIntent; target?: string }[];
   related?: ShellIntent[];
   conditional?: boolean;
 }
 
-export interface AskQuestion {
+interface AskQuestion {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
   answer?: string;
 }
 
-export type ExecCall =
-  | { kind: "command"; shell: Omit<ShellOp, "kind">; cwd?: string }
-  | { kind: "patch"; changes: ChangeOp[] }
-  | { kind: "image"; path: string }
-  | { kind: "tool"; name: string; action?: string; target?: string; fields?: [string, unknown][]; expression?: string; dynamic?: boolean };
+/** exec 脚本里的一次工具调用；`ops` 与同名工具单独调用时的描述相同，求不出参数时为空。 */
+export interface ExecCall {
+  tool: string;
+  ops?: ToolOp[];
+  cwd?: string;
+  target?: string;
+  input?: unknown;
+  expression?: string;
+}
 
-export type ExecFeature = "parallel" | "loop" | "conditional" | "state" | "output" | "invalid";
+type ExecFeature = "parallel" | "loop" | "conditional" | "state" | "invalid";
 
 export type ToolOp =
   | BrowseOp
   | ChangeOp
   | ShellOp
   | ({ kind: "script" } & ScriptInfo)
-  | { kind: "exec"; calls: ExecCall[]; lines: number; features?: ExecFeature[] }
-  | { kind: "skill"; name: string; args?: string; path?: string; description?: string; body?: string }
+  | { kind: "exec"; calls: ExecCall[]; lines: number; lead?: [number, number]; features?: ExecFeature[] }
+  | { kind: "skill"; name: string; args?: string; path?: string; body?: string }
   | { kind: "web_search"; queries: string[]; domain?: string; results?: number }
-  | { kind: "web_fetch"; url: string; prompt?: string }
+  | { kind: "web_fetch"; url: string; prompt?: string; find?: boolean }
   | { kind: "ask"; questions: AskQuestion[] }
   | { kind: "agent"; agent?: string; task: string; background?: boolean; encrypted?: boolean }
   | { kind: "message"; to: string; summary?: string; encrypted?: boolean }
@@ -269,7 +277,7 @@ export type ToolOp =
   | { kind: "wake"; seconds: number; reason?: string }
   | { kind: "stop"; task: string; detail?: string }
   | { kind: "task_status"; task: string }
-  | { kind: "terminal_input"; session: number; send: boolean }
+  | { kind: "terminal_input"; session: number; action: "poll" | "send" | "interrupt" }
   | { kind: "agent_list" }
   | { kind: "monitor"; description: string; minutes?: number }
   | { kind: "load_tools"; names: string[] }

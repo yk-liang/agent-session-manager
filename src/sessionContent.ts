@@ -24,14 +24,14 @@ function blocks(content: unknown, row: number): SessionBlock[] {
     const status = block.status;
     return [{ key: `${row}.${index}`, content: {
       type: block.type as string,
-      status: status === "pending" || status === "running" || status === "completed" || status === "error" ? status : undefined,
+      status: status === "pending" || status === "running" || status === "completed" || status === "error" || status === "cancelled" ? status : undefined,
       deferred: string("deferred"), text: string("text"), thinking: string("thinking"),
       name: string("name"), description: string("description"), id: string("id"),
       tool_use_id: string("tool_use_id"), input: block.input, content: block.content,
       is_error: typeof block.is_error === "boolean" ? block.is_error : undefined,
       error_summary: string("error_summary"),
       command_output_kind: block.command_output_kind === "empty" || block.command_output_kind === "diff" ? block.command_output_kind : undefined,
-      command_output: string("command_output"),
+      output: string("output"), output_file: string("output_file"),
       exit_code: typeof block.exit_code === "number" ? block.exit_code : undefined,
       script_result: typeof block.script_result === "object" && block.script_result !== null ? block.script_result as ContentBlock : undefined,
       source: block.source, url: string("url"), image_url: string("image_url"), uri: string("uri"), filename: string("filename"),
@@ -72,12 +72,6 @@ function hasActivity(part: SessionBlock): Activity | undefined {
 }
 
 const DESCRIPTION_FIELDS = ["description", "toolsummary", "query", "completionsummary", "message", "action"] as const;
-
-export function toolStatus(block: ContentBlock, result?: ContentBlock) {
-  if (block.status === "error" || result?.status === "error" || result?.is_error) return "error";
-  if (block.status === "completed" || result?.status === "completed") return "completed";
-  return result?.status ?? block.status ?? (result && "completed");
-}
 
 export function toolDescription(block: ContentBlock) {
   const input = block.input && typeof block.input === "object" && !Array.isArray(block.input) ? Object.entries(block.input) : [];

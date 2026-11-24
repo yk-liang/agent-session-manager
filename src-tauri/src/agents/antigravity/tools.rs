@@ -1,19 +1,23 @@
-use super::super::tool_ops::{self, first_line, numbered, text, Choice, Hunk, Op, Question, ToolResult};
+use super::super::tool_ops::{self, error_summary, first_line, numbered, text, Hunk, Op, ToolResult};
 use serde_json::{json, Value};
 
-/// 读取结果带有时间、范围说明和行号前缀，正文替换为原文后由卡片按范围编号。
+/// 去掉执行时间、行号前缀和命令回执后写入 `output`，原始结果保留在 `content` 供「原文」查看。
 pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> {
     let mut result = result;
-    let original = result.as_mut().map(|result| result.block["content"].take()).unwrap_or(Value::Null);
-    let output = original.as_str().unwrap_or_default();
+    let recorded = result.as_ref().and_then(|result| result.block["content"].as_str()).unwrap_or_default().to_owned();
+    let name = call["name"].as_str();
+    let saved_file = truncated_file(&recorded).map(str::to_owned);
+    // 命令的回执另由 `command_receipt` 解析，其余结果只去掉开头的截断说明和执行时间。
+    let output = if name == Some("run_command") { recorded.as_str() } else { without_timestamps(&recorded) };
     let input = &call["input"];
-    let mut content = None;
-    let op = match (call["name"].as_str(), text(input, "Path")) {
+    let mut cleaned = (output.len() != recorded.len()).then(|| output.to_owned());
+    let op = match (name, text(input, "Path")) {
+        (Some("read_file"), Some(path)) if is_image(path) => Some(Op::Image { path: path.into() }),
         (Some("read_file"), Some(path)) => match numbered(output) {
-            Some((start, end, text)) if result.is_some() => {
+            Some((start, end, text)) => {
                 let total = output.lines().find_map(|line| line.strip_prefix("Showing lines "))
                     .and_then(|range| range.rsplit_once(" of ")?.1.trim().parse().ok());
-                content = Some(json!(text));
+                cleaned = Some(text);
                 Some(Op::read_range(path, start, end - start + 1, total))
             }
             _ => Some(Op::read(path)),
@@ -31,27 +35,29 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
             output.lines().any(|line| line == "Created file.").then_some(true))),
         (Some("run_command"), _) => text(input, "CommandLine").map(|command| {
             let receipt = command_receipt(output);
-            if let (Some(result), Some((_, Some(body)))) = (&mut result, receipt) {
-                result.block["command_output"] = json!(body);
-                if receipt.is_some_and(|(exit, _)| exit != 0) {
-                    if let Some(reason) = body.lines().map(str::trim).find(|line| !line.is_empty()) {
-                        result.block["error_summary"] = json!(reason.chars().take(240).collect::<String>());
+            if let Some((exit, body)) = receipt {
+                cleaned = Some(body.to_owned());
+                if let Some(result) = &mut result {
+                    if exit != 0 {
+                        if let Some(reason) = error_summary(body) {
+                            result.block["error_summary"] = json!(reason);
+                        }
                     }
                 }
             }
-            let (exit, stdout) = receipt.map_or((None, result.as_ref().map(|_| output)), |(exit, body)| (Some(exit), body));
+            let (exit, stdout) = receipt.map_or((None, result.as_ref().map(|_| output)), |(exit, body)| (Some(exit), Some(body)));
             tool_ops::shell(command, text(input, "toolSummary"), exit, stdout)
         }),
-        (Some("search_web"), _) => Some(Op::web_search(input, None, None)),
-        (Some("ask_question"), _) => Some(Op::ask(input["questions"].as_array().into_iter().flatten().filter_map(|q| Some(Question {
-            question: text(q, "question")?.into(),
-            header: None,
-            options: q["options"].as_array().into_iter().flatten().filter_map(|o| Some(Choice { label: o.as_str()?.into(), description: None })).collect(),
-            answer: None,
-        })).collect(), None)),
+        (Some("search_web"), _) => {
+            if let Some((_, summary)) = output.split_once(" returned the following summary:\n").filter(|(intro, _)| intro.starts_with("The search for ")) {
+                cleaned = Some(summary.to_owned());
+            }
+            Some(Op::web_search(input, None, None))
+        }
+        (Some("ask_question"), _) => Some(Op::ask(&input["questions"], None)),
         (Some("invoke_subagent"), _) => Some(Op::Agent {
             agent: text(input, "Role").or_else(|| text(input, "Model").filter(|model| *model != "inherit")).map(Into::into),
-            task: text(input, "toolSummary").or_else(|| text(input, "Prompt").and_then(|prompt| prompt.lines().next())).unwrap_or("子任务").into(),
+            task: text(input, "toolSummary").map(Into::into).or_else(|| text(input, "Prompt").map(first_line)).unwrap_or_else(|| "子任务".into()),
             background: false,
             encrypted: false,
         }),
@@ -74,12 +80,41 @@ pub(super) fn describe(call: &Value, result: Option<ToolResult<'_>>) -> Vec<Op> 
         _ => None,
     };
     if let Some(result) = result {
-        result.block["content"] = content.unwrap_or(original);
+        if let Some(cleaned) = cleaned.filter(|cleaned| cleaned != &recorded) {
+            result.block["output"] = json!(cleaned);
+        }
+        if let Some(file) = saved_file {
+            result.block["output_file"] = json!(file);
+        }
     }
     op.into_iter().collect()
 }
 
-fn command_receipt(text: &str) -> Option<(i64, Option<&str>)> {
+fn truncated_file(text: &str) -> Option<&str> {
+    let first = text.lines().next()?;
+    if !first.starts_with("The tool's output was truncated") {
+        return None;
+    }
+    let rest = first.split_once("file://")?.1.trim_end();
+    Some(rest.strip_suffix('.').unwrap_or(rest))
+}
+
+fn without_timestamps(text: &str) -> &str {
+    let text = if text.starts_with("The tool's output was truncated") {
+        text.split_once('\n').map_or(text, |(_, rest)| rest.trim_start_matches('\n'))
+    } else {
+        text
+    };
+    text.strip_prefix("Created At: ").and_then(|rest| rest.split_once('\n'))
+        .and_then(|(_, rest)| rest.strip_prefix("Completed At: ")?.split_once('\n'))
+        .map_or(text, |(_, rest)| rest)
+}
+
+fn is_image(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+}
+
+fn command_receipt(text: &str) -> Option<(i64, &str)> {
     let with_timestamps = !text.starts_with("Command exited with code ");
     let rest = if with_timestamps {
         let (prefix, rest) = text.split_once("Created At: ")?;
@@ -95,7 +130,8 @@ fn command_receipt(text: &str) -> Option<(i64, Option<&str>)> {
     let rest = rest.trim_start_matches(['\n', '\r']);
     let body = rest.strip_prefix("Command output:\n").or_else(|| rest.strip_prefix("Command output:\r\n"))
         .or_else(|| (rest.trim_end() == "No output from the command.").then_some(""));
-    (with_timestamps || body.is_some()).then_some((exit, body))
+    // 带时间的回执里，没有命令输出时其后是工具自己的说明（例如沙箱报错），也当作输出展示。
+    if with_timestamps { Some((exit, body.unwrap_or(rest))) } else { body.map(|body| (exit, body)) }
 }
 
 #[cfg(test)]
@@ -112,8 +148,16 @@ mod tests {
         assert_eq!(shell["exit_code"], 128);
         assert_eq!(shell["intent"], "git_change");
         assert_eq!(result["content"], receipt);
-        assert_eq!(result["command_output"], "fatal: missing ref");
-        assert_eq!(command_receipt("Command exited with code 1.\n\nNo output from the command."), Some((1, Some(""))));
+        assert_eq!(result["output"], "fatal: missing ref");
+        assert_eq!(command_receipt("Command exited with code 1.\n\nNo output from the command."), Some((1, "")));
         assert!(command_receipt("Command exited with code 128.\nother output").is_none());
+        let raw_search = "Created At: 2026-01-12T12:00:00+00:00\nCompleted At: 2026-01-12T12:00:01+00:00\nThe search for \"q\" returned the following summary:\n## Answer";
+        let mut search = json!({"content":raw_search});
+        describe(&json!({"name":"search_web","input":{"query":"q"}}), Some(ToolResult { block: &mut search, event: &mut Value::Null }));
+        assert_eq!((search["content"].clone(), search["output"].clone()), (json!(raw_search), json!("## Answer")));
+        let raw_read = "The tool's output was truncated due to being too long. You can find the full output in a file at file:///tmp/output.txt.\nCreated At: 2026-01-12T12:00:00+00:00\nCompleted At: 2026-01-12T12:00:01+00:00\nShowing lines 1-2 of 2\n1: first\n2: second";
+        let mut read = json!({"content":raw_read});
+        describe(&json!({"name":"read_file","input":{"Path":"/repo/a.txt"}}), Some(ToolResult { block: &mut read, event: &mut Value::Null }));
+        assert_eq!((read["content"].clone(), read["output"].clone(), read["output_file"].clone()), (json!(raw_read), json!("first\nsecond"), json!("/tmp/output.txt")));
     }
 }

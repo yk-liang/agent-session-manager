@@ -53,7 +53,7 @@ pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<
     HEADERS.get_or_init(|| FileCache::new(4096)).load(
         "codex-header",
         std::slice::from_ref(path),
-        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::tools::Activity::default()).split()),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::wrappers::Activity::default()).split()),
         |(header, warnings)| header.is_some() && warnings.is_empty(),
     )
 }
@@ -295,7 +295,7 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
     let mut inherited = 0;
     let mut has_activity = false;
     let mut dedup = EventDedup::default();
-    let mut activity = super::tools::Activity::default();
+    let mut activity = super::wrappers::Activity::default();
     let multiple_pages = chain.iter().filter(|(_, l)| l.bytes != Some(0)).count() > 1;
     for (index, limit) in chain {
         if limit.bytes == Some(0) {

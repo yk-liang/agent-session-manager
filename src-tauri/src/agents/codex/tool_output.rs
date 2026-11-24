@@ -1,5 +1,5 @@
 //! 工具结果可保存为旧版字符串或 Responses 内容块数组。
-use super::super::tool_ops::CommandOutput;
+use super::super::tool_ops::{error_summary, CommandOutput};
 use serde::Deserialize;
 use serde_json::{value::RawValue, Value};
 
@@ -84,23 +84,19 @@ fn text_status(text: &str) -> Status {
     }
 }
 
-fn reason(text: &str) -> Option<String> {
-    text.lines().map(str::trim).find(|line| !line.is_empty()).map(|line| line.chars().take(240).collect())
-}
-
 pub(super) fn error_reason(content: &Value) -> Option<String> {
     match content {
-        Value::String(text) => reason(execution_output(text)),
-        Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).find_map(reason),
+        Value::String(text) => error_summary(execution_output(text)),
+        Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).find_map(error_summary),
         Value::Object(fields) => ["message", "error", "detail"].into_iter()
-            .filter_map(|key| fields.get(key)?.as_str()).find_map(reason),
+            .filter_map(|key| fields.get(key)?.as_str()).find_map(error_summary),
         _ => None,
     }
 }
 
 fn failed_status(exit_code: Option<i64>, output: Option<&str>, command_output_known: bool) -> Status {
     Status {
-        failed: true, running: false, exit_code, reason: output.and_then(reason),
+        failed: true, running: false, exit_code, reason: output.and_then(error_summary),
         command_output_kind: output.filter(|_| command_output_known && exit_code == Some(1)).and_then(CommandOutput::recognize),
     }
 }

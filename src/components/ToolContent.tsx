@@ -1,9 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { attachmentLabel, isAttachment } from "../sessionContent";
-import type { ContentBlock } from "../types";
-import { Attachment } from "./MessageParts";
+import { displayPath } from "../utils";
 
-export type View = { label: string; body: ReactNode; copy?: string; meta?: string };
+export type View = { label: string; body: ReactNode; copy?: string; meta?: string; plain?: boolean };
 
 export function payloadText(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "";
@@ -23,11 +21,38 @@ export function ShellText({ command }: { command: string }) {
   })}</>;
 }
 
+type Command = { command: string; cwd?: string };
+
 export function commandView(command?: string): View | undefined {
-  if (!command) return;
-  return { label: "命令", copy: command, body: <TextPreview label="命令" text={command}>{text =>
-    <div className="tool-command"><span aria-hidden="true">$</span><pre className="code"><ShellText command={text} /></pre></div>
-  }</TextPreview> };
+  return command ? commandsView([{ command }]) : undefined;
+}
+
+function shellQuote(value: string) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function scopedCommand({ command, cwd }: Command, isolate: boolean) {
+  if (!cwd && !isolate) return command;
+  return cwd ? `(\ncd ${shellQuote(cwd)} || exit\n${command}\n)` : `(\n${command}\n)`;
+}
+
+/** 一条或几条命令，各自带 `$`；指定了工作目录的在命令上方注明，复制时用子 shell 隔离每段目录与退出状态。 */
+export function commandsView(commands: Command[], cwd?: string | null, copyable = true): View | undefined {
+  if (!commands.length) return;
+  const isolate = commands.length > 1;
+  const copy = commands.map(entry => scopedCommand(entry, isolate)).join("\n\n");
+  const truncated = copy.length > OUTPUT_PREVIEW_LIMIT;
+  return { label: "命令", copy: copyable ? copy : undefined, body: <ExpandableFrame lines={countLines(copy)} truncated={truncated} label="命令">{expanded => {
+    let budget = expanded ? Infinity : OUTPUT_PREVIEW_LIMIT;
+    return <div className="tool-commands">{commands.map(({ command, cwd: dir }, i) => {
+      const shown = command.slice(0, Math.max(budget, 0));
+      budget -= command.length;
+      return shown && <div key={i} className="tool-command">
+        {dir && displayPath(dir, cwd) !== "." && <span className="tool-command-cwd" title={dir}># {displayPath(dir, cwd)}</span>}
+        <span aria-hidden="true">$</span><pre className="code"><ShellText command={shown} /></pre>
+      </div>;
+    })}</div>;
+  }}</ExpandableFrame> };
 }
 
 const OUTPUT_PREVIEW_LIMIT = 24_000;
@@ -93,9 +118,10 @@ export function plainView(label: string, text?: string, code = false): View | un
 /** 输出原文；`start` 为首行行号，为空时不显示行号（命令输出、搜索结果）。 */
 function OutputText({ text, start, label }: { text: string; start: number | null; label: string }) {
   if (!text) return <p className="tool-loading tool-payload-message">无{label}</p>;
+  const numbered = start !== null && !selfNumbered(text);
   return <TextPreview text={text} label={label}>
     {displayed => {
-      const lines = start === null ? undefined : Array.from({ length: countLines(displayed) }, (_, i) => i + start).join("\n");
+      const lines = numbered ? Array.from({ length: countLines(displayed) }, (_, i) => i + start).join("\n") : undefined;
       return <div className="tool-output-lines" data-numbered={!!lines || undefined}>
         {lines && <pre className="tool-line-numbers" aria-hidden="true">{lines}</pre>}
         <pre className="code">{displayed}</pre>
@@ -104,92 +130,23 @@ function OutputText({ text, start, label }: { text: string; start: number | null
   </TextPreview>;
 }
 
-/** 文本形式的展示方式，附带行数。 */
+/** 正文已自带行号（`cat -n`、`nl`、`grep -n`）时不再另加一列。 */
+function selfNumbered(text: string) {
+  const lines = text.split("\n", 20).filter(line => line.trim());
+  return lines.length > 0 && lines.every(line => /^\s*\d+[\t:|]/.test(line));
+}
+
+/** 终端输出里的颜色控制序列去掉，`\r` 覆盖的进度帧只留最后显示的一帧。 */
+export function terminalText(text: string) {
+  if (!/[\x1b\r]/.test(text)) return text;
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").split("\n").map(line => {
+    const frame = line.endsWith("\r") ? line.slice(0, -1) : line;
+    return frame.slice(frame.lastIndexOf("\r") + 1);
+  }).join("\n");
+}
+
+/** 文本形式的展示方式，附带行数；保持原文，不做终端控制序列清洗。 */
 export function textView(label: string, text: string, start: number | null = 1): View {
   const lineCount = text ? countLines(text) : 0;
-  return { label, body: <OutputText text={text} start={start} label={label} />, copy: text || undefined, meta: lineCount ? `${lineCount} 行` : undefined };
-}
-
-type ResultPart = { attachment?: ContentBlock; text: string };
-
-function resultParts(content: unknown): ResultPart[] {
-  if (!Array.isArray(content)) return content == null ? [] : [{ text: payloadText(content) }];
-  if (content.length && !content.some(part => part && typeof part === "object"
-    && (["text", "input_text", "output_text"].includes(part.type) || isAttachment(part)))) {
-    return [{ text: payloadText(content) }];
-  }
-  return content.map(part => part && typeof part === "object" && isAttachment(part as ContentBlock)
-    ? { attachment: part as ContentBlock, text: attachmentLabel(part as ContentBlock) }
-    : { text: typeof (part as ContentBlock)?.text === "string" ? (part as ContentBlock).text! : payloadText(part) });
-}
-
-/** 结果的纯文本；附件以名称代替。 */
-export function resultText(result: ContentBlock) {
-  return resultParts(result.content).map(part => part.text).join("\n\n");
-}
-
-export function plainResultText(result: ContentBlock) {
-  const parts = resultParts(result.content);
-  if (!parts.some(part => part.attachment)) return result.command_output ?? parts.map(part => part.text).join("\n\n");
-}
-
-/** 结果原文；混有图片等附件时逐段展示。 */
-export function resultView(result: ContentBlock, label: string, start: number | null = null): View {
-  return partsView(resultParts(result.content), label, start);
-}
-
-function partsView(parts: ResultPart[], label: string, start: number | null): View {
-  const text = parts.map(part => part.text).join("\n\n");
-  if (!parts.some(part => part.attachment)) return textView(label, text, start);
-  return { label, copy: text, body: <div className="tool-result-parts">{parts.map((part, index) => part.attachment
-    ? <Attachment key={index} block={part.attachment} />
-    : <TextPreview key={index} text={part.text} label={label}>{text => <pre className="code">{text}</pre>}</TextPreview>)}</div> };
-}
-
-function executionOutput(value: unknown): string | undefined {
-  if (Array.isArray(value)) {
-    const results = value.map(entry => executionOutput(entry));
-    if (results.length && results.every(result => result !== undefined)) return results.filter(Boolean).join("\n\n");
-  } else if (value && typeof value === "object") {
-    const result = value as Record<string, unknown>;
-    if (result.status === "fulfilled") return executionOutput(result.value);
-    if (result.status === "rejected" && "reason" in result) {
-      return ["Promise 被拒绝", payloadText(result.reason)].filter(Boolean).join("\n");
-    }
-    if (typeof result.output !== "string" || !["chunk_id", "exit_code", "session_id", "wall_time_seconds"].some(key => key in result)) return;
-    const status = [
-      typeof result.exit_code === "number" && result.exit_code !== 0 && `退出码 ${result.exit_code}`,
-      typeof result.session_id === "number" && `后台会话 ${result.session_id}`,
-    ].filter(Boolean).join(" · ");
-    return [status, result.output.replace(/\n$/, "")].filter(Boolean).join("\n");
-  }
-}
-
-function scriptOutput(text: string) {
-  const decode = (text: string) => {
-    const first = text.trimStart()[0];
-    if (first !== "{" && first !== "[") return;
-    try {
-      return executionOutput(JSON.parse(text));
-    } catch {
-      return;
-    }
-  };
-  const entire = decode(text);
-  if (entire !== undefined) return entire;
-  const readable = text.split("\n").map(line => decode(line) ?? line).join("\n");
-  if (readable !== text) return readable;
-}
-
-export function scriptView(result?: ContentBlock, label = "结果"): View | undefined {
-  const parts = resultParts(result?.content);
-  let changed = false;
-  const decoded = parts.flatMap((part, index) => {
-    if (part.attachment) return [part];
-    const text = index === 0 ? part.text.replace(/^Script completed\r?\n(?:Wall time [^\r\n]+\r?\n)?Output:[ \t]*(?:\r?\n|$)/, "") : part.text;
-    const output = scriptOutput(text) ?? text;
-    changed ||= output !== part.text;
-    return output ? [{ text: output }] : [];
-  });
-  if (changed) return partsView(decoded, label, null);
+  return { label, body: <OutputText text={text} start={start} label={label} />, copy: text || undefined, meta: lineCount ? `${lineCount} 行` : undefined, plain: true };
 }

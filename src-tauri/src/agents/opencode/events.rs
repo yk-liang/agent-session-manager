@@ -35,7 +35,7 @@ pub(super) fn tool_blocks(
     };
     let name = part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?");
     let mut call = json!({"type":"tool_use", "id":identity, "name":name});
-    let (ops, content) = super::tools::describe(name, state);
+    let (ops, body) = super::tools::describe(name, state);
     if !ops.is_empty() {
         call["ops"] = if include_content { json!(ops) } else { json!(ops.into_iter().map(Op::summary).collect::<Vec<_>>()) };
     }
@@ -63,21 +63,19 @@ pub(super) fn tool_blocks(
     let result = if matches!(status, Some("completed" | "error")) || output.is_some() || failed {
         let mut result = json!({"type":"tool_result", "tool_use_id":identity, "is_error":failed});
         if failed && matches!(name, "bash" | "shell") {
-            let exit = state["metadata"]["exit"].as_i64().or_else(|| {
-                error_text(&state["error"])?.trim().strip_prefix("Exit code ")?.parse::<i64>().ok()
-            });
-            if let Some(exit) = exit {
+            if let Some(exit) = super::tools::bash_exit(state) {
                 result["exit_code"] = json!(exit);
             }
         }
         if include_content {
-            result["content"] = if let Some(error) = error_text(&state["error"]) {
-                with_error(error, output)
-            } else if let Some(text) = content {
-                json!(text)
+            if let Some(error) = error_text(&state["error"]) {
+                result["content"] = with_error(error, output);
             } else {
-                output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }))
-            };
+                result["content"] = output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }));
+                if let Some(body) = body {
+                    result["output"] = json!(body);
+                }
+            }
         }
         Some(result)
     } else {

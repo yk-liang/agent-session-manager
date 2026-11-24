@@ -19,6 +19,7 @@ mod storage;
 mod thread;
 mod tool_output;
 mod tools;
+mod wrappers;
 
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
@@ -113,7 +114,7 @@ struct ReadLimit {
 
 #[cfg(test)]
 fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<ParsedRollout> {
-    let mut activity = tools::Activity::default();
+    let mut activity = wrappers::Activity::default();
     let mut parsed = read_rollout(
         path,
         if collect_events {
@@ -212,7 +213,7 @@ fn read_rollout(
     mode: ReadMode,
     limit: ReadLimit,
     mut dedup: Option<&mut history::EventDedup>,
-    activity: &mut tools::Activity,
+    activity: &mut wrappers::Activity,
 ) -> super::ParseOutcome<ParsedRollout> {
     let file = match storage::Reader::open(path) {
         Ok(f) => f,
@@ -440,7 +441,7 @@ fn read_rollout(
                             .and_then(|raw| serde_json::from_str::<ExecMetadata>(raw.get()).ok());
                         let input = shallow.input.and_then(|input| serde_json::from_str::<String>(input.get()).ok());
                         if let (Some(metadata), Some(at), Some(input)) = (metadata, super::timestamp(ts), input) {
-                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input);
+                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input, parsed.cwd.as_deref());
                         }
                     }
                 }

@@ -1,10 +1,9 @@
 import type { BrowseOp, ContentBlock, ToolOp } from "./types";
-import { toolStatus, type SessionBlock } from "./sessionContent.ts";
-import { shortPath } from "./utils.ts";
+import type { SessionBlock } from "./sessionContent";
 
 /** 一次工具调用可包含多个操作（如一个补丁改多个文件），每个操作单独成卡。 */
 export type ToolItem = { key: string; part: SessionBlock; op?: ToolOp; index: number };
-export type ActivityItem =
+type ActivityItem =
   | { type: "thinking"; key: string; part: SessionBlock }
   | { type: "result"; key: string; part: SessionBlock }
   | { type: "tool"; item: ToolItem }
@@ -32,7 +31,8 @@ export function activityItems(parts: SessionBlock[]): ActivityItem[] {
       const ops: (ToolOp | undefined)[] = content.ops?.length ? content.ops : [undefined];
       ops.forEach((op, i) => {
         const item = { key: ops.length > 1 ? `${part.key}.${i}` : part.key, part, op, index: i };
-        if (browseSteps(op) && itemStatus(item) !== "error") {
+        const status = itemStatus(item);
+        if (browseSteps(op) && status !== "error" && status !== "denied" && status !== "cancelled") {
           if (run.length === 20) flush();
           run.push(item);
         }
@@ -50,76 +50,77 @@ export function activityItems(parts: SessionBlock[]): ActivityItem[] {
   return items;
 }
 
-/** 退出码 1 的正常结果：调用记录已含结论时直接采用，否则用结果上的退出码和输出形态核对静态含义。 */
-const exitOneEvidence = { no_match: "empty", differences: "diff" } as const;
+export type ToolStatus = NonNullable<ContentBlock["status"]> | "denied";
 
+/** 退出码 1 的正常结果：调用记录已含结论时直接采用，否则用结果上的退出码和输出形态核对静态含义。 */
 export function commandOutcome({ part, op }: ToolItem) {
-  if (op?.kind !== "shell" || isDenied(part.result)) return;
+  if (op?.kind !== "shell" || skipped(part.result)) return;
   if (op.outcome) return op.outcome;
   const { result } = part;
-  if (op.exit_one && result?.exit_code === 1 && result.command_output_kind === exitOneEvidence[op.exit_one]) return op.exit_one;
+  if (op.exit_one && result?.exit_code === 1) {
+    if (op.exit_one === "no_match" && result.command_output_kind === "empty") return "no_match";
+    if (op.exit_one === "differences" && result.command_output_kind === "diff") return "differences";
+    if (op.exit_one === "silent_differences" && result.command_output_kind === "empty") return "differences";
+  }
 }
 
-export function itemStatus(item: ToolItem) {
+export function resultStatus(result?: ContentBlock): ToolStatus | undefined {
+  if (!result) return;
+  if (result.status === "cancelled") return "cancelled";
+  if (result.status === "error" || result.is_error) return skipped(result) ?? "error";
+  return result.status;
+}
+
+export function itemStatus(item: ToolItem): ToolStatus | undefined {
+  const { content, result } = item.part;
+  if (content.status === "cancelled" || result?.status === "cancelled") return "cancelled";
   if (commandOutcome(item)) return "completed";
-  const { part, op } = item;
-  if (op?.kind === "shell" && op.exit_code !== undefined) {
-    if (part.content.status === "error" || part.result?.status === "error") return "error";
-    if (op.exit_code !== 0) return "error";
+  const shellFailed = item.op?.kind === "shell" && item.op.exit_code !== undefined && item.op.exit_code !== 0;
+  if (content.status === "error" || result?.status === "error" || result?.is_error || shellFailed) {
+    return skipped(result) ?? "error";
   }
-  return toolStatus(part.content, part.result);
+  if (content.status === "completed" || result?.status === "completed") return "completed";
+  return result?.status ?? content.status ?? (result && "completed");
 }
 
-/** 失败原因取结果的首个非空行，去掉工具自带的标签。 */
-export function errorSummary(result?: ContentBlock) {
+function stripTag(text: string) {
+  return text.replace(/^<\/?[\w-]+>\s*/, "").trim();
+}
+
+function fullContentText(result?: ContentBlock) {
   const content = result?.content;
-  const texts: unknown[] = Array.isArray(content) ? content.map(part => part?.text) : [content];
-  for (const text of [result?.error_summary, ...texts]) {
-    if (typeof text !== "string") continue;
-    for (const line of text.slice(0, 4096).split("\n")) {
-      const summary = line.replace(/^\s*<\/?[\w-]+>\s*/, "").trim();
-      if (summary) return summary.slice(0, 240);
-    }
-  }
+  if (typeof content === "string") return content.trim() ? content.slice(0, 4096).trim() : undefined;
+  if (!Array.isArray(content)) return;
+  const parts = content.flatMap(part => typeof part?.text === "string" && part.text.trim() ? [part.text.trim()] : []);
+  return parts.length ? parts.join("\n\n").slice(0, 4096) : undefined;
 }
 
-/** 拒绝执行时的固定文案（Claude Code 系的权限与分类器、Antigravity 的沙箱检查）：被拒绝的调用没有执行。 */
-const DENIAL = /^(?:Permission to use .+?\bdenied\b|Permission for this action was denied|The user doesn't want to proceed with this tool use|permission check failed for unsandboxed|hook denied)|was blocked by a deny rule/i;
-
-export function isDenied(result?: ContentBlock) {
-  const summary = errorSummary(result);
-  return !!summary && DENIAL.test(summary);
+function summaryText(result?: ContentBlock) {
+  return typeof result?.error_summary === "string" && result.error_summary.trim()
+    ? result.error_summary.slice(0, 4096).trim()
+    : undefined;
 }
 
-/** 项目内的路径显示为相对路径，其余缩写用户目录。 */
-export function displayPath(path: string, cwd?: string | null) {
-  const root = cwd?.replace(/\/$/, "");
-  if (root && path === root) return ".";
-  if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1);
-  return shortPath(path);
+/** 失败原因：优先用后端摘要，否则取结果正文的首个非空行。 */
+export function errorSummary(result?: ContentBlock) {
+  const summary = summaryText(result);
+  if (summary) return summary.slice(0, 240);
+  const full = fullContentText(result);
+  return full ? stripTag(full).split("\n").find(line => line.trim())?.trim().slice(0, 240) : undefined;
 }
 
-export function splitPath(path: string) {
-  const slash = path.lastIndexOf("/", path.length - 2);
-  return slash < 0 ? { dir: "", name: path } : { dir: path.slice(0, slash), name: path.slice(slash + 1) };
-}
+/** 没有执行的调用：被权限、自动模式分类器、安全检查或钩子拒绝，或被用户取消。 */
+const DENIED_TAG = /^<tool_use_error>\s*Blocked:/i;
+const DENIED = /^(?:Permission (?:to use|for this)[\s\S]*?\bdenied\b|The user doesn't want to proceed with this tool use|permission check failed for|hook denied|tool call denied by pre-tool hook)|was blocked by a deny rule|denied by (?:a )?pre-tool hook/i;
+const CANCELLED = /^(?:工具执行已取消(?:\n|$)|(?:Command|Operation|Tool(?: execution| call)?|Web search|Search|Request|Execution) (?:aborted|cancell?ed)\.?)$/i;
 
-/** 卡片标题里的长路径只保留末尾放得下的几级，前面以 … 代替。 */
-export function compactPath(path: string, limit = 32) {
-  if (path.length <= limit) return path;
-  const parts = path.replace(/\/$/, "").split("/");
-  for (let start = 1; start < parts.length - 1; start++) {
-    const label = ["…", ...parts.slice(start)].join("/");
-    if (label.length <= limit) return label;
-  }
-  return `…/${parts[parts.length - 1]}`;
-}
-
-/** 命令标题里的路径：项目内转为相对路径，其余长路径只保留末尾几级。 */
-export function titlePaths(text: string, cwd?: string | null) {
-  const root = cwd?.replace(/\/$/, "");
-  return text.replace(/(?<![\w.~:/-])(?:~\/|\/)[^\s'"|;&<>()]+/g, path => {
-    const relative = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : shortPath(path);
-    return compactPath(relative);
-  });
+export function skipped(result?: ContentBlock): "denied" | "cancelled" | undefined {
+  if (result?.status === "cancelled") return "cancelled";
+  const full = fullContentText(result);
+  const raw = full ?? summaryText(result);
+  if (!raw) return;
+  if (DENIED_TAG.test(raw)) return "denied";
+  if (DENIED.test(stripTag(raw))) return "denied";
+  // 整段匹配取消提示需要完整正文，避免把截断的 error_summary 或多段错误误判为取消。
+  if (full && CANCELLED.test(stripTag(full))) return "cancelled";
 }

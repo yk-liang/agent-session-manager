@@ -1,13 +1,14 @@
 import { useContext, useEffect, useId, useState, type ReactNode } from "react";
-import { itemStatus, type ToolItem } from "../activity";
+import { itemStatus, type ToolItem, type ToolStatus } from "../activity";
 import { readToolPayload } from "../api";
 import type { ContentBlock, ToolOp } from "../types";
+import { shortPath } from "../utils";
 import CopyButton from "./CopyButton";
 import { DetailState } from "./DetailState";
 import Notice from "./Notice";
-import { jsonResult } from "./ResultViews";
+import { jsonResult, plainResultText, resultHasAttachment, resultText, resultView, scriptView } from "./ResultViews";
 import Segmented from "./Segmented";
-import { plainResultText, resultView, scriptView, TextPreview, textView, type View } from "./ToolContent";
+import { payloadText, terminalText, TextPreview, textView, type View } from "./ToolContent";
 
 type Kind = "input" | "output" | "error";
 type Views = (View | false | undefined)[];
@@ -30,20 +31,22 @@ function Section({ kind, title, note, views, actions, onSelect }: {
   const [selected, setSelected] = useState<string>();
   const view = views.find(view => sectionViewId(view) === selected) ?? views[0];
   const hasTabs = views.length > 1;
+  // 复制按钮跟随整个小节，不随页签出现或消失，切换条位置才稳定。
+  const copyable = views.some(view => view.copy);
 
   return <section className="tool-payload" data-kind={kind}>
     <div className="tool-payload-header">
       <span className="tool-payload-title">{title}</span>
       {note && <span className="tool-payload-note">{note}</span>}
-      {(view.meta || hasTabs || view.copy || actions) && <div className="tool-payload-actions">
+      {(view.meta || hasTabs || copyable || actions) && <div className="tool-payload-actions">
         {view.meta && <span>{view.meta}</span>}
         {hasTabs && <Segmented label={`${title}的展示方式`} className="section-views" tabs panelId={panelId}
           options={views.map(view => [sectionViewId(view), view.label])} value={sectionViewId(view)} onChange={id => {
             setSelected(id);
             onSelect?.(id);
           }} />}
-        {view.copy && <CopyButton className="content-action btn-ghost btn-sm" label={`复制${hasTabs ? view.label : title}`}
-          value={view.copy} onError={onCopyError} />}
+        {copyable && <CopyButton className="content-action btn-ghost btn-sm" label={`复制${hasTabs ? view.label : title}`}
+          value={view.copy ?? ""} disabled={!view.copy} onError={onCopyError} />}
         {actions}
       </div>}
     </div>
@@ -102,7 +105,27 @@ type OutputOptions<T> = {
   views?: (result: ContentBlock | undefined, op: T) => Views;
   actions?: (op: T) => ReactNode;
   preferScript?: boolean;
+  terminal?: boolean;
+  hideEmpty?: boolean;
 };
+
+function isDuplicatePlain(view: View, shown: SectionView[]) {
+  return !!view.plain && view.copy !== undefined && shown.some(other => other.plain && other.copy === view.copy);
+}
+
+function cleanBodyView(native: ContentBlock | undefined, title: string, start: number | null, terminal: boolean): View | undefined {
+  if (!native) return;
+  let body: string | undefined;
+  if (native.output !== undefined) {
+    body = terminal ? terminalText(native.output) : native.output;
+  } else if (terminal) {
+    const raw = plainResultText(native);
+    const clean = raw !== undefined ? terminalText(raw) : undefined;
+    if (clean !== undefined && clean !== raw) body = clean;
+  }
+  if (body === undefined) return;
+  return body.trim() ? textView(title, body, start) : { label: title, body: message("无输出"), plain: true };
+}
 
 export function ToolSections<T extends ToolOp>({ item, input, output = {} }: {
   item: ToolItem;
@@ -115,7 +138,8 @@ export function ToolSections<T extends ToolOp>({ item, input, output = {} }: {
   const { value: call, placeholder } = usePayload(content, !preview || !!input?.loadOnExpand || loadSource);
   const op = (call?.ops?.[item.index] ?? item.op) as T;
   const views = preview ? [preview] : (call ? input?.views?.(op, call) : undefined) ?? [];
-  const source = call && (typeof call.input === "string" ? call.input : JSON.stringify(call.input, null, 2));
+  const empty = call?.input == null || typeof call.input === "object" && !Array.isArray(call.input) && !Object.keys(call.input).length;
+  const source = call && !empty ? payloadText(call.input) : undefined;
   const sourceLabel = input?.sourceLabel ?? (typeof call?.input === "string" ? "原文" : "JSON");
   const raw = call ? (source === undefined ? message("无输入") : <TextPreview label={sourceLabel} text={source}>
     {text => <pre className="code tool-input-code">{text}</pre>}
@@ -127,12 +151,13 @@ export function ToolSections<T extends ToolOp>({ item, input, output = {} }: {
     }} views={[...views.filter((view): view is View => !!view), { id: "source", label: sourceLabel, body: raw, copy: source }]} />
     {output && <ToolOutput status={itemStatus(item)} result={result} script={item.index === 0 ? content.script_result : undefined}
       title={output.title} start={output.start} actions={output.actions?.(op)} preferScript={output.preferScript}
+      terminal={output.terminal} hideEmpty={output.hideEmpty}
       views={output.views && (result => output.views!(result, op))} />}
   </>;
 }
 
-export function ToolOutput({ status, result, script, title = "输出", start = null, views, actions, preferScript }: {
-  status?: ContentBlock["status"];
+export function ToolOutput({ status, result, script, title = "输出", start = null, views, actions, preferScript, terminal = false, hideEmpty = false }: {
+  status?: ToolStatus;
   result?: ContentBlock;
   script?: ContentBlock;
   title?: string;
@@ -140,38 +165,57 @@ export function ToolOutput({ status, result, script, title = "输出", start = n
   views?: (result?: ContentBlock) => Views;
   actions?: ReactNode;
   preferScript?: boolean;
+  terminal?: boolean;
+  hideEmpty?: boolean;
 }) {
   const output = usePayload(result);
   const scriptOutput = usePayload(script);
-  const failed = status === "error";
+  const failed = status === "error" || status === "denied";
   const heading = failed ? "错误输出" : title;
-  const nativeViews = failed ? [] : (views?.(output.value) ?? []).filter((view): view is View => !!view);
-  const json = !failed && !nativeViews.length && jsonResult(output.value);
+  const native = output.value;
+  const nativeHasAttachment = resultHasAttachment(native);
+  const nativeViews = (views?.(native) ?? []).filter((view): view is View => !!view);
+  const json = !nativeViews.length && jsonResult(native);
   if (json) nativeViews.push(json);
-  const stdout = output.value?.command_output;
-  if (!nativeViews.length && stdout?.trim()) nativeViews.push(textView("命令输出", stdout, start));
+  const nativeText = native && plainResultText(native)?.trim();
+  const nativeEmpty = !!native && !nativeViews.length && !nativeHasAttachment && !nativeText;
+  const rawNativeEmpty = !!native && !nativeHasAttachment && !resultText(native);
   const scriptBlock = scriptOutput.value;
-  const decoded = scriptBlock && scriptView(scriptBlock, "脚本输出");
-  const nativeText = output.value && plainResultText(output.value);
+  const scriptHasAttachment = resultHasAttachment(scriptBlock);
+  const decoded = scriptBlock && scriptView(scriptBlock, "脚本输出", terminal);
   const scriptText = decoded?.copy?.trim();
-  const duplicate = scriptText && scriptText === nativeText?.trim() && scriptBlock && plainResultText(scriptBlock) !== undefined;
+  const duplicate = !!scriptText && !scriptHasAttachment && !nativeHasAttachment && scriptText === nativeText;
   const semanticScript = decoded && !duplicate && (scriptText || !decoded.copy) ? { ...decoded, id: "script" } : undefined;
-  const scriptFirst = !!(preferScript && !failed && semanticScript && scriptText && scriptText.length > (nativeText?.trim().length ?? 0));
+  // 原生结果为空时（包装脚本里的命令只把输出交给了脚本），脚本输出就是唯一的结果。
+  const scriptFirst = !!(semanticScript && scriptText && (nativeEmpty || preferScript && !failed && !nativeHasAttachment && scriptText.length > (nativeText?.length ?? 0)));
+  if (!nativeViews.length && !nativeHasAttachment && !scriptFirst) {
+    const body = cleanBodyView(native, title, start, terminal);
+    if (body) nativeViews.push(body);
+  }
+  const saved = native?.output_file;
+  if (hideEmpty && !failed && !script && !saved) {
+    if (!result) return null;
+    if (native) {
+      const hasContent = nativeHasAttachment || nativeViews.some(view => !view.plain || !!view.copy?.trim()) || (!nativeViews.length && !!nativeText);
+      if (!hasContent) return null;
+    }
+  }
   const shown: SectionView[] = [...nativeViews];
   if (scriptFirst && semanticScript) shown.unshift(semanticScript);
-  if (result) {
+  if (result && !(scriptFirst && rawNativeEmpty)) {
     const label = scriptFirst && !nativeViews.length ? "原生结果" : shown.length ? "原文" : heading;
-    const original = output.value ? resultView(output.value, label, start) : { label, body: output.placeholder };
-    shown.push({ ...original, id: "raw" });
+    const original: View = native ? resultView(native, label, shown.length ? null : start) : { label, body: output.placeholder };
+    if (!isDuplicatePlain(original, shown)) shown.push({ ...original, id: "raw" });
   }
   if (script) {
     const label = decoded ? "脚本原文" : "脚本输出";
-    if (semanticScript && !scriptFirst) shown.push(semanticScript);
-    const original = scriptOutput.value
-      ? resultView(scriptOutput.value, label)
+    if (semanticScript && !scriptFirst && !isDuplicatePlain(semanticScript, shown)) shown.push(semanticScript);
+    const original = scriptBlock
+      ? resultView(scriptBlock, label)
       : { label, body: scriptOutput.placeholder };
-    shown.push({ ...original, id: decoded ? "script-raw" : "script" });
+    if (!isDuplicatePlain(original, shown)) shown.push({ ...original, id: decoded ? "script-raw" : "script" });
   }
-  if (!shown.length) shown.push({ label: heading, body: message(status === "completed" || failed ? "无输出" : "等待结果") });
-  return <Section kind={failed ? "error" : "output"} title={heading} actions={actions} views={shown} />;
+  if (!shown.length) shown.push({ label: heading, body: message(status === "completed" || failed || status === "cancelled" ? "无输出" : "等待结果") });
+  return <Section kind={failed ? "error" : "output"} title={heading} actions={actions} views={shown}
+    note={saved && `完整输出另存在 ${shortPath(saved)}`} />;
 }

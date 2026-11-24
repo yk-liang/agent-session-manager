@@ -696,7 +696,17 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
         "type":"item_completed","turn_id":"compare",
         "item":{"type":"CommandExecution","id":"compare","command":"diff -u old new","status":"failed","exit_code":1,
             "aggregated_output":"--- old\n+++ new\n@@ -1 +1 @@\n-before\n+after\n"}}});
+    let multi_web = json!({"type":"event_msg", "ordinal":23, "timestamp":"2099-12-31T00:00:23Z", "payload":{
+        "type":"item_completed","turn_id":"web","started_at_ms":origin+22500,
+        "item":{"type":"Extension","kind":"web.search","id":"web-child","status":"completed","action":{"type":"search","queries":["alpha"]}}}});
+    let mismatched_web = json!({"type":"event_msg", "ordinal":26, "timestamp":"2099-12-31T00:00:26Z", "payload":{
+        "type":"item_completed","turn_id":"web-mismatch","started_at_ms":origin+25500,
+        "item":{"type":"Extension","kind":"web.search","id":"web-beta","status":"completed","action":{"type":"search","queries":["beta"]}}}});
+    let mismatched_patch = json!({"type":"event_msg", "ordinal":29, "timestamp":"2099-12-31T00:00:29Z", "payload":{
+        "type":"item_completed","turn_id":"patch-mismatch","started_at_ms":origin+28500,
+        "item":{"type":"FileChange","id":"patch-section-b","status":"completed","changes":{"src/same.ts":{"type":"update","unified_diff":"@@ -10,3 +10,3 @@\n fn second() {\n-  x = 1;\n+  x = 2;\n }\n"}}}}});
     let standalone_patch = format!("text(await tools.apply_patch({}));", json!("*** Begin Patch\n*** Add File: src/new.ts\n+export {};\n*** End Patch"));
+    let section_a_patch = format!("text(await tools.apply_patch({}));", json!("*** Begin Patch\n*** Update File: src/same.ts\n@@\n fn first() {\n-  x = 1;\n+  x = 2;\n }\n*** End Patch"));
     let batch = r#"const patch = String.raw`*** Begin Patch
 *** Update File: src/fixture.ts
 @@
@@ -719,6 +729,12 @@ text('tools.exec_command({cmd:"do not parse"})');"#;
         script("batch", "batch", 17, batch), output("batch", 18, "Script completed\nOutput:\nCombined stdout"),
         script("running", "async", 19, "text(await tools.write_stdin({session_id:42,chars:''}));"),
         output("running", 20, "Script running with cell ID g25"), comparison,
+        script("multi-web", "web", 22, r#"text(await tools.web__run({search_query:[{q:"alpha"}],time:[{utc_offset:"+00:00"}]}))"#),
+        multi_web, output("multi-web", 24, "Script completed\nOutput:\nok"),
+        script("web-alpha", "web-mismatch", 25, r#"text(await tools.web__run({search_query:[{q:"alpha"}]}))"#),
+        mismatched_web, output("web-alpha", 27, "Script completed\nOutput:\nok"),
+        script("patch-section-a", "patch-mismatch", 28, &section_a_patch),
+        mismatched_patch, output("patch-section-a", 30, "Script completed\nOutput:\nok"),
     ]);
     let view = read_session_mode(&root, "script-thread", ReadMode::View).unwrap();
     let blocks: Vec<_> = view.events.iter().filter_map(|event| event.pointer("/message/content/0")).collect();
@@ -744,13 +760,19 @@ text('tools.exec_command({cmd:"do not parse"})');"#;
     let wrapper = blocks.iter().find(|block| block["id"] == "batch").unwrap();
     let calls = wrapper["ops"][0]["calls"].as_array().unwrap();
     assert_eq!(calls.len(), 3);
-    assert_eq!(calls[0]["changes"][0]["path"], "src/fixture.ts");
-    assert!(calls[0]["changes"][0].get("hunks").is_none());
-    assert_eq!(calls[1]["shell"]["steps"][0]["path"], "skills/fixture/SKILL.md");
-    assert_eq!(calls[2]["shell"]["head"], "git status --short --branch");
-    assert_eq!(wrapper["ops"][0]["features"], json!(["output", "parallel"]));
-    assert_eq!(load(wrapper)["ops"][0]["calls"][0]["changes"][0]["hunks"][0]["lines"][1], "+const next = 2;");
+    assert_eq!(calls[0]["ops"][0]["path"], "src/fixture.ts");
+    assert!(calls[0]["ops"][0].get("hunks").is_none());
+    assert_eq!(calls[1]["ops"][0]["steps"][0]["path"], "skills/fixture/SKILL.md");
+    assert_eq!(calls[2]["ops"][0]["head"], "git status --short --branch");
+    assert_eq!(wrapper["ops"][0]["lead"], json!([0, 0]));
+    assert_eq!(wrapper["ops"][0]["features"], json!(["parallel"]));
+    assert_eq!(load(wrapper)["ops"][0]["calls"][0]["ops"][0]["hunks"][0]["lines"][1], "+const next = 2;");
     let running = blocks.iter().copied().find(|block| block["tool_use_id"] == "running").unwrap();
     assert_eq!(running["status"], "running");
     assert_eq!(load(running)["status"], "running");
+    assert!(blocks.iter().any(|block| block["id"] == "multi-web" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "web-alpha" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "web-beta" && block.get("script_result").is_none()));
+    assert!(blocks.iter().any(|block| block["id"] == "patch-section-a" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "patch-section-b" && block.get("script_result").is_none()));
 }

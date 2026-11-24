@@ -1,14 +1,15 @@
 import { useContext } from "react";
 import { Brain, FileOutput, ListCollapse } from "lucide-react";
-import { activityItems, browseSteps, errorSummary, isDenied, type ToolItem } from "../activity";
+import { activityItems, browseSteps, errorSummary, resultStatus, type ToolItem } from "../activity";
 import type { SessionBlock } from "../sessionContent";
-import { CommandCard, ExecCard, ScriptCard } from "./CommandCards";
+import { CommandCard, ScriptCard } from "./CommandCards";
+import { ExecCard } from "./ExecCard";
 import Collapsible from "./Collapsible";
 import { DetailState } from "./DetailState";
 import { browseTarget, BrowseCard, ChangeCard } from "./FileCards";
 import { LongText } from "./MessageParts";
 import { Status, TypeIcon } from "./OpCard";
-import { GenericToolCard, SemanticToolCard, SkillCard } from "./ToolCards";
+import { GenericToolCard, SemanticToolCard, SkillCard } from "./SemanticCards";
 import { ToolOutput } from "./ToolSections";
 import { WebFetchCard, WebSearchCard } from "./WebCards";
 
@@ -36,13 +37,14 @@ function ThinkingCard({ part }: { part: SessionBlock }) {
 
 /** 找不到调用的结果单独成卡。 */
 function OrphanResult({ part }: { part: SessionBlock }) {
-  const failed = !!part.content.is_error;
+  const status = resultStatus(part.content);
+  const failed = status === "error" || status === "denied";
   return <Collapsible id={part.key} className={`tool${failed ? " error" : ""}`} head={<>
     <TypeIcon icon={FileOutput} label="工具输出" />
-    <span className="collapsible-status"><Status status={failed ? isDenied(part.content) ? "denied" : "error" : undefined}
-      exit={part.content.exit_code} reason={failed ? errorSummary(part.content) : undefined} /></span>
+    <span className="collapsible-status"><Status status={status}
+      exit={part.content.exit_code} reason={failed || status === "cancelled" ? errorSummary(part.content) : undefined} /></span>
   </>}>
-    <ToolOutput result={part.content} status={failed ? "error" : undefined} />
+    <ToolOutput result={part.content} status={status} />
   </Collapsible>;
 }
 
