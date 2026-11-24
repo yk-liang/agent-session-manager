@@ -22,7 +22,8 @@ try {
       meta("b","dir-b","未归属乙","/tmp/task-b"),meta("named","dir-a","同目录有项目会话","/Users/demo/Documents/Codex/2026-10-16/task-a"),
       meta("manual","manual","手选目录会话","/Users/demo/Documents/Codex/manual")];
     const state={rows,ids:["a","b"],calls:[],deleted:[],missingPaths:[rows[0].cwd,rows[1].cwd]};window.__GROUP_TEST__=state;
-    window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
+    let callbacks=0;
+    window.__TAURI_INTERNALS__={transformCallback:()=>++callbacks,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
       if(command==="list_agents")return [{id:"codex",displayName:"Codex",installed:true,deletePolicy:"trash",supportsFork:false},
         {id:"qoder",displayName:"Qoder",installed:true,deletePolicy:"trash",supportsFork:false}];
@@ -42,9 +43,11 @@ try {
       if(command==="search_conversations")return {hits:args.query==="归组针"&&args.targets.some(t=>t.sessionId==="b")?
         [{sessionId:"b",projectDir:"dir-b",eventIndex:1,eventId:"hit-b",role:"assistant",snippet:"正文中的归组针，仅属于乙。"}]:[],skipped:0,cancelled:false};
       if(command==="cancel_conversation_search")return null;
-      if(command==="delete_session"){
-        if(!state.rows.some(s=>s.sessionId===args.sessionId&&s.projectDir===args.projectDir))throw Error("Wrong deletion identity");
-        state.deleted.push(structuredClone(args));state.rows=state.rows.filter(s=>!(s.sessionId===args.sessionId&&s.projectDir===args.projectDir));return null;
+      if(command==="delete_sessions"){
+        const matches=(s,t)=>s.sessionId===t.sessionId&&s.projectDir===t.projectDir;
+        if(!args.sessions.every(t=>state.rows.some(s=>matches(s,t))))throw Error("Wrong deletion identity");
+        state.deleted.push(...structuredClone(args.sessions));state.rows=state.rows.filter(s=>!args.sessions.some(t=>matches(s,t)));
+        return {removed:args.sessions,failures:[]};
       }
       throw Error(`Unexpected command: ${command}`);
     }};

@@ -1,4 +1,5 @@
-use super::{is_session_id, DeletionPlan, SessionMeta};
+use super::{is_session_id, SessionMeta};
+use crate::agents::deletion::TrashPlan;
 use crate::agents::{self, lineage::{Lineage, Node}, SessionLocation, TargetKind};
 use serde::Deserialize;
 use serde_json::Value;
@@ -275,7 +276,7 @@ pub(super) fn verified_logs(project: &Path, root_id: &str) -> Result<Vec<(String
         .collect()
 }
 
-pub(super) fn deletion_plan(project: &Path, root_id: &str, id: &str) -> Result<DeletionPlan, String> {
+pub(super) fn trash_plan(project: &Path, root_id: &str, id: &str) -> Result<TrashPlan, String> {
     let group = complete_children(project, root_id)?;
     if group.iter().any(|child| child.parent == Parent::Unknown) {
         return Err("无法确认项目内嵌套子会话的父子关系，已中止删除".into());
@@ -283,7 +284,7 @@ pub(super) fn deletion_plan(project: &Path, root_id: &str, id: &str) -> Result<D
     let members: HashMap<_, _> = group.iter().map(|child| (child.session_id(), child)).collect();
     let lineage = Lineage::new(group.iter().map(|child| child.node(None)));
     let target = child_id(root_id, id);
-    let mut plan = DeletionPlan::default();
+    let mut plan = TrashPlan::default();
     for session_id in lineage.subtree(&target)? {
         let (log, sidecar) = members[session_id].verify(project)?;
         plan.add_session(session_id.to_owned(), log);

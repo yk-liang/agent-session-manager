@@ -1,4 +1,4 @@
-use crate::agents::{self, lineage::{Lineage, Node}, SessionLocation, Subagent, TargetKind};
+use crate::agents::{self, deletion::TrashPlan, lineage::{Lineage, Node}, SessionLocation, Subagent, TargetKind};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -234,12 +234,12 @@ impl ProjectSessions {
     }
 
     /// 会话及其全部子会话的日志（父在前）。存储在它之下却无法归属的子会话日志会中止删除。
-    pub(super) fn deletion_targets(&self, id: &str) -> Result<Vec<(String, PathBuf)>, String> {
+    pub(super) fn trash_plan(&self, id: &str) -> Result<TrashPlan, String> {
         self.locate(id)?;
         if let Some(error) = self.directory_warnings.first() {
             return Err(error.clone());
         }
-        let mut targets = Vec::new();
+        let mut plan = TrashPlan::default();
         for id in self.lineage.subtree(id)? {
             let location = self.locate(id)?;
             if !location.embedded_id {
@@ -269,8 +269,8 @@ impl ProjectSessions {
                     return Err(format!("{target:?} 含无法解析的行，无法完成身份复核"));
                 }
             }
-            targets.push((id.to_owned(), target));
+            plan.add_session(id.to_owned(), target);
         }
-        Ok(targets)
+        Ok(plan)
     }
 }

@@ -7,6 +7,7 @@
 //! - 会话 ID 形如 ses_[0-9A-Za-z]+
 
 pub(crate) mod deferred;
+mod deletion;
 #[cfg(test)]
 mod event_tests;
 mod events;
@@ -23,6 +24,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use super::deletion::{Outcome, PreserveUsage};
 use super::lineage::{Lineage, Node};
 use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
 pub(crate) use message_meta::{client_id, model_id};
@@ -734,64 +736,14 @@ impl AgentSource for OpenCodeSource {
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<Value>, String> {
         search_events_at(&db_path(), meta)
     }
-    fn deletion_targets(&self, _: &str, _: &str) -> Result<Option<Vec<PathBuf>>, String> {
-        let path = db_path().canonicalize().map_err(|error| format!("无法定位 OpenCode 会话库：{error}"))?;
-        Ok(Some(vec![path]))
+    fn delete_sessions(
+        &self,
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        deletion::delete(&db_path(), sessions, preserve, outcome)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
-        if !is_valid_session_id(session_id) {
-            return Err("会话 ID 无效".into());
-        }
-        let path = db_path().canonicalize()
-            .map_err(|error| format!("无法定位 OpenCode 会话库：{error}"))?;
-        super::check_preserved_targets(std::slice::from_ref(&path), preserved)?;
-        let database_files = [path.clone(), super::scanning::sqlite_wal_path(&path)];
-        let revision = super::catalog_cache::revisions(&database_files).ok_or("无法核验 OpenCode 会话库版本")?;
-        let bin = super::find_executable("opencode")
-            .ok_or("找不到 opencode 可执行文件，请检查是否已安装")?;
-        let mut command = std::process::Command::new(&bin);
-        command.args(["session", "delete", session_id]).env("OPENCODE_DB", &path);
-        if let Some(data_root) = path.parent().and_then(|dir| {
-            dir.ends_with("opencode").then(|| dir.parent()).flatten()
-        }) {
-            command.env("XDG_DATA_HOME", data_root);
-        }
-        let help = std::process::Command::new(&bin).args(["session", "delete", "--help"])
-            .output().map_err(|error| format!("无法读取 OpenCode 删除命令选项：{error}"))?;
-        if !help.status.success() {
-            return Err("当前 OpenCode CLI 不支持会话删除".into());
-        }
-        if String::from_utf8_lossy(&help.stdout).lines().any(|line| line.trim_start().starts_with("--standalone ")) {
-            // 独立进程才能保证数据库路径生效，避免连接到已运行的其他实例。
-            command.arg("--standalone");
-        }
-        let db = open_db_scoped(&path, Some(session_id))?;
-        let (row, warnings) = session_row(&db, session_id)?;
-        if !warnings.is_empty() {
-            return Err(warnings.join("；"));
-        }
-        if project_id(&row) != project_dir {
-            return Err("OpenCode 会话所属项目已变化，请刷新列表后重试".into());
-        }
-        let subtree = deletion_subtree(&db, &row)?;
-        drop(db);
-        if super::catalog_cache::revisions(&database_files).as_ref() != Some(&revision) {
-            return Err("OpenCode 会话库在确认删除范围时发生变化，请重试".into());
-        }
-        let output = command
-            .output()
-            .map_err(|e| format!("无法运行 OpenCode（{}）： {e}", bin.display()))?;
-        let error = (!output.status.success()).then(|| format!(
-            "opencode session delete 失败：{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-        let remaining: std::collections::HashSet<_> = session_ids(&path)?.into_iter().collect();
-        let total = subtree.len();
-        let removed: Vec<_> = subtree.into_iter().filter(|session| !remaining.contains(&session.session_id)).collect();
-        let error = error.or_else(|| (removed.len() != total).then(|| "OpenCode CLI 未删除全部指定会话".into()));
-        Ok(super::SessionDeletion { removed, error })
-    }
-
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String> {
         Some(format!(
             "{} --session {}{}",
@@ -831,19 +783,6 @@ fn lineage(rows: &[SessionRow]) -> Lineage {
         super::SessionLocation { session_id: row.id.clone(), project_dir: project_id(row), cwd: row.directory.clone() },
         row.parent_id.clone(),
     )))
-}
-
-fn deletion_subtree(conn: &Connection, root: &SessionRow) -> Result<Vec<super::search::SessionRef>, String> {
-    let (rows, warnings) = load_session_rows(conn).split();
-    if !warnings.is_empty() {
-        return Err(warnings.join("；"));
-    }
-    let rows = rows.ok_or("无法读取 OpenCode 子会话关系")?;
-    let lineage = lineage(&rows);
-    lineage.subtree(&root.id)?.into_iter().map(|id| match lineage.location(id) {
-        Some(location) if is_valid_session_id(id) => Ok(location.session_ref()),
-        _ => Err(format!("OpenCode 子会话 {id} 的 ID 无效，无法确认删除范围")),
-    }).collect()
 }
 
 fn has_assistant_activity(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {

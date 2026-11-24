@@ -12,8 +12,9 @@ use serde_json::Value;
 #[cfg(test)]
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use super::deletion::TrashPlan;
 use super::{SessionDetail, SessionMeta};
 
 #[derive(Clone, Copy)]
@@ -525,43 +526,15 @@ fn read_transcript(path: &Path, project_dir: &str, opts: FamilyOptions) -> Resul
     })
 }
 
-/// 会话日志和同名状态目录一并移入废纸篓。
-pub fn delete_session(base: &Path, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<super::SessionDeletion, String> {
-    let plan = deletion_plan(base, project_dir, session_id)?;
-    super::check_preserved_targets(&plan.targets, preserved)?;
-    Ok(super::trash_session_files(project_dir, &plan.targets, plan.sessions))
-}
-
-/// 与实际删除共用校验和目标集合，供删除前用量保存使用。
-pub(crate) fn deletion_targets(
-    base: &Path,
-    project_dir: &str,
-    session_id: &str,
-) -> Result<Vec<PathBuf>, String> {
-    deletion_plan(base, project_dir, session_id).map(|plan| plan.targets)
-}
-
-#[derive(Default)]
-struct DeletionPlan {
-    targets: Vec<PathBuf>,
-    sessions: Vec<(String, PathBuf)>,
-}
-
-impl DeletionPlan {
-    fn add_session(&mut self, id: String, path: PathBuf) {
-        self.sessions.push((id, path.clone()));
-        self.targets.push(path);
-    }
-}
-
-fn deletion_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<DeletionPlan, String> {
+/// 会话日志和同名状态目录一并移入废纸篓；子会话只移走它自己的日志及子孙会话。
+pub(crate) fn trash_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<TrashPlan, String> {
     if !is_safe_name(project_dir) {
         return Err("项目目录名无效".into());
     }
     let dir = base.join(project_dir);
     let project = super::verify_within_root(base, &dir, super::TargetKind::Dir)?;
     if let Some((root_id, id)) = subagents::child_identity(session_id) {
-        return subagents::deletion_plan(&project, root_id, id);
+        return subagents::trash_plan(&project, root_id, id);
     }
     if !is_session_id(session_id) {
         return Err("会话 ID 无效".into());
@@ -573,7 +546,7 @@ fn deletion_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<Del
     if !jsonl_present && !state_present {
         return Err("未找到会话文件".into());
     }
-    let mut plan = DeletionPlan::default();
+    let mut plan = TrashPlan::default();
     if jsonl_present {
         plan.add_session(session_id.to_owned(), super::verify_within_root(
             &project,
@@ -775,14 +748,14 @@ mod tests {
             assert_eq!(relation.project_owner.unwrap().session_id, "aaaa");
             assert_eq!(detail.events.len(), 1);
         }
-        let targets = deletion_targets(temp.path(), "project", "subagent:aaaa:worker").unwrap();
+        let targets = trash_plan(temp.path(), "project", "subagent:aaaa:worker").unwrap().targets;
         assert_eq!(targets.len(), 3);
         assert!(targets.contains(&worker.canonicalize().unwrap()));
         assert!(targets.contains(&reviewer.canonicalize().unwrap()));
         assert!(!targets.contains(&project.join("aaaa.jsonl").canonicalize().unwrap()));
-        assert_eq!(deletion_targets(temp.path(), "project", "aaaa").unwrap().len(), 2);
+        assert_eq!(trash_plan(temp.path(), "project", "aaaa").unwrap().targets.len(), 2);
         fs::write(&reviewer, r#"{"type":"assistant","sessionId":"bbbb","agentId":"reviewer","message":{"content":"Review"}}"#).unwrap();
-        assert!(deletion_targets(temp.path(), "project", "aaaa").unwrap_err().contains("身份不符"));
+        assert!(trash_plan(temp.path(), "project", "aaaa").unwrap_err().contains("身份不符"));
         fs::remove_file(project.join("aaaa.jsonl")).unwrap();
         let relation = read_session(temp.path(), "project", "subagent:aaaa:worker", CLAUDE_OPTS).unwrap().meta.subagent.unwrap();
         assert!(relation.orphan);
@@ -1004,7 +977,7 @@ mod tests {
         let jsonl = proj.join("aaaa-1111.jsonl");
         fs::write(&jsonl, r#"{"type":"user","sessionId":"bbbb-2222"}"#).unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111", None).unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("不一致"), "{err}");
         assert!(jsonl.exists(), "中止后文件必须完好");
     }
@@ -1018,7 +991,7 @@ mod tests {
             let jsonl = proj.join(format!("{id}.jsonl"));
             fs::write(&jsonl, contents).unwrap();
             assert!(read_session(tmp.path(), "-tmp-proj", id, CLAUDE_OPTS).unwrap().events.is_empty());
-            assert_eq!(deletion_targets(tmp.path(), "-tmp-proj", id).unwrap(), [jsonl.canonicalize().unwrap()]);
+            assert_eq!(trash_plan(tmp.path(), "-tmp-proj", id).unwrap().targets, [jsonl.canonicalize().unwrap()]);
         }
     }
 
@@ -1030,7 +1003,7 @@ mod tests {
         let jsonl = proj.join("aaaa-1111.jsonl");
         fs::write(&jsonl, "不是合法 JSON").unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111", None).unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("无法解析"), "{err}");
         assert!(jsonl.exists(), "损坏文件不得删除");
     }
@@ -1046,7 +1019,7 @@ mod tests {
         let state_dir = proj.join("aaaa-1111");
         fs::create_dir_all(&state_dir).unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111", None).unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("符号链接"), "{err}");
         assert!(state_dir.exists(), "不得发生部分删除：状态目录必须完好");
         assert!(jsonl.symlink_metadata().is_ok(), "悬空链接本身也不得被动");

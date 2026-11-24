@@ -177,8 +177,8 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
     assert_eq!(review.events.len(), 1);
     assert!(catalog.sessions.iter().find(|row| row.session_id == "ses_orphan").unwrap().subagent.as_ref().unwrap().orphan);
     let db = open_db(&path).unwrap();
-    let root = session_row(&db, "ses_v2").unwrap().0;
-    let ids: Vec<_> = deletion_subtree(&db, &root).unwrap().into_iter().map(|row| row.session_id).collect();
+    let root = crate::agents::search::SessionRef::from(meta);
+    let ids: Vec<_> = super::deletion::read_tree(&db, &root).unwrap().members.into_iter().map(|row| row.session_id).collect();
     assert_eq!(ids, ["ses_v2", "ses_worker", "ses_reviewer"]);
     assert_eq!(meta.title.as_deref(), Some("First v2 prompt"));
     assert_eq!((meta.real_user_count, meta.assistant_text_count), (2, 2));

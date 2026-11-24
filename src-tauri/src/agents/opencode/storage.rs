@@ -5,7 +5,7 @@
 use rusqlite::{params_from_iter, Connection};
 use std::collections::HashMap;
 
-fn exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+pub(super) fn exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name=?1 AND type IN ('table','view'))",
         [name],

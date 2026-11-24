@@ -487,9 +487,6 @@ fn search_positions_stay_aligned_after_reasoning_and_tool_parts_are_inserted() {
         fn read_session_view(&self, _: &str, id: &str) -> Result<SessionDetail, String> {
             read_session_mode_at(&self.0, id, true)
         }
-        fn delete_session(&self, _: &str, _: &str, _: Option<&[std::path::PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
-            Err("Read-only fixture".into())
-        }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {
             None
         }

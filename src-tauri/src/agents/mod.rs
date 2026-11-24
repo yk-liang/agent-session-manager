@@ -8,6 +8,7 @@ pub(crate) mod antigravity;
 pub mod claude;
 pub mod claude_family;
 pub mod codex;
+pub mod deletion;
 pub mod ids;
 pub(crate) mod lineage;
 pub mod opencode;
@@ -25,6 +26,7 @@ pub use scanning::{
     degraded_message, for_each_jsonl_line, open_jsonl, read_dir_warned, ParseOutcome,
 };
 
+use deletion::{DeletePolicy, Outcome, PreserveUsage};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -168,38 +170,6 @@ pub struct SessionDetail {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SessionDeletion {
-    pub removed: Vec<search::SessionRef>,
-    pub error: Option<String>,
-}
-
-pub(super) fn check_preserved_targets(paths: &[PathBuf], preserved: Option<&[PathBuf]>) -> Result<(), String> {
-    if preserved.is_some_and(|expected| paths != expected) {
-        return Err("会话文件已变化，请重新确认后删除".into());
-    }
-    Ok(())
-}
-
-pub(super) fn trash_session_files(
-    project_dir: &str,
-    targets: &[PathBuf],
-    sources: Vec<(String, PathBuf)>,
-) -> SessionDeletion {
-    let result = trash::delete_all(targets.iter().rev());
-    let mut absent = std::collections::BTreeMap::new();
-    for (id, path) in sources {
-        let missing = path.symlink_metadata().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        *absent.entry(id).or_insert(true) &= missing;
-    }
-    SessionDeletion {
-        removed: absent.into_iter().filter(|(_, missing)| *missing)
-            .map(|(session_id, _)| search::SessionRef { session_id, project_dir: project_dir.to_owned() })
-            .collect(),
-        error: result.err().map(|error| format!("移入废纸篓失败：{error}")),
-    }
-}
-
 #[derive(Serialize)]
 pub struct ArchiveChange {
     pub session: search::SessionRef,
@@ -228,17 +198,6 @@ pub struct SessionGroupHint {
     pub project_dir: String,
     pub session_id: String,
     pub root: Option<String>,
-}
-
-/// 会话删除策略，决定可用操作和恢复方式。
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum DeletePolicy {
-    /// 移入系统废纸篓，可还原
-    Trash,
-    /// 永久删除（如委托官方 CLI 直接改库），不可还原
-    Permanent,
-    ReadOnly,
 }
 
 /// 把 (会话, 项目展示路径) 列表聚合成 Catalog：
@@ -410,20 +369,17 @@ pub trait AgentSource: Send + Sync {
         self.read_session(&meta.project_dir, &meta.session_id)
             .map(|mut detail| detail.events.split_off(detail.inherited))
     }
-    fn delete_session(&self, _project_dir: &str, _session_id: &str, _preserved: Option<&[PathBuf]>) -> Result<SessionDeletion, String> {
+    /// 删除一批会话及其子会话；无法删除的会话记入 outcome，Err 表示整批都未删除。
+    fn delete_sessions(
+        &self,
+        _sessions: &[search::SessionRef],
+        _preserve: &mut dyn PreserveUsage,
+        _outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
         Err("该 Agent 的会话为只读".into())
     }
     fn set_session_archived(&self, _: &str, _: &str, _: bool) -> Result<(), String> {
         Err("该 Agent 不支持归档会话".into())
-    }
-    /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
-    /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
-    fn deletion_targets(
-        &self,
-        _project_dir: &str,
-        _session_id: &str,
-    ) -> Result<Option<Vec<PathBuf>>, String> {
-        Ok(None)
     }
     /// 生成恢复会话的 shell 命令；None 表示该 Agent 不支持恢复
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String>;
@@ -638,9 +594,6 @@ mod tests {
             Ok(assemble_catalog(vec![]))
         }
         fn read_session(&self, _: &str, _: &str) -> Result<SessionDetail, String> {
-            unreachable!()
-        }
-        fn delete_session(&self, _: &str, _: &str, _: Option<&[std::path::PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
             unreachable!()
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {

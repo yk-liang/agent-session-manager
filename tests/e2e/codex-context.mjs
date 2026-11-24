@@ -72,11 +72,11 @@ try {
         detail.meta.archived = archived.has(args.sessionId);
         return detail;
       }
-      if (cmd === 'delete_session' && window.__HIERARCHY__) {
+      if (cmd === 'delete_sessions' && window.__HIERARCHY__) {
         deleted = new Set(['main', 'child', 'leaf']);
         const removed = window.__HIERARCHY_ROWS__.filter(row => deleted.has(row.sessionId))
           .map(({ sessionId, projectDir }) => ({ sessionId, projectDir }));
-        return { removed, error: null };
+        return { removed, failures: [] };
       }
       if (cmd === 'set_session_archived') {
         if (args.archived) archived.add(args.sessionId);

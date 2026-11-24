@@ -74,9 +74,6 @@ impl AgentSource for Fixture {
         }
         claude_family::read_session(&self.dir.path().join("projects"), project, id, OPTIONS)
     }
-    fn delete_session(&self, _: &str, _: &str, _: Option<&[std::path::PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
-        panic!("Search must never delete files")
-    }
     fn resume_command(&self, _: &str, _: bool) -> Option<String> {
         None
     }

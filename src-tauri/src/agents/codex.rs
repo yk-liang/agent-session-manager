@@ -8,7 +8,7 @@ mod context;
 #[cfg(test)]
 mod context_tests;
 pub(crate) mod deferred;
-pub(crate) mod deletion;
+mod deletion;
 mod exec;
 mod history;
 #[cfg(test)]
@@ -29,7 +29,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::{AgentSource, CatalogFilter, ConfigFile, DeletePolicy, SessionDetail, SessionMeta};
+use super::deletion::{DeletePolicy, Outcome, PreserveUsage};
+use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
 use app_server::ThreadAction;
 pub use thread::ThreadMeta;
 use thread::ThreadHeader;
@@ -45,6 +46,13 @@ fn codex_home() -> PathBuf {
 
 fn sessions_root() -> PathBuf {
     codex_home().join("sessions")
+}
+
+/// 只读的线程历史库，用量统计从中补充 rollout 未记录的模型调用失败。
+pub(crate) const HISTORY_DB: &str = "thread_history_1.sqlite";
+
+pub(crate) fn history_database(home: &Path) -> PathBuf {
+    sqlite_home(home).join(HISTORY_DB)
 }
 
 pub(crate) fn sqlite_home(home: &Path) -> PathBuf {
@@ -914,7 +922,15 @@ impl AgentSource for CodexSource {
         archived: bool,
     ) -> Result<(), String> {
         let action = if archived { ThreadAction::Archive } else { ThreadAction::Unarchive };
-        app_server::update(action, project_dir, session_id)
+        app_server::update(&codex_home(), action, project_dir, session_id)
+    }
+    fn delete_sessions(
+        &self,
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        deletion::delete(&codex_home(), sessions, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         if !valid_thread_id(session_id) {

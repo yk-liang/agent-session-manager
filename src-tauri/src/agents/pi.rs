@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::deletion::{Outcome, PreserveUsage, TrashPlan};
 use super::{AgentSource, ConfigFile, SessionDetail, SessionMeta};
 use storage::ProjectSessions;
 use transcript::parse;
@@ -53,15 +54,8 @@ fn read_session_in(root: &Path, project_dir: &str, session_id: &str) -> Result<S
     Ok(SessionDetail { warnings, meta: parsed.meta, events: parsed.events, inherited: parsed.inherited })
 }
 
-fn deletion_targets_in(root: &Path, project_dir: &str, session_id: &str) -> Result<Vec<(String, PathBuf)>, String> {
-    ProjectSessions::open(root, project_dir, session_id)?.deletion_targets(session_id)
-}
-
-fn delete_session_in(root: &Path, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<super::SessionDeletion, String> {
-    let sources = deletion_targets_in(root, project_dir, session_id)?;
-    let paths: Vec<_> = sources.iter().map(|(_, path)| path.clone()).collect();
-    super::check_preserved_targets(&paths, preserved)?;
-    Ok(super::trash_session_files(project_dir, &paths, sources))
+fn trash_plan_in(root: &Path, project_dir: &str, session_id: &str) -> Result<TrashPlan, String> {
+    ProjectSessions::open(root, project_dir, session_id)?.trash_plan(session_id)
 }
 
 pub(crate) fn transcript_session_id(path: &Path) -> Result<String, String> {
@@ -156,12 +150,16 @@ impl AgentSource for PiSource {
         }
         Ok(p.events.split_off(p.inherited))
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
-        delete_session_in(&sessions_dir(), project_dir, session_id, preserved)
-    }
-    fn deletion_targets(&self, project_dir: &str, session_id: &str) -> Result<Option<Vec<PathBuf>>, String> {
-        let targets = deletion_targets_in(&sessions_dir(), project_dir, session_id)?;
-        Ok(Some(targets.into_iter().map(|(_, path)| path).collect()))
+    fn delete_sessions(
+        &self,
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        let root = sessions_dir();
+        super::deletion::trash(sessions, |session| {
+            trash_plan_in(&root, &session.project_dir, &session.session_id)
+        }, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         Some(format!(
@@ -248,7 +246,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = delete_session_in(tmp.path(), "proj", "fallback123", None).unwrap_err();
+        let err = trash_plan_in(tmp.path(), "proj", "fallback123").unwrap_err();
         assert!(err.contains("内嵌 id"), "{err}");
         assert!(file.exists(), "不得基于文件名推导执行删除");
     }
@@ -269,7 +267,7 @@ mod tests {
         )
         .unwrap();
 
-        let targets = deletion_targets_in(tmp.path(), "proj", "good123").unwrap();
+        let targets = trash_plan_in(tmp.path(), "proj", "good123").unwrap().sessions;
         assert_eq!(targets, [("good123".to_owned(), file.canonicalize().unwrap())], "内嵌 id 的会话应可正常删除");
     }
 
@@ -307,7 +305,7 @@ mod tests {
         assert_eq!(db.events[0]["message"]["content"], "项目B的问题");
 
         // 删除按项目定位：删 A 只动 A，不得误删项目 B 的同名会话
-        let targets = deletion_targets_in(tmp.path(), &proj_a, "dup").unwrap();
+        let targets = trash_plan_in(tmp.path(), &proj_a, "dup").unwrap().sessions;
         assert_eq!(targets, [("dup".to_owned(), file_a.canonicalize().unwrap())]);
     }
 
@@ -337,7 +335,7 @@ mod tests {
 
         let detail = read_session_in(tmp.path(), "proj", "safe").unwrap();
         assert_eq!(detail.events[0]["message"]["content"], "完整会话");
-        let targets = deletion_targets_in(tmp.path(), "proj", "safe").unwrap();
+        let targets = trash_plan_in(tmp.path(), "proj", "safe").unwrap().sessions;
         assert_eq!(targets, [("safe".to_owned(), project.join("one_safe.jsonl").canonicalize().unwrap())]);
     }
 
@@ -409,7 +407,7 @@ mod tests {
         }
 
         let read_error = read_session_in(tmp.path(), "proj", "dup").err();
-        let delete_error = deletion_targets_in(tmp.path(), "proj", "dup").err();
+        let delete_error = trash_plan_in(tmp.path(), "proj", "dup").err();
 
         assert!(
             read_error
@@ -445,7 +443,7 @@ mod tests {
 
         let detail = read_session_in(tmp.path(), "proj", "safe").unwrap();
         assert_eq!(detail.events[0]["message"]["content"], "hello");
-        let err = deletion_targets_in(tmp.path(), "proj", "safe").unwrap_err();
+        let err = trash_plan_in(tmp.path(), "proj", "safe").unwrap_err();
         assert!(err.contains("无法读取"), "扫描不完整时不得删除任何文件：{err}");
     }
 
@@ -468,7 +466,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = delete_session_in(tmp.path(), "proj", "corrupt1", None).unwrap_err();
+        let err = trash_plan_in(tmp.path(), "proj", "corrupt1").unwrap_err();
         assert!(err.contains("无法解析"), "{err}");
         assert!(file.exists(), "部分损坏的会话不得删除");
     }
@@ -510,7 +508,7 @@ mod tests {
         assert!(user_fork.meta.subagent.is_none() && user_fork.inherited == 0);
         let custom_relation = read_session_in(tmp.path(), "project", "custom").unwrap().meta.subagent.unwrap();
         assert_eq!((custom_relation.parent_id.as_deref(), custom_relation.orphan), (Some("parent"), false), "custom session directories keep the recorded parent");
-        let targets = deletion_targets_in(tmp.path(), "project", "parent").unwrap();
+        let targets = trash_plan_in(tmp.path(), "project", "parent").unwrap().sessions;
         assert_eq!(targets, [("parent", parent), ("child", child), ("leaf", leaf), ("custom", custom)].map(|(id, path)| (id.to_owned(), path.canonicalize().unwrap())));
         fs::remove_file(parent).unwrap();
         let orphan = read_session_in(tmp.path(), "project", "child").unwrap().meta.subagent.unwrap();

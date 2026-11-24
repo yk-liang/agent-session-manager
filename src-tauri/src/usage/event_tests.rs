@@ -414,7 +414,7 @@ fn codex_terminal_errors_merge_with_history_and_ignore_unattributed_turns() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = dir.path().join("sessions");
     let rollout = sessions.join("rollout.jsonl");
-    let history = dir.path().join(codex::failures::DATABASE);
+    let history = dir.path().join(crate::agents::codex::HISTORY_DB);
     let t = 1_790_000_000_000i64;
     let connection_error = json!({"message":"response failed","codex_error_info":{"http_connection_failed":{"http_status_code":503}}});
     let mut lines = codex_lines(t);

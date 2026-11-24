@@ -1,6 +1,7 @@
 //! Claude Code 项目目录与 JSONL 会话。
 
 use super::claude_family::{self, FamilyOptions};
+use super::deletion::{Outcome, PreserveUsage};
 use super::{shell_quote, AgentSource, Catalog, ConfigFile, SessionDetail};
 use std::path::{Path, PathBuf};
 
@@ -116,21 +117,16 @@ impl AgentSource for ClaudeSource {
         let (root, name) = project_location(&meta.project_dir)?;
         claude_family::search_events(&root, name, meta, OPTS)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str, preserved: Option<&[PathBuf]>) -> Result<crate::agents::SessionDeletion, String> {
-        let (root, name) = project_location(project_dir)?;
-        let mut result = claude_family::delete_session(&root, name, session_id, preserved)?;
-        for target in &mut result.removed {
-            target.project_dir = project_dir.to_owned();
-        }
-        Ok(result)
-    }
-    fn deletion_targets(
+    fn delete_sessions(
         &self,
-        project_dir: &str,
-        session_id: &str,
-    ) -> Result<Option<Vec<PathBuf>>, String> {
-        let (root, name) = project_location(project_dir)?;
-        claude_family::deletion_targets(&root, name, session_id).map(Some)
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        super::deletion::trash(sessions, |session| {
+            let (root, name) = project_location(&session.project_dir)?;
+            claude_family::trash_plan(&root, name, &session.session_id)
+        }, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         Some(format!(

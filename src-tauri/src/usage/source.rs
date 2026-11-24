@@ -62,7 +62,7 @@ impl<'a> Source<'a> {
 
     pub(super) fn is_file_root(self, path: &Path) -> bool {
         matches!(self, Self::JsonLines("codex"))
-            && path.file_name().is_some_and(|name| name == failures::DATABASE)
+            && path.file_name().is_some_and(|name| name == crate::agents::codex::HISTORY_DB)
     }
 
     fn accepts(self, name: &str) -> bool {

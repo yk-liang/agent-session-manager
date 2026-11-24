@@ -361,28 +361,24 @@ async fn read_session(
 }
 
 #[tauri::command]
-async fn delete_session(
+async fn delete_sessions(
     agent: String,
-    project_dir: String,
-    session_id: String,
-) -> Result<agents::SessionDeletion, String> {
+    sessions: Vec<agents::search::SessionRef>,
+    progress: tauri::ipc::Channel<usize>,
+) -> Result<agents::deletion::SessionDeletion, String> {
     run_backend(move || {
-        let source = agents::find_source(&agent)?;
-        if source.delete_policy() == agents::DeletePolicy::ReadOnly {
-            return Err("该 Agent 的会话为只读".into());
+        let report = |settled| {
+            let _ = progress.send(settled);
+        };
+        let mut outcome = agents::deletion::Outcome::new(&sessions, &report);
+        let result = agents::find_source(&agent).and_then(|source| {
+            let mut usage = usage::preserve_for_deletion(&agent)?;
+            source.delete_sessions(&sessions, &mut usage, &mut outcome)
+        });
+        if let Err(error) = result {
+            outcome.fail_rest(&error);
         }
-        if agent == "codex" {
-            let home = source.data_dir().ok_or("缺少 Codex 数据目录")?;
-            let plan = agents::codex::deletion::Plan::for_session(&home, &project_dir, &session_id)?;
-            let failure_history = usage::codex_failure_database(&home);
-            return plan.run(&failure_history, &|files, validate, mutate| {
-                usage::preserve_codex_deletion(files, validate, mutate)
-            });
-        }
-        let targets = source.deletion_targets(&project_dir, &session_id)?;
-        usage::preserve_before_delete(&agent, targets.as_deref(), || {
-            source.delete_session(&project_dir, &session_id, targets.as_deref())
-        })
+        Ok(outcome.finish())
     })
     .await
 }
@@ -642,7 +638,7 @@ pub fn run() {
             search_conversations,
             cancel_conversation_search,
             read_session,
-            delete_session,
+            delete_sessions,
             set_session_archived,
             resume_command,
             resume_in_terminal,

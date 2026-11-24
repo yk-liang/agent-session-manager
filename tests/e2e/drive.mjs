@@ -160,7 +160,6 @@ const mock = {
   list_profiles: [
     { name: "工作", agent: "qoder", createdAt: Date.now(), files: [] },
   ],
-  delete_session: null,
   save_profile: { name: "test", agent: "qoder", createdAt: Date.now(), files: [] },
   apply_profile: null,
   update_config_file: null,
@@ -228,21 +227,28 @@ const initScript = `
         }
         return structuredClone(mock.catalog);
       }
-      if (cmd === "delete_session" && window.__CATALOG_BY_AGENT__[args?.agent]) {
-        if (window.__HOLD_DELETES__) {
-          await new Promise((resolve) => window.__PENDING_DELETES__.push(resolve));
-        }
-        const error = window.__DELETE_FAILURES__[JSON.stringify([args.agent, args.projectDir, args.sessionId])];
-        if (error) throw new Error(error);
+      if (cmd === "delete_sessions") {
         const catalog = window.__CATALOG_BY_AGENT__[args.agent];
-        if (!catalog.sessions.some((s) => s.projectDir === args.projectDir && s.sessionId === args.sessionId)) {
-          throw new Error("mock session not found");
+        if (!catalog) return { removed: args.sessions, failures: [] };
+        const result = { removed: [], failures: [] };
+        for (const [index, session] of args.sessions.entries()) {
+          if (window.__HOLD_DELETES__) {
+            await new Promise((resolve) => window.__PENDING_DELETES__.push(resolve));
+          }
+          const same = (s) => s.projectDir === session.projectDir && s.sessionId === session.sessionId;
+          const error = window.__DELETE_FAILURES__[JSON.stringify([args.agent, session.projectDir, session.sessionId])]
+            ?? (catalog.sessions.some(same) ? null : "mock session not found");
+          if (error) result.failures.push({ session, error });
+          else {
+            catalog.sessions = catalog.sessions.filter((s) => !same(s));
+            result.removed.push(session);
+          }
+          args.progress.onmessage(index + 1);
         }
-        catalog.sessions = catalog.sessions.filter((s) => s.projectDir !== args.projectDir || s.sessionId !== args.sessionId);
         catalog.projects = catalog.projects.map((p) => ({
           ...p, sessionCount: catalog.sessions.filter((s) => s.projectDir === p.dirName).length,
         })).filter((p) => p.sessionCount > 0);
-        return null;
+        return result;
       }
       if (cmd === "list_profiles" && args && args.agent !== "qoder") {
         return [];
@@ -441,7 +447,7 @@ await page.click(".detail-actions button.danger");
 await page.waitForSelector(".modal");
 await page.click(".modal-actions button.danger");
 await page.waitForTimeout(300);
-console.log("STEP8 confirm triggers delete_session:", invokeLog.includes("delete_session") ? "OK" : "FAILED");
+console.log("STEP8 confirm triggers delete_sessions:", invokeLog.includes("delete_sessions") ? "OK" : "FAILED");
 const toastText = (await page.locator(".toast").first().textContent()) ?? "";
 const toastOk = expectTrash ? toastText.includes("移入废纸篓") : toastText.includes("已删除");
 console.log("STEP9 toast shown:", toastOk ? `OK (${toastText})` : `FAILED (${toastText})`);
@@ -564,10 +570,10 @@ await page.getByRole("button", { name: "全选结果", exact: true }).click();
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 assert.equal(await page.locator(".batch-targets li").count(), 1);
 assert.ok((await page.locator(".batch-targets").textContent()).includes("保留的会话"));
-const beforeCancelledDelete = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
+const beforeCancelledDelete = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length);
 await page.keyboard.press("Escape");
 assert.equal(await page.locator(".modal").count(), 0);
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), beforeCancelledDelete);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length), beforeCancelledDelete);
 await page.locator('.search-box input[type="search"]').fill("");
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
 await page.getByRole("button", { name: "全选结果", exact: true }).click();
@@ -598,18 +604,18 @@ assert.equal(await page.locator(".batch-targets li").count(), 3);
 assert.ok((await page.locator(".modal-body").textContent()).includes("已选 3 项，每项包含所列会话及其所有子会话。"));
 assert.ok((await page.locator(".modal-body").textContent()).includes(permanentDelete ? "无法恢复" : "废纸篓还原"));
 await page.screenshot({ path: `${artifactDir}/qsm-batch-confirm-${engine}.png` });
-const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length);
+const batchStart = await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length);
 const scansBeforeBatch = await page.evaluate(() => window.__CATALOG_CALLS__);
 await page.evaluate(() => { window.__HOLD_BATCH_GUARD__ = true; });
 await page.locator(".modal-actions .danger").click();
 await page.waitForFunction(() => window.__BATCH_GUARD_START__);
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_sessions").length), batchStart);
 await page.evaluate(() => {
   window.__BATCH_GUARD_START__.reject(new Error("mock guard failure"));
   window.__BATCH_GUARD_START__ = null;
 });
 await page.getByRole("status").filter({ hasText: "无法启用批量删除保护" }).waitFor();
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_sessions").length), batchStart);
 assert.equal(await page.locator(".session-card input:checked").count(), 3);
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
 const guardedBatchStart = await page.evaluate(() => window.__INVOKE_LOG__.length);
@@ -621,7 +627,7 @@ await page.evaluate(() => {
   confirm.click();
 });
 await page.waitForFunction(() => window.__BATCH_GUARD_START__);
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_session").length), batchStart);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter(x => x.cmd === "delete_sessions").length), batchStart);
 assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true }))), false);
 await page.evaluate(() => {
   window.__CONFIG_TEST__.emit("config-exit-requested");
@@ -631,7 +637,7 @@ await page.evaluate(() => {
 });
 assert.equal(await page.evaluate(() => window.__CONFIG_TEST__.exitCount), 0);
 await page.waitForFunction(() => window.__PENDING_DELETES__.length === 1);
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), batchStart + 1);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length), batchStart + 1);
 const progressDialog = page.getByRole("dialog", { name: "正在删除会话" });
 const deletionBar = progressDialog.getByRole("progressbar", { name: "批量删除进度" });
 await deletionBar.waitFor({ timeout: 3000 });
@@ -665,12 +671,14 @@ await agentDuringDelete.evaluate(button => {
 });
 assert.equal(await page.getByRole("listbox", { name: "Agent", exact: true }).count(), 0);
 assert.equal(await agentDuringDelete.getAttribute("value"), "qoder");
+const progressReaches = (value) => page.waitForFunction((value) => window.__PENDING_DELETES__.length === 1
+  && document.querySelector('progress[aria-label="批量删除进度"]')?.getAttribute("value") === value, value);
 await page.evaluate(() => window.__PENDING_DELETES__.shift()());
-await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 2 && window.__PENDING_DELETES__.length === 1, batchStart);
-assert.equal(await deletionBar.getAttribute("value"), "1");
+await progressReaches("1");
 await page.evaluate(() => window.__PENDING_DELETES__.shift()());
-await page.waitForFunction((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length === before + 3 && window.__PENDING_DELETES__.length === 1, batchStart);
-assert.equal(await deletionBar.getAttribute("value"), "2", "failed attempts count toward progress");
+await progressReaches("2");
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length), batchStart + 1,
+  "the whole selection is deleted in one backend call, failed sessions included");
 await page.evaluate(() => {
   window.__FAIL_NEXT_CATALOG__ = true;
   window.__HOLD_DELETES__ = false;
@@ -679,9 +687,9 @@ await page.evaluate(() => {
 await page.locator(".batch-failures", { hasText: "mock permission denied" }).waitFor();
 await progressDialog.waitFor({ state: "detached" });
 const guardedOperations = await page.evaluate((before) => window.__INVOKE_LOG__.slice(before)
-  .filter(x => x.cmd === "set_delete_guard" || x.cmd === "delete_session")
-  .map(x => x.cmd === "delete_session" ? x.cmd : x.args.active), guardedBatchStart);
-assert.deepEqual(guardedOperations, [true, "delete_session", "delete_session", "delete_session", false]);
+  .filter(x => x.cmd === "set_delete_guard" || x.cmd === "delete_sessions")
+  .map(x => x.cmd === "delete_sessions" ? x.cmd : x.args.active), guardedBatchStart);
+assert.deepEqual(guardedOperations, [true, "delete_sessions", false]);
 assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true }))), true);
 await page.getByRole("alert", { name: "无法读取会话列表", exact: true })
   .locator(".read-error-summary", { hasText: "mock catalog refresh failure" }).waitFor();
@@ -689,12 +697,13 @@ assert.equal(await page.locator(".session-card").count(), 2);
 assert.equal(await page.locator(".session-card input:checked").count(), 1);
 assert.ok((await page.locator(".sidebar-projects-header").textContent()).includes("2 个会话"));
 assert.equal(await page.evaluate(() => window.__CATALOG_CALLS__), scansBeforeBatch + 1);
-const attemptedBatch = await page.evaluate((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").slice(before).map((x) => x.args), batchStart);
-assert.deepEqual(attemptedBatch, [
-  { agent: "qoder", projectDir: "project-a", sessionId: "shared-id" },
-  { agent: "qoder", projectDir: "project-a", sessionId: "will-fail" },
-  { agent: "qoder", projectDir: "project-b", sessionId: "shared-id" },
-]);
+const attemptedBatch = await page.evaluate((before) => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").slice(before)
+  .map(({ args: { agent, sessions } }) => ({ agent, sessions })), batchStart);
+assert.deepEqual(attemptedBatch, [{ agent: "qoder", sessions: [
+  { projectDir: "project-a", sessionId: "shared-id" },
+  { projectDir: "project-a", sessionId: "will-fail" },
+  { projectDir: "project-b", sessionId: "shared-id" },
+] }]);
 await page.screenshot({ path: `${artifactDir}/qsm-batch-partial-${engine}.png` });
 await page.evaluate(() => { window.__DELETE_FAILURES__ = {}; });
 await page.getByRole("button", { name: "删除所选", exact: true }).click();
@@ -703,7 +712,7 @@ await page.locator(".modal-actions .danger").click();
 await page.waitForFunction(() => document.querySelectorAll(".session-card").length === 1 && !document.querySelector(".batch-failures"));
 assert.ok((await page.locator(".session-card").textContent()).includes("保留的会话"));
 assert.equal(await page.locator(".session-card input:checked").count(), 0);
-assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_session").length), batchStart + 4);
+assert.equal(await page.evaluate(() => window.__INVOKE_LOG__.filter((x) => x.cmd === "delete_sessions").length), batchStart + 2);
 assert.ok(await page.getByRole("button", { name: "删除所选", exact: true }).isDisabled());
 console.log("STEP13b modal batch deletion progress, duplicate-submit protection, partial failure and retry: OK");
 

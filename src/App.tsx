@@ -24,7 +24,7 @@ import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
 import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
 import { useUiPreference } from "./useUiPreference";
 import type { SessionReading } from "./sessionContent";
-import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta, SessionRef } from "./types";
+import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
 const NO_AGENTS: AgentInfo[] = [];
@@ -65,6 +65,7 @@ export default function App() {
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
   const mutationRunning = useRef(false);
   const deleting = useRef(false);
+  const deleteRun = useRef(0);
   const batchDeleteProgress = operation?.kind === "delete" ? operation.progress : null;
   const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
@@ -464,27 +465,26 @@ export default function App() {
     const useNativeGuard = isTauri();
     mutationRunning.current = true;
     deleting.current = true;
+    const run = ++deleteRun.current;
     setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
-    const removed = new Map<string, SessionRef>();
-    const failures: SessionDeleteFailure[] = [];
     try {
       if (useNativeGuard) {
         try { await api.setDeleteGuard(true); }
         catch (error) { showToast(`无法启用${batch ? "批量" : ""}删除保护：${String(error)}`, true); return; }
       }
       if (batch) setBatchFailures([]);
-      for (const [index, session] of targets.entries()) {
-        try {
-          if (!removed.has(sessionKey(session))) {
-            const result = await api.deleteSession(agent.id, session.projectDir, session.sessionId);
-            for (const target of result?.removed ?? [session]) removed.set(sessionKey(target), target);
-            if (result?.error) failures.push({ session, error: result.error });
-          }
-        } catch (error) {
-          failures.push({ session, error: String(error) });
+      // 进度经通道推送，可能晚于删除结果到达，只更新本次仍在进行的删除。
+      const result = await api.deleteSessions(agent.id, targets, completed => {
+        if (batch && run === deleteRun.current) {
+          setOperation(current => current?.kind === "delete" ? { kind: "delete", progress: { completed, total } } : current);
         }
-        if (batch) setOperation({ kind: "delete", progress: { completed: index + 1, total } });
-      }
+      }).catch(error => ({ removed: [], failures: targets.map(session => ({ session, error: String(error) })) }));
+      const requested = new Map(targets.map(session => [sessionKey(session), session]));
+      const failures = result.failures.flatMap(({ session, error }) => {
+        const meta = requested.get(sessionKey(session));
+        return meta ? [{ session: meta, error }] : [];
+      });
+      const removed = new Map(result.removed.map(session => [sessionKey(session), session]));
       if (removed.size) {
         if (selectedSessionKey && removed.has(selectedSessionKey)) closeSessionDetail();
         catalogCache.remove(agent.id, [...removed.values()]);

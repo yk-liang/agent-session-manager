@@ -15,7 +15,8 @@ try{
     const meta=(id,dir,title,cwd)=>({sessionId:id,projectDir:dir,title,cwd,model:null,firstTs:null,lastTs:null,userCount:1,assistantCount:1,realUserCount:1,assistantTextCount:1,sizeBytes:1000,hasTranscript:true});
     const state={rows:[meta("shared","run-a","诊断会话甲","/Users/demo/work/real-project/.local/diag-a"),meta("b","run-b","诊断会话乙","/Users/demo/work/real-project/poc/.local/diag-b"),meta("shared","auto","独立工作区","/Users/demo/Documents/Qoder/2026-10-16/1234abcd"),meta("m","manual","普通目录","/tmp/manual")],calls:[],deleted:[]};
     window.__QODER_GROUP__=state;
-    window.__TAURI_INTERNALS__={transformCallback:cb=>cb,invoke:async(command,args={})=>{
+    let callbacks=0;
+    window.__TAURI_INTERNALS__={transformCallback:()=>++callbacks,invoke:async(command,args={})=>{
       state.calls.push({command,args:structuredClone(args)});
       if(command==="list_agents")return ["qoder","codex"].map(id=>({id,displayName:id==="qoder"?"Qoder":"Codex",installed:true,supportsFork:false,deletePolicy:"trash"}));
       if(command==="catalog"){
@@ -29,9 +30,11 @@ try{
       }
       if(command==="search_conversations")return {hits:args.query==="Qoder归组针"&&args.targets.some(t=>t.projectDir==="run-b")?[{sessionId:"b",projectDir:"run-b",eventIndex:1,eventId:"a",role:"assistant",snippet:"Qoder归组针命中正文"}]:[],skipped:0,cancelled:false};
       if(command==="cancel_conversation_search")return null;
-      if(command==="delete_session"){
-        if(!state.rows.some(s=>s.sessionId===args.sessionId&&s.projectDir===args.projectDir))throw Error("Wrong delete identity");
-        state.deleted.push(structuredClone(args));state.rows=state.rows.filter(s=>!(s.sessionId===args.sessionId&&s.projectDir===args.projectDir));return null;
+      if(command==="delete_sessions"){
+        const matches=(s,t)=>s.sessionId===t.sessionId&&s.projectDir===t.projectDir;
+        if(!args.sessions.every(t=>state.rows.some(s=>matches(s,t))))throw Error("Wrong delete identity");
+        state.deleted.push(...structuredClone(args.sessions));state.rows=state.rows.filter(s=>!args.sessions.some(t=>matches(s,t)));
+        return {removed:args.sessions,failures:[]};
       }
       throw Error(`Unexpected command: ${command}`);
     }};
