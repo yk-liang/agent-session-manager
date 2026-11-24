@@ -12,7 +12,7 @@ pub(super) mod failures;
 
 pub(in crate::usage) const BOUNDARY_ESTIMATE: &str = "codex_boundary";
 pub(super) const COUNTER_BASELINE: &str = "counter_baseline";
-// 解析版本 4 首次区分分叉历史与子代理归属。
+// 解析版本 4 首次区分分叉历史与子智能体归属。
 pub(super) const FORK_METADATA_VERSION: u8 = 4;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
