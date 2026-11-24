@@ -647,7 +647,7 @@ fn load_thread_names_in(
 ) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let path = home.join("session_index.jsonl");
-    // 与转录读取同一套 FIFO 防护：非阻塞打开 + 普通文件复核，
+    // 与会话日志读取同一套 FIFO 防护：非阻塞打开 + 普通文件复核，
     // 避免 session_index.jsonl 被换成 FIFO 时 read_to_string 永久阻塞
     let mut file = match super::open_jsonl(&path) {
         Ok(f) => f,

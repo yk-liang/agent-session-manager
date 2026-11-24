@@ -268,7 +268,7 @@
   border-bottom-left-radius: var(--radius-sm);
 }
 
-/* 其他代理发来的消息与用户提问同侧，以描边区分。 */
+/* 其他智能体发来的消息与用户提问同侧，以描边区分。 */
 .msg.agent {
   margin-left: auto;
   border: 1px solid var(--info-border);

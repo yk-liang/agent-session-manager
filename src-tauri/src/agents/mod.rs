@@ -279,7 +279,7 @@ pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
     catalog
 }
 
-/// 一个 agent 的单个配置文件描述符（用于配置快照）。
+/// 一个 Agent 的单个配置文件描述符（用于配置快照）。
 /// key 是稳定逻辑键（快照内标识，跨机器可移植）；path 是本机解析出的绝对路径。
 pub struct ConfigFile {
     pub key: String,
@@ -341,8 +341,8 @@ pub fn check_catalog_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), Strin
     }
 }
 
-/// 一个 CLI agent 的会话数据源。
-/// 会话列表/详情统一为 agent 无关的模型；恢复命令等差异由各实现提供。
+/// 一个 CLI Agent 的会话数据源。
+/// 会话列表/详情统一为 Agent 无关的模型；恢复命令等差异由各实现提供。
 pub trait AgentSource: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
