@@ -13,6 +13,8 @@ pub(super) fn is_notice(kind: i64) -> bool {
 
 pub(super) enum Content {
     Message(Vec<Value>),
+    /// 其他会话发来的消息；派生子智能体时父会话发出的首条消息是任务。
+    Agent { kind: &'static str, from: String, text: Option<String> },
     Context { kind: &'static str, label: &'static str, text: String },
     System(String),
 }
@@ -40,12 +42,26 @@ pub(super) fn decode(
             label: "压缩摘要",
             text: payload.message(30)?.text(5).unwrap_or("已记录会话检查点").into(),
         },
-        SYSTEM_NOTICE => Content::Context {
+        SYSTEM_NOTICE => notice(&payload.message(114)?)?,
+        _ => Content::Message(Vec::new()),
+    })
+}
+
+fn notice(notice: &Message<'_>) -> std::io::Result<Content> {
+    if notice.text(3) != Some("agent_message") {
+        return Ok(Content::Context {
             kind: "runtime",
             label: "系统记录",
-            text: payload.message(114)?.text(1).unwrap_or("收到系统通知").into(),
-        },
-        _ => Content::Message(Vec::new()),
+            text: notice.text(1).unwrap_or("收到系统通知").into(),
+        });
+    }
+    let message = notice.message(4)?;
+    let spawned = message.message(12).and_then(|source| source.message(1)).and_then(|source| source.message(3))
+        .is_ok_and(|call| call.text(2) == Some("invoke_subagent"));
+    Ok(Content::Agent {
+        kind: if spawned { "task" } else { "message" },
+        from: message.text(3).unwrap_or_default().into(),
+        text: message.text(4).map(str::to_owned),
     })
 }
 

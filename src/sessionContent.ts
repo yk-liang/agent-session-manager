@@ -101,8 +101,9 @@ function fromAncestor({ from, to }: AgentEnvelope) {
   return !!from && to.startsWith(`${from}/`);
 }
 
-export function agentTaskName({ to }: AgentEnvelope) {
-  return to.slice(to.lastIndexOf("/") + 1);
+/** 任务名取接收方相对派发方的路径，Antigravity 子智能体的角色名本身可能含 `/`。 */
+export function agentTaskName(agent: AgentEnvelope) {
+  return fromAncestor(agent) ? agent.to.slice(agent.from.length + 1) : agent.to;
 }
 
 /** 正文加密时，导览用类型和来源代替正文。 */
