@@ -3,7 +3,7 @@ import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { AgentInfo, CatalogFilter, ConversationSearchHit, SessionDeleteFailure, SessionMeta } from "../types";
 import { ChevronRight } from "lucide-react";
 import UiIcon from "./UiIcon";
-import { formatSize, formatLocalDateTime, isEmptySession, relativeTime, sessionKey, shortPath } from "../utils";
+import { displaySessionId, formatSize, formatLocalDateTime, isEmptySession, relativeTime, sessionKey, shortPath } from "../utils";
 import type { SessionListRow } from "../sessionTree";
 import ModelLabel from "./ModelLabel";
 import HighlightedText from "./HighlightedText";
@@ -13,6 +13,8 @@ import SessionActions from "./SessionActions";
 import CopyButton from "./CopyButton";
 import PathLabel from "./PathLabel";
 import { Checkbox, CheckboxField } from "./Checkbox";
+
+const HIT_ROLES: Record<ConversationSearchHit["role"], string> = { user: "用户", assistant: "助手", agent: "智能体" };
 
 interface Props {
   scopeKey: string;
@@ -186,8 +188,8 @@ export default function SessionList({
           <ul>
             {failures.map(({ session, error }) => (
               <li key={sessionKey(session)}>
-                <strong>{session.title || session.sessionId}</strong>
-                <div className="session-location"><span>{shortPath(session.cwd) || session.projectDir}</span><code>{session.sessionId}</code></div>
+                <strong>{session.title || displaySessionId(session)}</strong>
+                <div className="session-location"><span>{shortPath(session.cwd) || session.projectDir}</span><code>{displaySessionId(session)}</code></div>
                 <div>{error}</div>
               </li>
             ))}
@@ -206,7 +208,7 @@ export default function SessionList({
             const displayPath = displayRoots?.get(key) ?? s.cwd;
             const copyPath = s.cwd ?? displayPath;
             const cardTitle = hidePath ? s.cwd ?? undefined : undefined;
-            const orphan = !!s.codex?.orphan;
+            const orphan = !!s.subagent?.orphan;
             const cardClass = `session-card${selectedSessionKey === key ? " active" : ""}${isEmpty ? " empty" : ""}${s.archived ? " archived" : ""}${orphan ? " orphan" : ""}${depth ? " child" : ""}`;
             const body = (
               <>
@@ -216,7 +218,7 @@ export default function SessionList({
                     {relativeTime(s.lastTs)}
                   </time>
                 </span>
-                {hit && <span className="session-search-snippet"><span>{hit.role === "user" ? "用户" : "助手"}</span><HighlightedText text={hit.snippet} query={search} /></span>}
+                {hit && <span className="session-search-snippet"><span>{HIT_ROLES[hit.role]}</span><HighlightedText text={hit.snippet} query={search} /></span>}
                 <span className="session-card-sub">
                   {s.readError && <span className="status-tag" data-tone="error" title="打开会话以重试或查看诊断">正文读取失败</span>}
                   {isEmpty && <span className="status-tag" data-tone="info">空会话</span>}
@@ -227,8 +229,8 @@ export default function SessionList({
                     {s.sizeBytes != null && <span className="session-card-size">{formatSize(s.sizeBytes)}</span>}
                   </span>
                 </span>
-                {!!search.trim() && s.codex?.parentId && <span className="session-search-parent">父会话 ID <code>{s.codex.parentId}</code></span>}
-                {!search.trim() && !depth && s.codex?.subagent && !orphan &&
+                {!!search.trim() && s.subagent?.parentId && <span className="session-search-parent">父会话 ID <code>{s.subagent.parentId}</code></span>}
+                {!search.trim() && !depth && s.subagent && !orphan &&
                   <span className="session-search-parent">父会话不在当前范围</span>}
                 {(s.archived || orphan) && <span className={`archived-ribbon${orphan ? " orphan-ribbon" : ""}`}><span>{orphan ? "孤儿" : "已归档"}</span></span>}
                 {s.archived && orphan && <span className="session-search-parent">已归档</span>}

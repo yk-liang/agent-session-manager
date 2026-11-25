@@ -48,21 +48,27 @@ fn heredoc_tags(line: &str) -> Vec<(String, bool)> {
 }
 
 /// 按 `&&`、`||`、`;`、`&`、换行拆成管道，再按 `|` 拆段；引号、`$(…)` 和反引号内部不拆，注释丢弃。
-pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
+/// 每条管道附带是否紧接 `&&`（前一步失败会跳过后续）；第二项表示管道之间出现过 `||`。
+pub(super) fn pipelines(text: &str) -> (Vec<(Vec<&str>, bool)>, bool) {
     let bytes = text.as_bytes();
     let mut pipelines = Vec::new();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
     let mut depth = 0usize;
+    let mut conditional = false;
     while i < bytes.len() {
         let c = bytes[i];
         match c {
             b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i),
             b'\\' => i += 2,
-            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+            b'$' | b'<' | b'>' if bytes.get(i + 1) == Some(&b'(') => {
                 depth += 1;
                 i += 2;
+            }
+            b'(' if depth > 0 => {
+                depth += 1;
+                i += 1;
             }
             b')' if depth > 0 => {
                 depth -= 1;
@@ -77,6 +83,8 @@ pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
             }
             b'|' | b'&' | b';' | b'\n' if depth == 0 => {
                 let pair = bytes.get(i + 1) == Some(&c) && c != b';' && c != b'\n';
+                // `a && b` 只是顺序执行；`a || b` 才是失败后走另一条路。
+                conditional |= pair && c == b'|';
                 let pipe_stderr = c == b'|' && bytes.get(i + 1) == Some(&b'&');
                 let redirect = c == b'&' && (bytes.get(i + 1) == Some(&b'>') || (i > 0 && bytes[i - 1] == b'>'));
                 if redirect {
@@ -85,7 +93,7 @@ pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
                 }
                 push_segment(&mut segments, &text[start..i]);
                 if (c != b'|' || pair) && !segments.is_empty() {
-                    pipelines.push(std::mem::take(&mut segments));
+                    pipelines.push((std::mem::take(&mut segments), pair && c == b'&'));
                 }
                 i += if pair || pipe_stderr { 2 } else { 1 };
                 start = i;
@@ -95,9 +103,9 @@ pub(super) fn pipelines(text: &str) -> Vec<Vec<&str>> {
     }
     push_segment(&mut segments, &text[start.min(text.len())..]);
     if !segments.is_empty() {
-        pipelines.push(segments);
+        pipelines.push((segments, false));
     }
-    pipelines
+    (pipelines, conditional)
 }
 
 /// 去掉子 shell 和代码块的括号：开头的 `(`、单独的 `{`，以及配不上对的结尾 `)`、单独的 `}`。
@@ -156,9 +164,13 @@ pub(super) fn tokens(text: &str) -> Vec<Token<'_>> {
             match bytes[i] {
                 b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i),
                 b'\\' => i += 2,
-                b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                b'$' | b'<' | b'>' if bytes.get(i + 1) == Some(&b'(') => {
                     depth += 1;
                     i += 2;
+                }
+                b'(' if depth > 0 => {
+                    depth += 1;
+                    i += 1;
                 }
                 b')' if depth > 0 => {
                     depth -= 1;
@@ -175,9 +187,10 @@ pub(super) fn tokens(text: &str) -> Vec<Token<'_>> {
             i += 1;
             continue;
         }
+        let process_sub = matches!(bytes[i], b'<' | b'>') && bytes.get(i + 1) == Some(&b'(');
         let digit = bytes[i].is_ascii_digit() && matches!(bytes.get(i + 1), Some(b'<' | b'>'));
         let amp = bytes[i] == b'&' && bytes.get(i + 1) == Some(&b'>');
-        if digit || amp || bytes[i] == b'<' || bytes[i] == b'>' {
+        if !process_sub && (digit || amp || bytes[i] == b'<' || bytes[i] == b'>') {
             let start = i;
             i += if digit || amp { 1 } else { 0 };
             while i < bytes.len() && matches!(bytes[i], b'<' | b'>') {
@@ -210,16 +223,38 @@ pub(super) fn tokens(text: &str) -> Vec<Token<'_>> {
     tokens
 }
 
-pub(super) fn words(text: &str, vars: &[(String, String)]) -> Vec<String> {
-    tokens(text).into_iter().filter_map(|token| match token {
-        Token::Word(word) => Some(unquote(word, vars)),
-        Token::Redirect { .. } => None,
-    }).collect()
+/// 去掉外层可选双引号后，如果整个值正好是一次 `$(…)` 命令替换，返回括号里的命令。
+pub(super) fn substitution(value: &str) -> Option<&str> {
+    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+    let inner = value.strip_prefix("$(")?.strip_suffix(')')?;
+    let bytes = inner.as_bytes();
+    let (mut depth, mut i) = (1usize, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i),
+            b'\\' => i += 2,
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return None;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    (depth == 1).then_some(inner)
 }
 
+pub(super) const MAX_EXPANSION_BYTES: usize = 64 * 1024;
+
 /// 去掉引号和转义，并展开前面赋值过的 `$NAME`、`${NAME}`（单引号内不展开）；其余变量和 `$(…)` 保持原样。
-pub(super) fn unquote(word: &str, vars: &[(String, String)]) -> String {
-    let mut out = String::with_capacity(word.len());
+pub(super) fn unquote(word: &str, vars: &[(String, String)], budget: &mut usize) -> String {
+    let mut out = String::with_capacity(word.len().min(MAX_EXPANSION_BYTES));
     let mut chars = word.char_indices().peekable();
     let mut quote = None;
     while let Some((i, c)) = chars.next() {
@@ -229,8 +264,9 @@ pub(super) fn unquote(word: &str, vars: &[(String, String)]) -> String {
             (Some('\''), c) => out.push(c),
             (Some(_), '\\') if matches!(chars.peek(), Some((_, '"' | '\\' | '$' | '`'))) => out.extend(chars.next().map(|(_, c)| c)),
             (None, '\\') => out.extend(chars.next().map(|(_, c)| c)),
-            (_, '$') => match variable(&word[i + 1..], vars) {
+            (_, '$') => match variable(&word[i + 1..], vars).filter(|(value, _)| value.len() <= *budget && out.len() + value.len() <= MAX_EXPANSION_BYTES) {
                 Some((value, len)) => {
+                    *budget -= value.len();
                     out.push_str(value);
                     chars.nth(len - 1);
                 }

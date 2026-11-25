@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use super::claude_family::{self, FamilyOptions};
+use super::deletion::{Outcome, PreserveUsage};
 use super::{shell_quote, AgentSource, ConfigFile, SessionDetail};
 
 mod desktop;
@@ -78,7 +79,7 @@ impl AgentSource for QoderSource {
         Some(qoder_dir())
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
-        super::AgentWatchPaths::transcripts("projects", Some(2))
+        claude_family::watch_paths()
     }
     fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
         let mut locations = vec![(qoder_dir(), self.watch_paths())];
@@ -116,19 +117,18 @@ impl AgentSource for QoderSource {
         )
     }
     fn search_events(&self, meta: &super::SessionMeta) -> Result<Vec<serde_json::Value>, String> {
-        // 搜索不需要再次解析模型目录，直接复用统一的会话事件顺序。
-        claude_family::read_session(&projects_dir(), &meta.project_dir, &meta.session_id, OPTS)
-            .map(|detail| detail.events)
+        claude_family::search_events(&projects_dir(), &meta.project_dir, meta, OPTS)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
-        claude_family::delete_session(&projects_dir(), project_dir, session_id)
-    }
-    fn deletion_targets(
+    fn delete_sessions(
         &self,
-        project_dir: &str,
-        session_id: &str,
-    ) -> Result<Option<Vec<PathBuf>>, String> {
-        claude_family::deletion_targets(&projects_dir(), project_dir, session_id).map(Some)
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        let base = projects_dir();
+        super::deletion::trash(sessions, |session| {
+            claude_family::trash_plan(&base, &session.project_dir, &session.session_id)
+        }, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String> {
         Some(format!(

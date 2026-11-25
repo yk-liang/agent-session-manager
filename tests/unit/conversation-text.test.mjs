@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_VISIBILITY, sessionRows, rowVisible, toolDescription, visibleSessionRows } from '../../src/sessionContent.ts';
-import { activityItems } from '../../src/activity.ts';
+import { activityItems, commandOutcome, itemStatus, resultStatus, skipped } from '../../src/activity.ts';
 import { eventTextParts, eventMatches, matchRanges } from '../../src/conversationText.ts';
 
 test('only normalized dialogue is searched; literal instruction markup is preserved', () => {
@@ -46,6 +46,9 @@ test('tool results pair in source order and unmatched results stay visible', () 
   assert.equal(rows[0].blocks[0].linked, undefined);
   assert.equal(rows[3].blocks[1].linked, undefined);
   assert.equal(rows[3].blocks[0].linked, true);
+  const forked = sessionRows([assistant(call), user(result('child result'))], 1);
+  assert.equal(forked[0].blocks[0].result, undefined);
+  assert.equal(forked[1].blocks[0].linked, undefined);
 
   assert.equal(toolDescription({ type: 'tool_use', input: { toolSummary: 'List\n  files' } }), 'List files');
   assert.equal(toolDescription({ type: 'tool_use', input: { Description: 'Subagent task' } }), 'Subagent task');
@@ -54,7 +57,7 @@ test('tool results pair in source order and unmatched results stay visible', () 
 test('activity rows merge across events and adjacent browsing collapses into one group', () => {
   const read = (id, path) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Read', ops: [{ kind: 'read', path }] }] } });
   const sed = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b', name: 'Bash',
-    ops: [{ kind: 'shell', intent: 'read', exit_code: 0, steps: [{ kind: 'read', path: '/p/b.ts', program: 'sed' }] }] }] } };
+    ops: [{ kind: 'shell', intent: 'read', exit_code: 0, steps: [{ kind: 'read', path: '/p/b.ts' }] }] }] } };
   const rows = sessionRows([
     { type: 'user', message: { content: '看看这两个文件' } },
     { type: 'assistant', message: { content: [{ type: 'text', text: '先读一下' }, { type: 'thinking', thinking: '计划' }] } },
@@ -70,4 +73,22 @@ test('activity rows merge across events and adjacent browsing collapses into one
   const parts = [1, 2, 4, 5].flatMap(i => rows[i].blocks).filter(part => part.content.type !== 'text');
   assert.deepEqual(activityItems(parts).map(item => item.type === 'browse' ? item.items.map(i => i.key) : item.type),
     ['thinking', ['2.0', '4.0'], 'tool', 'tool']);
+});
+
+test('tool status resolves denied, cancelled, exit-one outcomes and multi-block errors consistently', () => {
+  const item = (result, op) => ({ key: 't', index: 0, op, part: { key: 't', content: { type: 'tool_use' }, result } });
+  assert.equal(itemStatus(item({ type: 'tool_result', status: 'cancelled', content: 'details' })), 'cancelled');
+  assert.equal(itemStatus(item({ type: 'tool_result', is_error: true, content: 'Command aborted' })), 'cancelled');
+  assert.equal(itemStatus(item({ type: 'tool_result', is_error: true, content: '<tool_use_error>Blocked: sleep 120</tool_use_error>' })), 'denied');
+  assert.equal(skipped({ type: 'tool_result', is_error: true, error_summary: 'Command aborted', content: 'Command aborted\n\nactual output' }), undefined);
+  assert.equal(skipped({ type: 'tool_result', is_error: true, content: [{ type: 'text', text: 'Command cancelled' }, { type: 'text', text: 'extra diagnostic' }] }), undefined);
+  assert.equal(skipped({ type: 'tool_result', is_error: true, content: 'Build aborted\ncompiler error' }), undefined);
+  assert.equal(skipped({ type: 'tool_result', is_error: true, content: 'Blocked: database locked' }), undefined);
+  assert.equal(resultStatus({ type: 'tool_result', status: 'error', content: 'failed' }), 'error');
+  const silentDiff = item(
+    { type: 'tool_result', is_error: true, exit_code: 1, command_output_kind: 'empty' },
+    { kind: 'shell', intent: 'diff', exit_one: 'silent_differences' },
+  );
+  assert.equal(commandOutcome(silentDiff), 'differences');
+  assert.equal(itemStatus(silentDiff), 'completed');
 });

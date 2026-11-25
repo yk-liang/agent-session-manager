@@ -9,46 +9,17 @@ export interface SessionListRow {
   guides: boolean[];
 }
 
+/** 后端已把冲突或成环的父关系标为孤儿，这里只连接同一目录中可见的父会话。 */
 export function sessionTree(sessions: SessionMeta[]) {
-  const byId = new Map<string, SessionMeta>();
-  for (const session of sessions) {
-    if (session.codex) byId.set(session.sessionId, session);
-  }
-
+  const byKey = new Map(sessions.map(session => [sessionKey(session), session]));
   const parents = new Map<string, string>();
-  for (const session of sessions) {
-    const thread = session.codex;
-    const parent = thread?.parentId && !thread.orphan ? byId.get(thread.parentId) : undefined;
-    if (parent) parents.set(sessionKey(session), sessionKey(parent));
-  }
-
-  const owners = new Map<string, string>();
   const children = new Map<string, SessionMeta[]>();
   for (const session of sessions) {
-    const key = sessionKey(session);
-    if (!parents.has(key)) continue;
-    let owner = key;
-    const path = new Set<string>();
-    while (parents.has(owner) && !owners.has(owner)) {
-      if (path.has(owner)) {
-        let member = owner;
-        do {
-          const parent = parents.get(member)!;
-          parents.delete(member);
-          member = parent;
-        } while (member !== owner);
-        break;
-      }
-      path.add(owner);
-      owner = parents.get(owner)!;
-    }
-    for (const member of path) {
-      if (parents.has(member)) owners.set(member, owners.get(owner) ?? owner);
-    }
-  }
-  for (const session of sessions) {
-    const parent = parents.get(sessionKey(session));
-    if (!parent) continue;
+    const relation = session.subagent;
+    if (!relation?.parent || relation.orphan) continue;
+    const parent = sessionKey(relation.parent);
+    if (!byKey.has(parent)) continue;
+    parents.set(sessionKey(session), parent);
     const siblings = children.get(parent);
     if (siblings) siblings.push(session);
     else children.set(parent, [session]);
@@ -57,7 +28,7 @@ export function sessionTree(sessions: SessionMeta[]) {
   const ancestors = (key: string, scope?: ReadonlySet<string>) => {
     const path: string[] = [];
     let parent = parents.get(key);
-    while (parent && (!scope || scope.has(parent))) {
+    while (parent && (!scope || scope.has(parent)) && path.length < sessions.length) {
       path.push(parent);
       parent = parents.get(parent);
     }
@@ -87,6 +58,8 @@ export function sessionTree(sessions: SessionMeta[]) {
     return result;
   };
 
-  const byKey = new Map(sessions.map(session => [sessionKey(session), session]));
-  return { byId, byKey, ancestors, rows, owner: (session: SessionMeta) => byKey.get(owners.get(sessionKey(session)) ?? "") ?? session };
+  return {
+    byKey, ancestors, rows,
+    parent: (session: SessionMeta) => byKey.get(parents.get(sessionKey(session)) ?? ""),
+  };
 }

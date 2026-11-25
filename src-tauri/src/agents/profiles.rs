@@ -425,7 +425,7 @@ pub fn save_profile(
     }
     workspace::check_revision(&spec, expected_revision)?;
     let mut store = load_store()?;
-    // 名称唯一性按 (agent, name)：不同 agent 可重名
+    // 名称唯一性按 (agent, name)：不同 Agent 可重名
     if store
         .profiles
         .iter()
@@ -658,7 +658,7 @@ fn profile_slots(
         .collect())
 }
 
-/// 直接更新指定 agent 的某个配置文件内容（内联编辑场景）。
+/// 直接更新指定 Agent 的某个配置文件内容（内联编辑场景）。
 /// 对 JSON / JSONC / TOML 做语法校验，原始文本不重排、不丢注释。
 ///
 /// 与快照应用共用同一套写入事务：store_lock 串行化、暂存原文件、

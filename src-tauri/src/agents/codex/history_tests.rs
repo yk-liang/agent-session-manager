@@ -606,13 +606,17 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
         "payload":{"id":"call","type":"function_call","name":"shell","call_id":"a","arguments":"{\"cmd\":\"hello\"}"}});
     let output = json!({"type":"response_item","ordinal":3,"timestamp":"2099-12-31T00:00:03Z",
         "payload":{"id":"out","type":"function_call_output","call_id":"a","output":"{\"output\":\"FAILED\",\"metadata\":{\"status\":\"error\"},\"chunk_id\":\"test\",\"exit_code\":2}"}});
+    let search = json!({"type":"response_item","ordinal":4,"timestamp":"2099-12-31T00:00:04Z",
+        "payload":{"type":"function_call","name":"exec_command","call_id":"search","arguments":"{\"cmd\":\"rg -n needle src\"}"}});
+    let no_matches = json!({"type":"response_item","ordinal":5,"timestamp":"2099-12-31T00:00:05Z",
+        "payload":{"type":"function_call_output","call_id":"search","output":"Chunk ID: test\nWall time: 0.01 seconds\nProcess exited with code 1\nFinal output:\n"}});
     let path = page(
         &root,
         "view-thread",
         "view-thread",
         0,
         None,
-        vec![message(1, "user", "hello"), call, output],
+        vec![message(1, "user", "hello"), call, output, search, no_matches],
     );
     let full = read_session_in(&root, "view-thread").unwrap();
     let view = read_session_mode(&root, "view-thread", ReadMode::View).unwrap();
@@ -621,7 +625,14 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
     let result = &view.events[2]["message"]["content"][0];
     assert_eq!(result["is_error"], true);
     assert_eq!(result["exit_code"], 2);
+    assert!(result.get("command_output_kind").is_none());
     assert!(result.get("content").is_none());
+    let search = &view.events[3]["message"]["content"][0];
+    assert_eq!(search["ops"][0]["exit_one"], "no_match");
+    let no_matches = &view.events[4]["message"]["content"][0];
+    assert_eq!(no_matches["exit_code"], 1);
+    assert_eq!(no_matches["command_output_kind"], "empty");
+    assert!(no_matches.get("content").is_none());
     let mut tokens = vec![];
     for (original, light) in full.events.iter().zip(&view.events) {
         assert_eq!(original["uuid"], light["uuid"]);
@@ -638,11 +649,11 @@ fn deferred_tool_view_keeps_order_ids_and_counts_and_checks_the_source() {
             assert_eq!(original, light);
         }
     }
-    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens.len(), 4);
     writeln!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
         "{}",
-        message(4, "assistant", "later")
+        message(6, "assistant", "later")
     )
     .unwrap();
     assert!(
@@ -676,11 +687,54 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
         "type":"item_completed","turn_id":"two","started_at_ms":origin+5500,"item":{"type":"ImageView", "id":"image", "path":"/tmp/fixture.png"}}});
     let failed = json!({"type":"event_msg", "ordinal":9, "timestamp":"2099-12-31T00:00:09Z", "payload":{
         "type":"item_completed","turn_id":"four","started_at_ms":origin+8500,"item":{"type":"ImageView", "id":"failed-child", "path":"/tmp/fixture.png"}}});
+    let mixed = json!({"type":"event_msg", "ordinal":12, "timestamp":"2099-12-31T00:00:12Z", "payload":{
+        "type":"item_completed","turn_id":"mixed","started_at_ms":origin+11500,"item":{"type":"CommandExecution", "id":"mixed-child", "command":"false", "status":"completed", "exit_code":2, "aggregated_output":"fixture failure"}}});
+    let file_change = json!({"type":"event_msg", "ordinal":15,"timestamp":"2099-12-31T00:00:15Z", "payload":{
+        "type":"item_completed","turn_id":"patch","started_at_ms":origin+14500,
+        "item":{"type":"FileChange","id":"patch-child","status":"completed","changes":{"src/new.ts":{"type":"add","content":"export {};"}}}}});
+    let comparison = json!({"type":"event_msg", "ordinal":21, "timestamp":"2099-12-31T00:00:21Z", "payload":{
+        "type":"item_completed","turn_id":"compare",
+        "item":{"type":"CommandExecution","id":"compare","command":"diff -u old new","status":"failed","exit_code":1,
+            "aggregated_output":"--- old\n+++ new\n@@ -1 +1 @@\n-before\n+after\n"}}});
+    let multi_web = json!({"type":"event_msg", "ordinal":23, "timestamp":"2099-12-31T00:00:23Z", "payload":{
+        "type":"item_completed","turn_id":"web","started_at_ms":origin+22500,
+        "item":{"type":"Extension","kind":"web.search","id":"web-child","status":"completed","action":{"type":"search","queries":["alpha"]}}}});
+    let mismatched_web = json!({"type":"event_msg", "ordinal":26, "timestamp":"2099-12-31T00:00:26Z", "payload":{
+        "type":"item_completed","turn_id":"web-mismatch","started_at_ms":origin+25500,
+        "item":{"type":"Extension","kind":"web.search","id":"web-beta","status":"completed","action":{"type":"search","queries":["beta"]}}}});
+    let mismatched_patch = json!({"type":"event_msg", "ordinal":29, "timestamp":"2099-12-31T00:00:29Z", "payload":{
+        "type":"item_completed","turn_id":"patch-mismatch","started_at_ms":origin+28500,
+        "item":{"type":"FileChange","id":"patch-section-b","status":"completed","changes":{"src/same.ts":{"type":"update","unified_diff":"@@ -10,3 +10,3 @@\n fn second() {\n-  x = 1;\n+  x = 2;\n }\n"}}}}});
+    let standalone_patch = format!("text(await tools.apply_patch({}));", json!("*** Begin Patch\n*** Add File: src/new.ts\n+export {};\n*** End Patch"));
+    let section_a_patch = format!("text(await tools.apply_patch({}));", json!("*** Begin Patch\n*** Update File: src/same.ts\n@@\n fn first() {\n-  x = 1;\n+  x = 2;\n }\n*** End Patch"));
+    let batch = r#"const patch = String.raw`*** Begin Patch
+*** Update File: src/fixture.ts
+@@
+-const previous = 1;
++const next = 2;
+*** End Patch`;
+const apply = tools.apply_patch;
+text(await apply(patch));
+const cmd = "cat " + "skills/fixture/SKILL.md";
+const r = await Promise.allSettled([tools['exec_command']({max_output_tokens: 60, cmd}), tools.exec_command({cmd:'git status --short --branch'})]);
+for (const result of r) text(result);
+text('tools.exec_command({cmd:"do not parse"})');"#;
     page(&root, "script-thread_followup", "script-thread", 1, Some(json!({"thread_id":"script-thread",
         "end_byte_offset":first.metadata().unwrap().len(), "end_ordinal_exclusive":3})), vec![
         command, output("parent", 4, "Script completed\nOutput:\nextra log"),
-        script("unrelated", "two", 5, "text('standalone log')"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
+        script("unrelated", "two", 5, "await tools.view_image({path:'/tmp/different.png'})"), unrelated, output("unrelated", 7, "Script completed\nOutput:\nstandalone log"),
         script("failed", "four", 8, "await tools.view_image({path:'/tmp/fixture.png'})"), failed, output("failed", 10, "Script failed: fixture"),
+        script("mixed", "mixed", 11, "await tools.exec_command({cmd:'false'}); await tools.update_plan({})"), mixed, output("mixed", 13, "Script completed"),
+        script("patch", "patch", 14, &standalone_patch), file_change, output("patch", 16, "Script completed\nOutput:\nDone"),
+        script("batch", "batch", 17, batch), output("batch", 18, "Script completed\nOutput:\nCombined stdout"),
+        script("running", "async", 19, "text(await tools.write_stdin({session_id:42,chars:''}));"),
+        output("running", 20, "Script running with cell ID g25"), comparison,
+        script("multi-web", "web", 22, r#"text(await tools.web__run({search_query:[{q:"alpha"}],time:[{utc_offset:"+00:00"}]}))"#),
+        multi_web, output("multi-web", 24, "Script completed\nOutput:\nok"),
+        script("web-alpha", "web-mismatch", 25, r#"text(await tools.web__run({search_query:[{q:"alpha"}]}))"#),
+        mismatched_web, output("web-alpha", 27, "Script completed\nOutput:\nok"),
+        script("patch-section-a", "patch-mismatch", 28, &section_a_patch),
+        mismatched_patch, output("patch-section-a", 30, "Script completed\nOutput:\nok"),
     ]);
     let view = read_session_mode(&root, "script-thread", ReadMode::View).unwrap();
     let blocks: Vec<_> = view.events.iter().filter_map(|event| event.pointer("/message/content/0")).collect();
@@ -693,4 +747,32 @@ fn exec_children_on_a_later_page_keep_deferred_payloads_and_script_output() {
     assert_eq!(load(stdout)["content"], "child");
     assert!(blocks.iter().any(|block| block["id"] == "unrelated"));
     assert!(blocks.iter().any(|block| block["tool_use_id"] == "failed" && block["is_error"] == true));
+    assert!(blocks.iter().any(|block| block["id"] == "mixed" && block["name"] == "exec"));
+    let mixed_result = blocks.iter().find(|block| block["tool_use_id"] == "mixed-child").unwrap();
+    assert_eq!(mixed_result["error_summary"], "fixture failure");
+    let compare = blocks.iter().find(|block| block["id"] == "compare").unwrap();
+    assert_eq!(compare["ops"][0]["outcome"], "differences");
+    assert_eq!(compare["status"], "error");
+    assert!(!blocks.iter().any(|block| block["id"] == "patch"));
+    let patch = blocks.iter().find(|block| block["id"] == "patch-child").unwrap();
+    assert_eq!(patch["ops"][0]["kind"], "write");
+    assert_eq!(load(&patch["script_result"])["content"], "Script completed\nOutput:\nDone");
+    let wrapper = blocks.iter().find(|block| block["id"] == "batch").unwrap();
+    let calls = wrapper["ops"][0]["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0]["ops"][0]["path"], "src/fixture.ts");
+    assert!(calls[0]["ops"][0].get("hunks").is_none());
+    assert_eq!(calls[1]["ops"][0]["steps"][0]["path"], "skills/fixture/SKILL.md");
+    assert_eq!(calls[2]["ops"][0]["head"], "git status --short --branch");
+    assert_eq!(wrapper["ops"][0]["lead"], json!([0, 0]));
+    assert_eq!(wrapper["ops"][0]["features"], json!(["parallel"]));
+    assert_eq!(load(wrapper)["ops"][0]["calls"][0]["ops"][0]["hunks"][0]["lines"][1], "+const next = 2;");
+    let running = blocks.iter().copied().find(|block| block["tool_use_id"] == "running").unwrap();
+    assert_eq!(running["status"], "running");
+    assert_eq!(load(running)["status"], "running");
+    assert!(blocks.iter().any(|block| block["id"] == "multi-web" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "web-alpha" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "web-beta" && block.get("script_result").is_none()));
+    assert!(blocks.iter().any(|block| block["id"] == "patch-section-a" && block["name"] == "exec"));
+    assert!(blocks.iter().any(|block| block["id"] == "patch-section-b" && block.get("script_result").is_none()));
 }

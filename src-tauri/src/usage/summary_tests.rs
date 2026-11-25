@@ -311,11 +311,8 @@ fn summary_deletion_flushes_new_events_without_forcing_full_history_read() {
         record("b", t + 1000, 200, 20)
     )
     .unwrap();
-    preserve_before_delete_at("claude", &[dir.path().into()], &mut store, || {
-        fs::remove_file(&p).map_err(|e| e.to_string())
-    })
-    .unwrap();
-    assert!(!p.exists());
+    deletion::save("claude", &[dir.path().into()], &mut store, &[p.clone()]).unwrap();
+    fs::remove_file(&p).unwrap();
     assert_eq!(sum(&read(&mut store, vec![])), 330);
     let db = &store.ledger().unwrap().db;
     assert_eq!(

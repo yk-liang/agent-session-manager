@@ -55,6 +55,9 @@ fn has_table(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
 pub(crate) struct Trajectory {
     pub cwd: Option<String>,
     pub created: Option<i64>,
+    /// 子智能体的父会话和角色；未指定角色时用子智能体类型。
+    pub parent: Option<String>,
+    pub role: Option<String>,
 }
 
 pub(crate) fn session_id(path: &Path) -> ReadResult<&str> {
@@ -94,10 +97,15 @@ pub(crate) fn trajectory(connection: &Connection) -> ReadResult<(Trajectory, u64
         Vec::new()
     };
     let metadata = Message::decode(&data)?;
+    // 角色只用于展示，子智能体描述损坏时不应妨碍读取会话和用量。
+    let role = metadata.message(8).ok()
+        .and_then(|subagent| subagent.text(2).or_else(|| subagent.text(1)).map(str::to_owned));
     Ok((
         Trajectory {
             cwd: workspace(&metadata)?,
             created: metadata.millis(2)?.filter(|&time| time > 0),
+            parent: metadata.text(5).map(str::to_owned),
+            role,
         },
         data.len() as u64,
     ))

@@ -1,6 +1,7 @@
 //! Qoder 和 Claude Code 共用的 JSONL 会话解析。消息由 uuid 和 parentUuid 串联。
 
 mod context;
+mod subagents;
 mod tools;
 #[cfg(test)]
 mod context_tests;
@@ -11,8 +12,9 @@ use serde_json::Value;
 #[cfg(test)]
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use super::deletion::TrashPlan;
 use super::{SessionDetail, SessionMeta};
 
 #[derive(Clone, Copy)]
@@ -21,6 +23,14 @@ pub struct FamilyOptions {
     pub use_runtime_model: bool,
     /// 过滤 entrypoint 非 cli 的会话（QoderWork/云端）
     pub filter_non_cli_entrypoint: bool,
+}
+
+/// 子会话日志和元数据位于 `projects/<项目>/<会话>/subagents/` 下。
+pub(super) fn watch_paths() -> super::AgentWatchPaths {
+    super::AgentWatchPaths {
+        extra_transcript_suffixes: vec![".meta.json"],
+        ..super::AgentWatchPaths::transcripts("projects", Some(4))
+    }
 }
 
 pub fn is_safe_name(name: &str) -> bool {
@@ -103,6 +113,7 @@ fn parse_meta_with(
         git_branch: None,
         entrypoint: None,
         codex: None,
+        subagent: None,
         first_ts: None,
         last_ts: None,
         user_count: 0,
@@ -289,12 +300,21 @@ fn project_display_path(dir_name: &str, sessions: &[SessionMeta]) -> String {
             meta.cwd
                 .as_deref()
                 .filter(|cwd| !cwd.trim().is_empty())
-                .map(|cwd| (meta.real_user_count == 0, cwd))
+                .map(|cwd| (meta.subagent.is_some(), meta.real_user_count == 0, cwd))
         })
         // 优先采用有正文的会话。条件相同时使用与枚举顺序无关的排序。
         .min()
-        .map(|(_, cwd)| cwd.to_string())
+        .map(|(_, _, cwd)| cwd.to_string())
         .unwrap_or_else(|| unescape_dir_name(dir_name))
+}
+
+fn cached_meta(path: &Path, project_dir: &str, opts: FamilyOptions) -> Result<(SessionMeta, Vec<String>), String> {
+    let kind = summary_cache_kind(project_dir, opts);
+    super::catalog_cache::summary(&kind, &[path.to_path_buf()], || match parse_meta(path, project_dir, opts) {
+        super::ParseOutcome::Ok(meta) => Ok((meta, Vec::new())),
+        super::ParseOutcome::Degraded(meta, warning) => Ok((meta, vec![warning])),
+        super::ParseOutcome::Failed(error) => Err(error),
+    })
 }
 
 fn sessions_in_dir(
@@ -308,7 +328,8 @@ fn sessions_in_dir(
     let dir = base.join(dir_name);
     let entries: Vec<_> = super::read_dir_warned(&dir, warnings);
     let mut sessions = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut roots = std::collections::HashMap::new();
+    let summary = |path: &Path| cached_meta(path, dir_name, opts);
 
     for entry in &entries {
         super::check_catalog_cancelled(cancelled)?;
@@ -317,24 +338,25 @@ fn sessions_in_dir(
         if name.strip_suffix(".jsonl").is_some_and(is_session_id)
             && !entry.file_type().is_ok_and(|kind| kind.is_symlink() || kind.is_dir())
         {
-            let kind = summary_cache_kind(dir_name, opts);
-            let (parsed, ws) = match super::catalog_cache::summary(&kind, &[path.clone()], || {
-                match parse_meta(&path, dir_name, opts) {
-                    super::ParseOutcome::Ok(meta) => Ok((meta, Vec::new())),
-                    super::ParseOutcome::Degraded(meta, warning) => Ok((meta, vec![warning])),
-                    super::ParseOutcome::Failed(error) => Err(error),
+            match summary(&path) {
+                Ok((meta, ws)) => {
+                    warnings.extend(ws);
+                    roots.insert(meta.session_id.clone(), meta);
                 }
-            }) {
-                Ok((meta, ws)) => (Some(meta), ws),
-                Err(error) => (None, vec![error]),
-            };
-            warnings.extend(ws);
-            if let Some(meta) = parsed {
-                seen_ids.insert(meta.session_id.clone());
-                // 不相关会话（QoderWork/云端/空）静默跳过，不算错误
-                if is_relevant(&meta, opts) && (include_empty || meta.real_user_count > 0) {
-                    sessions.push(meta);
-                }
+                Err(error) => warnings.push(error),
+            }
+        }
+    }
+    for entry in &entries {
+        super::check_catalog_cancelled(cancelled)?;
+        let name = entry.file_name();
+        let Some(root_id) = name.to_str().filter(|name| is_session_id(name)) else { continue };
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        for (_, meta) in subagents::group(&dir, roots.get(root_id), root_id, summary, warnings) {
+            if is_relevant(&meta, opts) && (include_empty || !meta.is_empty()) {
+                sessions.push(meta);
             }
         }
     }
@@ -343,7 +365,7 @@ fn sessions_in_dir(
         for entry in &entries {
             let name = entry.file_name().to_string_lossy().to_string();
             if entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && is_session_id(&name) && !seen_ids.contains(&name) {
+                && is_session_id(&name) && !roots.contains_key(&name) {
                 sessions.push(SessionMeta {
                     session_id: name,
                     project_dir: dir_name.to_string(),
@@ -355,6 +377,7 @@ fn sessions_in_dir(
                     git_branch: None,
                     entrypoint: None,
                     codex: None,
+                    subagent: None,
                     first_ts: None,
                     last_ts: None,
                     user_count: 0,
@@ -370,6 +393,8 @@ fn sessions_in_dir(
             }
         }
     }
+    // 不相关会话（QoderWork/云端/空）静默跳过，不算错误
+    sessions.extend(roots.into_values().filter(|meta| is_relevant(meta, opts) && (include_empty || meta.real_user_count > 0)));
     Ok(sessions)
 }
 
@@ -382,10 +407,31 @@ pub fn read_session(
     if !is_safe_name(project_dir) {
         return Err("项目目录名无效".into());
     }
+    let project = base.join(project_dir);
+    if let Some((root_id, id)) = subagents::child_identity(session_id) {
+        let project = super::verify_within_root(base, &project, super::TargetKind::Dir)?;
+        let mut warnings = Vec::new();
+        let summary = |path: &Path| cached_meta(path, project_dir, opts);
+        // 与目录扫描一致：只有普通文件才算根会话日志。
+        let root_log = project.join(format!("{root_id}.jsonl"));
+        let root = root_log.symlink_metadata().is_ok_and(|meta| meta.is_file())
+            .then(|| summary(&root_log).ok()).flatten().map(|(meta, _)| meta);
+        let group = subagents::group(&project, root.as_ref(), root_id, summary, &mut warnings);
+        let (child, known) = group.iter().find(|(child, _)| child.id == id).ok_or("未找到该子会话")?;
+        let log = super::verify_within_root(&project, &child.log, super::TargetKind::File)?;
+        let mut detail = read_transcript(&log, project_dir, opts)?;
+        detail.meta.session_id.clone_from(&known.session_id);
+        detail.meta.subagent.clone_from(&known.subagent);
+        if detail.meta.title.is_none() {
+            detail.meta.title.clone_from(&known.title);
+        }
+        detail.warnings.extend(warnings);
+        return Ok(detail);
+    }
     if !is_session_id(session_id) {
         return Err("会话 ID 无效".into());
     }
-    let path = base.join(project_dir).join(format!("{session_id}.jsonl"));
+    let path = project.join(format!("{session_id}.jsonl"));
     let missing = match std::fs::metadata(&path) {
         Ok(_) => None,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(error),
@@ -405,6 +451,7 @@ pub fn read_session(
         if state_exists {
             return Ok(SessionDetail {
                 warnings: Vec::new(),
+                inherited: 0,
                 meta: SessionMeta {
                     session_id: session_id.to_string(),
                     project_dir: project_dir.to_string(),
@@ -416,6 +463,7 @@ pub fn read_session(
                     git_branch: None,
                     entrypoint: None,
                     codex: None,
+                    subagent: None,
                     first_ts: None,
                     last_ts: None,
                     user_count: 0,
@@ -435,18 +483,33 @@ pub fn read_session(
             "session_detail", "path_metadata", &path, &missing_error,
         ));
     }
+    read_transcript(&path, project_dir, opts)
+}
+
+pub(super) fn search_events(
+    base: &Path,
+    project_dir: &str,
+    meta: &SessionMeta,
+    opts: FamilyOptions,
+) -> Result<Vec<Value>, String> {
+    let Some((root, id)) = subagents::child_identity(&meta.session_id) else {
+        return read_session(base, project_dir, &meta.session_id, opts).map(|detail| detail.events);
+    };
+    let project = super::verify_within_root(base, &base.join(project_dir), super::TargetKind::Dir)?;
+    let log = super::verify_within_root(&project, &subagents::child_log(&project, root, id), super::TargetKind::File)?;
+    read_transcript(&log, project_dir, opts).map(|detail| detail.events)
+}
+
+fn read_transcript(path: &Path, project_dir: &str, opts: FamilyOptions) -> Result<SessionDetail, String> {
     let mut events = Vec::new();
     let mut injected = std::collections::HashMap::new();
     // 同一份读取同时提取摘要和详情，保留阶段错误，避免二次打开时错误被替换。
-    let outcome = parse_meta_with(&path, project_dir, opts, "session_detail", |v| {
+    let outcome = parse_meta_with(path, project_dir, opts, "session_detail", |v| {
         if let (true, Some(call), Some(uuid), Some(text)) = (v["isMeta"] == true, v["sourceToolUseID"].as_str(), v["uuid"].as_str(), tools::injected_text(&v)) {
             injected.insert(call.to_owned(), (uuid.to_owned(), text));
         }
-        match v.get("type").and_then(Value::as_str) {
-            Some("user" | "assistant" | "system" | "developer" | "attachment") => {
-                events.extend(context::normalize(v));
-            }
-            _ => {}
+        if let Some("user" | "assistant" | "system" | "developer" | "attachment") = v.get("type").and_then(Value::as_str) {
+            events.extend(context::normalize(v));
         }
     });
     let (meta, warnings) = match outcome {
@@ -458,72 +521,52 @@ pub fn read_session(
     Ok(SessionDetail {
         meta,
         events,
+        inherited: 0,
         warnings,
     })
 }
 
-/// 会话日志和同名状态目录一并移入废纸篓。
-pub fn delete_session(base: &Path, project_dir: &str, session_id: &str) -> Result<(), String> {
-    delete_session_with(base, project_dir, session_id, |targets| {
-        trash::delete_all(targets).map_err(|e| format!("移入废纸篓失败：{e}"))
-    })
-}
-
-fn delete_session_with(
-    base: &Path,
-    project_dir: &str,
-    session_id: &str,
-    remove: impl FnOnce(&[PathBuf]) -> Result<(), String>,
-) -> Result<(), String> {
-    remove(&deletion_targets(base, project_dir, session_id)?)
-}
-
-/// 与实际删除共用校验和目标集合，供删除前用量保存使用。
-pub(crate) fn deletion_targets(
-    base: &Path,
-    project_dir: &str,
-    session_id: &str,
-) -> Result<Vec<PathBuf>, String> {
+/// 会话日志和同名状态目录一并移入废纸篓；子会话只移走它自己的日志及子孙会话。
+pub(crate) fn trash_plan(base: &Path, project_dir: &str, session_id: &str) -> Result<TrashPlan, String> {
     if !is_safe_name(project_dir) {
         return Err("项目目录名无效".into());
+    }
+    let dir = base.join(project_dir);
+    let project = super::verify_within_root(base, &dir, super::TargetKind::Dir)?;
+    if let Some((root_id, id)) = subagents::child_identity(session_id) {
+        return subagents::trash_plan(&project, root_id, id);
     }
     if !is_session_id(session_id) {
         return Err("会话 ID 无效".into());
     }
-    let dir = base.join(project_dir);
-    let jsonl = dir.join(format!("{session_id}.jsonl"));
-    let state_dir = dir.join(session_id);
-
-    // 存在性探测统一走 safety::present：只有 NotFound 才算不存在，
-    // 悬空符号链接也算存在，随后会被 verify_within_root 拒绝，
-    // 避免跳过它却删掉另一半（部分删除）
+    let jsonl = project.join(format!("{session_id}.jsonl"));
+    let state_dir = project.join(session_id);
     let jsonl_present = super::present(&jsonl)?;
     let state_present = super::present(&state_dir)?;
-
     if !jsonl_present && !state_present {
         return Err("未找到会话文件".into());
     }
-    let project = super::verify_within_root(base, &dir, super::TargetKind::Dir)?;
-    let mut targets: Vec<PathBuf> = Vec::new();
+    let mut plan = TrashPlan::default();
     if jsonl_present {
-        targets.push(super::verify_within_root(
+        plan.add_session(session_id.to_owned(), super::verify_within_root(
             &project,
             &jsonl,
             super::TargetKind::File,
         )?);
     }
     if state_present {
-        targets.push(super::verify_within_root(
+        plan.add_session(session_id.to_owned(), super::verify_within_root(
             &project,
             &state_dir,
             super::TargetKind::Dir,
         )?);
+        plan.sessions.extend(subagents::verified_logs(&project, session_id)?);
     }
     if jsonl_present {
         // 结构校验通过后再复核内容身份：sessionId 必须与文件名一致
         verify_jsonl_session_id(&jsonl, session_id)?;
     }
-    Ok(targets)
+    Ok(plan)
 }
 
 fn verify_jsonl_session_id(path: &Path, session_id: &str) -> Result<(), String> {
@@ -682,6 +725,41 @@ mod tests {
             .unwrap()
             .sessions
             .is_empty());
+    }
+
+    #[test]
+    fn nested_family_transcripts_keep_identity_and_deletion_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let dir = project.join("aaaa/subagents");
+        let worker = dir.join("agent-worker.jsonl");
+        let reviewer = dir.join("agent-reviewer.jsonl");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(project.join("aaaa.jsonl"), r#"{"type":"user","sessionId":"aaaa","message":{"content":"Main task"}}"#).unwrap();
+        fs::write(&worker, r#"{"type":"assistant","sessionId":"aaaa","agentId":"worker","message":{"content":[{"type":"text","text":"Spawn review"},{"type":"tool_use","name":"Agent","id":"call_nested"}]}}"#).unwrap();
+        fs::write(&reviewer, r#"{"type":"assistant","sessionId":"aaaa","agentId":"reviewer","message":{"content":"Review"}}"#).unwrap();
+        fs::write(dir.join("agent-reviewer.meta.json"), r#"{"spawnDepth":2,"toolUseId":"call_nested"}"#).unwrap();
+        for opts in [CLAUDE_OPTS, QODER_OPTS] {
+            let catalog = catalog(temp.path(), opts, false, &|| false).unwrap();
+            assert_eq!(catalog.projects[0].session_count, 3);
+            let detail = read_session(temp.path(), "project", "subagent:aaaa:reviewer", opts).unwrap();
+            let relation = detail.meta.subagent.unwrap();
+            assert_eq!(relation.parent_id.as_deref(), Some("worker"));
+            assert_eq!(relation.project_owner.unwrap().session_id, "aaaa");
+            assert_eq!(detail.events.len(), 1);
+        }
+        let targets = trash_plan(temp.path(), "project", "subagent:aaaa:worker").unwrap().targets;
+        assert_eq!(targets.len(), 3);
+        assert!(targets.contains(&worker.canonicalize().unwrap()));
+        assert!(targets.contains(&reviewer.canonicalize().unwrap()));
+        assert!(!targets.contains(&project.join("aaaa.jsonl").canonicalize().unwrap()));
+        assert_eq!(trash_plan(temp.path(), "project", "aaaa").unwrap().targets.len(), 2);
+        fs::write(&reviewer, r#"{"type":"assistant","sessionId":"bbbb","agentId":"reviewer","message":{"content":"Review"}}"#).unwrap();
+        assert!(trash_plan(temp.path(), "project", "aaaa").unwrap_err().contains("身份不符"));
+        fs::remove_file(project.join("aaaa.jsonl")).unwrap();
+        let relation = read_session(temp.path(), "project", "subagent:aaaa:worker", CLAUDE_OPTS).unwrap().meta.subagent.unwrap();
+        assert!(relation.orphan);
+        assert_eq!(relation.parent_id.as_deref(), Some("aaaa"));
     }
 
     fn write_fixture(lines: &[&str]) -> tempfile::NamedTempFile {
@@ -899,7 +977,7 @@ mod tests {
         let jsonl = proj.join("aaaa-1111.jsonl");
         fs::write(&jsonl, r#"{"type":"user","sessionId":"bbbb-2222"}"#).unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("不一致"), "{err}");
         assert!(jsonl.exists(), "中止后文件必须完好");
     }
@@ -913,11 +991,7 @@ mod tests {
             let jsonl = proj.join(format!("{id}.jsonl"));
             fs::write(&jsonl, contents).unwrap();
             assert!(read_session(tmp.path(), "-tmp-proj", id, CLAUDE_OPTS).unwrap().events.is_empty());
-            delete_session_with(tmp.path(), "-tmp-proj", id, |targets| {
-                assert_eq!(targets, &[jsonl.canonicalize().unwrap()]);
-                fs::remove_file(&targets[0]).map_err(|error| error.to_string())
-            }).unwrap();
-            assert!(!jsonl.exists());
+            assert_eq!(trash_plan(tmp.path(), "-tmp-proj", id).unwrap().targets, [jsonl.canonicalize().unwrap()]);
         }
     }
 
@@ -929,7 +1003,7 @@ mod tests {
         let jsonl = proj.join("aaaa-1111.jsonl");
         fs::write(&jsonl, "不是合法 JSON").unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("无法解析"), "{err}");
         assert!(jsonl.exists(), "损坏文件不得删除");
     }
@@ -945,7 +1019,7 @@ mod tests {
         let state_dir = proj.join("aaaa-1111");
         fs::create_dir_all(&state_dir).unwrap();
 
-        let err = delete_session(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
+        let err = trash_plan(tmp.path(), "-tmp-proj", "aaaa-1111").unwrap_err();
         assert!(err.contains("符号链接"), "{err}");
         assert!(state_dir.exists(), "不得发生部分删除：状态目录必须完好");
         assert!(jsonl.symlink_metadata().is_ok(), "悬空链接本身也不得被动");

@@ -116,7 +116,7 @@ pub(super) fn read_line(
         .filter(|at| finished_at.is_some_and(|end| *at <= end));
     let sidechain = nested.is_some() || line["isSidechain"] == true || parent_session_id.is_some();
     let subagent_id = if sidechain {
-        // 子代理日志中的 sessionId 可能仍指向主会话。
+        // 子智能体日志中的 sessionId 可能仍指向主会话。
         parent_session_id
             .as_deref()
             .filter(|parent| *parent != session)

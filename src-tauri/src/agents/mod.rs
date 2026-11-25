@@ -8,7 +8,9 @@ pub(crate) mod antigravity;
 pub mod claude;
 pub mod claude_family;
 pub mod codex;
+pub mod deletion;
 pub mod ids;
+pub(crate) mod lineage;
 pub mod opencode;
 pub mod pi;
 pub mod profiles;
@@ -24,6 +26,7 @@ pub use scanning::{
     degraded_message, for_each_jsonl_line, open_jsonl, read_dir_warned, ParseOutcome,
 };
 
+use deletion::{DeletePolicy, Outcome, PreserveUsage};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -67,6 +70,8 @@ pub struct SessionMeta {
     pub entrypoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex: Option<codex::ThreadMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<Subagent>,
     pub first_ts: Option<String>,
     pub last_ts: Option<String>,
     pub user_count: u32,
@@ -89,11 +94,58 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    pub(crate) fn location(&self) -> SessionLocation {
+        SessionLocation { session_id: self.session_id.clone(), project_dir: self.project_dir.clone(), cwd: self.cwd.clone() }
+    }
+
+    /// 换用新的项目目录标识，子会话关系中指向同一目录的引用随之更新。
+    pub(crate) fn relocate(&mut self, project_dir: String) {
+        if let Some(relation) = &mut self.subagent {
+            let parent = relation.parent.iter_mut().map(|parent| &mut parent.project_dir);
+            let owner = relation.project_owner.iter_mut().map(|owner| &mut owner.project_dir);
+            for dir in parent.chain(owner).filter(|dir| **dir == self.project_dir) {
+                dir.clone_from(&project_dir);
+            }
+        }
+        self.project_dir = project_dir;
+    }
+
     fn is_empty(&self) -> bool {
         self.codex.as_ref()
             .filter(|thread| !thread.can_resume || matches!(thread.source.as_deref(), Some("exec" | "mcp" | "appServer")))
             .and_then(|thread| thread.empty)
-            .unwrap_or(self.real_user_count == 0)
+            .unwrap_or(self.real_user_count == 0 && (self.subagent.is_none() || self.assistant_count == 0))
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<search::SessionRef>,
+    pub orphan: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_owner: Option<SessionLocation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLocation {
+    pub session_id: String,
+    pub project_dir: String,
+    pub cwd: Option<String>,
+}
+
+impl SessionLocation {
+    fn session_ref(&self) -> search::SessionRef {
+        search::SessionRef {
+            project_dir: self.project_dir.clone(),
+            session_id: self.session_id.clone(),
+        }
     }
 }
 
@@ -111,15 +163,11 @@ pub struct Project {
 pub struct SessionDetail {
     pub meta: SessionMeta,
     pub events: Vec<serde_json::Value>,
+    /// 开头这些事件是子会话分叉时从父会话继承的上下文。
+    pub inherited: usize,
     /// 可读取当前片段，但历史分页缺失时在打开详情后提示，不阻断已有内容。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct SessionDeletion {
-    pub removed: Vec<search::SessionRef>,
-    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -150,17 +198,6 @@ pub struct SessionGroupHint {
     pub project_dir: String,
     pub session_id: String,
     pub root: Option<String>,
-}
-
-/// 会话删除策略，决定可用操作和恢复方式。
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum DeletePolicy {
-    /// 移入系统废纸篓，可还原
-    Trash,
-    /// 永久删除（如委托官方 CLI 直接改库），不可还原
-    Permanent,
-    ReadOnly,
 }
 
 /// 把 (会话, 项目展示路径) 列表聚合成 Catalog：
@@ -201,7 +238,7 @@ pub fn assemble_catalog(items: Vec<(SessionMeta, String)>) -> Catalog {
     catalog
 }
 
-/// 一个 agent 的单个配置文件描述符（用于配置快照）。
+/// 一个 Agent 的单个配置文件描述符（用于配置快照）。
 /// key 是稳定逻辑键（快照内标识，跨机器可移植）；path 是本机解析出的绝对路径。
 pub struct ConfigFile {
     pub key: String,
@@ -263,8 +300,8 @@ pub fn check_catalog_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), Strin
     }
 }
 
-/// 一个 CLI agent 的会话数据源。
-/// 会话列表/详情统一为 agent 无关的模型；恢复命令等差异由各实现提供。
+/// 一个 CLI Agent 的会话数据源。
+/// 会话列表/详情统一为 Agent 无关的模型；恢复命令等差异由各实现提供。
 pub trait AgentSource: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
@@ -327,24 +364,22 @@ pub trait AgentSource: Send + Sync {
     }
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String>;
     /// 使用目录扫描时确认的定位信息读取正文，避免逐会话重新遍历全部数据目录。
+    /// 不含继承自父会话的上下文，同一段内容只在父会话中命中。
     fn search_events(&self, meta: &SessionMeta) -> Result<Vec<serde_json::Value>, String> {
         self.read_session(&meta.project_dir, &meta.session_id)
-            .map(|detail| detail.events)
+            .map(|mut detail| detail.events.split_off(detail.inherited))
     }
-    fn delete_session(&self, _project_dir: &str, _session_id: &str) -> Result<(), String> {
+    /// 删除一批会话及其子会话；无法删除的会话记入 outcome，Err 表示整批都未删除。
+    fn delete_sessions(
+        &self,
+        _sessions: &[search::SessionRef],
+        _preserve: &mut dyn PreserveUsage,
+        _outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
         Err("该 Agent 的会话为只读".into())
     }
     fn set_session_archived(&self, _: &str, _: &str, _: bool) -> Result<(), String> {
         Err("该 Agent 不支持归档会话".into())
-    }
-    /// 已校验的本次删除目标（文件或目录），仅由后端生成，用于收窄用量同步范围。
-    /// None 表示尚未提供精确目标，仍按该数据源的原有全量同步策略保存用量。
-    fn deletion_targets(
-        &self,
-        _project_dir: &str,
-        _session_id: &str,
-    ) -> Result<Option<Vec<PathBuf>>, String> {
-        Ok(None)
     }
     /// 生成恢复会话的 shell 命令；None 表示该 Agent 不支持恢复
     fn resume_command(&self, session_id: &str, fork: bool) -> Option<String>;
@@ -559,9 +594,6 @@ mod tests {
             Ok(assemble_catalog(vec![]))
         }
         fn read_session(&self, _: &str, _: &str) -> Result<SessionDetail, String> {
-            unreachable!()
-        }
-        fn delete_session(&self, _: &str, _: &str) -> Result<(), String> {
             unreachable!()
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {

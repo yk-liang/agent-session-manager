@@ -18,12 +18,12 @@ use tauri::{Emitter, Manager};
 #[derive(Default)]
 struct ConfigEditGuard(AtomicU8);
 
-/// 从第一条删除前持续到整批结束；配置编辑的状态更新不会覆盖它。
+/// 从第一条删除前持续到全部删除结束；配置编辑的状态更新不会覆盖它。
 #[derive(Default)]
-struct BatchDeleteGuard(AtomicBool);
+struct DeleteGuard(AtomicBool);
 
 fn exit_blocked(app: &tauri::AppHandle) -> bool {
-    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
+    if app.state::<DeleteGuard>().0.load(Ordering::SeqCst) {
         return true;
     }
     if app.state::<ConfigEditGuard>().0.load(Ordering::SeqCst) != 0 {
@@ -74,7 +74,7 @@ fn set_config_guard(state: tauri::State<'_, ConfigEditGuard>, dirty: bool, busy:
 }
 
 #[tauri::command]
-fn set_batch_delete_guard(state: tauri::State<'_, BatchDeleteGuard>, active: bool) {
+fn set_delete_guard(state: tauri::State<'_, DeleteGuard>, active: bool) {
     state.0.store(active, Ordering::SeqCst);
 }
 
@@ -83,8 +83,8 @@ fn confirm_config_exit(
     app: tauri::AppHandle,
     state: tauri::State<'_, ConfigEditGuard>,
 ) -> Result<(), String> {
-    if app.state::<BatchDeleteGuard>().0.load(Ordering::SeqCst) {
-        return Err("批量删除仍在进行，请稍后退出。".into());
+    if app.state::<DeleteGuard>().0.load(Ordering::SeqCst) {
+        return Err("删除仍在进行，请稍后退出。".into());
     }
     if state.0.load(Ordering::SeqCst) & 2 != 0 {
         return Err("配置操作仍在进行，请稍后退出。".into());
@@ -361,35 +361,24 @@ async fn read_session(
 }
 
 #[tauri::command]
-async fn delete_session(
+async fn delete_sessions(
     agent: String,
-    project_dir: String,
-    session_id: String,
-) -> Result<agents::SessionDeletion, String> {
+    sessions: Vec<agents::search::SessionRef>,
+    progress: tauri::ipc::Channel<usize>,
+) -> Result<agents::deletion::SessionDeletion, String> {
     run_backend(move || {
-        let source = agents::find_source(&agent)?;
-        if source.delete_policy() == agents::DeletePolicy::ReadOnly {
-            return Err("该 Agent 的会话为只读".into());
+        let report = |settled| {
+            let _ = progress.send(settled);
+        };
+        let mut outcome = agents::deletion::Outcome::new(&sessions, &report);
+        let result = agents::find_source(&agent).and_then(|source| {
+            let mut usage = usage::preserve_for_deletion(&agent)?;
+            source.delete_sessions(&sessions, &mut usage, &mut outcome)
+        });
+        if let Err(error) = result {
+            outcome.fail_rest(&error);
         }
-        if agent == "codex" {
-            let home = source.data_dir().ok_or("缺少 Codex 数据目录")?;
-            let plan = agents::codex::deletion::Plan::for_session(&home, &project_dir, &session_id)?;
-            let failure_history = usage::codex_failure_database(&home);
-            return plan.run(&failure_history, &|files, validate, mutate| {
-                usage::preserve_codex_deletion(files, validate, mutate)
-            });
-        }
-        let targets = source.deletion_targets(&project_dir, &session_id)?;
-        usage::preserve_before_delete(&agent, targets.as_deref(), || {
-            if targets.is_some() && source.deletion_targets(&project_dir, &session_id)? != targets {
-                return Err("会话文件已变化，请重新确认后删除".into());
-            }
-            source.delete_session(&project_dir, &session_id)
-        })?;
-        Ok(agents::SessionDeletion {
-            removed: vec![agents::search::SessionRef { project_dir, session_id }],
-            error: None,
-        })
+        Ok(outcome.finish())
     })
     .await
 }
@@ -576,7 +565,7 @@ mod command_tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(ConfigEditGuard::default())
-        .manage(BatchDeleteGuard::default())
+        .manage(DeleteGuard::default())
         .manage(session_watch::SessionWatcher::default())
         .manage(std::sync::Arc::new(SessionCatalogs::default()))
         .setup(|app| {
@@ -649,7 +638,7 @@ pub fn run() {
             search_conversations,
             cancel_conversation_search,
             read_session,
-            delete_session,
+            delete_sessions,
             set_session_archived,
             resume_command,
             resume_in_terminal,
@@ -661,7 +650,7 @@ pub fn run() {
             preview_config_change,
             apply_config_change,
             set_config_guard,
-            set_batch_delete_guard,
+            set_delete_guard,
             confirm_config_exit,
             delete_profile,
             update_config_file

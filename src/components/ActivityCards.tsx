@@ -1,15 +1,17 @@
 import { useContext } from "react";
 import { Brain, FileOutput, ListCollapse } from "lucide-react";
-import { activityItems, browseSteps, itemStatus, type ToolItem } from "../activity";
+import { activityItems, browseSteps, errorSummary, resultStatus, type ToolItem } from "../activity";
 import type { SessionBlock } from "../sessionContent";
 import { CommandCard, ScriptCard } from "./CommandCards";
+import { ExecCard } from "./ExecCard";
 import Collapsible from "./Collapsible";
 import { DetailState } from "./DetailState";
 import { browseTarget, BrowseCard, ChangeCard } from "./FileCards";
 import { LongText } from "./MessageParts";
 import { Status, TypeIcon } from "./OpCard";
-import { GenericToolCard, SemanticToolCard, SkillCard } from "./ToolCards";
-import { Payload, ToolResult } from "./ToolPayload";
+import { GenericToolCard, SemanticToolCard, SkillCard } from "./SemanticCards";
+import { ToolOutput } from "./ToolSections";
+import { WebFetchCard, WebSearchCard } from "./WebCards";
 
 export function ActivityList({ parts }: { parts: SessionBlock[] }) {
   return <>{activityItems(parts).map(entry => {
@@ -35,14 +37,14 @@ function ThinkingCard({ part }: { part: SessionBlock }) {
 
 /** 找不到调用的结果单独成卡。 */
 function OrphanResult({ part }: { part: SessionBlock }) {
-  const failed = !!part.content.is_error;
+  const status = resultStatus(part.content);
+  const failed = status === "error" || status === "denied";
   return <Collapsible id={part.key} className={`tool${failed ? " error" : ""}`} head={<>
     <TypeIcon icon={FileOutput} label="工具输出" />
-    <span className="collapsible-status"><Status status={failed ? "error" : undefined} /></span>
+    <span className="collapsible-status"><Status status={status}
+      exit={part.content.exit_code} reason={failed || status === "cancelled" ? errorSummary(part.content) : undefined} /></span>
   </>}>
-    <Payload block={part.content} kind={failed ? "error" : "output"}>
-      {loaded => <ToolResult result={loaded} failed={failed} />}
-    </Payload>
+    <ToolOutput result={part.content} status={status} />
   </Collapsible>;
 }
 
@@ -52,9 +54,12 @@ function ToolCard({ item }: { item: ToolItem }) {
   switch (op.kind) {
     case "read": case "search": case "find": case "list": return <BrowseCard item={item} />;
     case "edit": case "write": case "delete": return <ChangeCard item={item} op={op} />;
-    case "shell": return op.steps?.length ? <BrowseCard item={item} shell={op} /> : <CommandCard item={item} op={op} />;
+    case "shell": return op.steps?.length ? <BrowseCard item={item} /> : <CommandCard item={item} op={op} />;
     case "script": return <ScriptCard item={item} op={op} />;
+    case "exec": return <ExecCard item={item} op={op} />;
     case "skill": return <SkillCard item={item} op={op} />;
+    case "web_search": return <WebSearchCard item={item} op={op} />;
+    case "web_fetch": return <WebFetchCard item={item} op={op} />;
     default: return <SemanticToolCard item={item} op={op} />;
   }
 }
@@ -67,17 +72,22 @@ function BrowseGroup({ id, items }: { id: string; items: ToolItem[] }) {
   const files = new Set(steps.flatMap(step => step.kind === "read" ? [step.path] : [])).size;
   const title = [files && `读取 ${files} 个文件`, count("search") && `搜索 ${count("search")} 次`,
     count("find") && `查找 ${count("find")} 次`, count("list") && `列出 ${count("list")} 次`].filter(Boolean).join("，");
-  const names = [...new Set(steps.map(step => browseTarget(step, cwd).name))];
-  const failures = items.filter(item => itemStatus(item) === "error").length;
-  return <Collapsible id={id} className={`tool browse${failures ? " error" : ""}`} head={<>
+  const names = new Map<string, Set<string>>();
+  for (const step of steps) {
+    const target = browseTarget(step, cwd);
+    const titles = names.get(target.name) ?? new Set();
+    if (target.title) titles.add(target.title);
+    if (target.dirTitle) titles.add(target.dirTitle);
+    names.set(target.name, titles);
+  }
+  return <Collapsible id={id} className="tool browse" head={<>
     <TypeIcon icon={ListCollapse} label={`合并了 ${items.length} 次调用`} tone="dim" />
     <span className="browse-title">{title}</span>
     <span className="browse-names">
-      {names.slice(0, 4).map(name => <code key={name}>{name}</code>)}
-      {names.length > 4 && <span>+{names.length - 4}</span>}
+      {[...names].slice(0, 4).map(([name, titles]) => <code key={name} title={[...titles].join("\n") || undefined}>{name}</code>)}
+      {names.size > 4 && <span>+{names.size - 4}</span>}
     </span>
     <span className="collapsible-status">
-      {failures > 0 && <span className="tool-status error">{failures} 次失败</span>}
       <span className="tool-tag">{items.length} 次调用</span>
     </span>
   </>}>

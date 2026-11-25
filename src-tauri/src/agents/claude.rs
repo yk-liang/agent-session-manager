@@ -1,6 +1,7 @@
 //! Claude Code 项目目录与 JSONL 会话。
 
 use super::claude_family::{self, FamilyOptions};
+use super::deletion::{Outcome, PreserveUsage};
 use super::{shell_quote, AgentSource, Catalog, ConfigFile, SessionDetail};
 use std::path::{Path, PathBuf};
 
@@ -79,7 +80,7 @@ impl AgentSource for ClaudeSource {
         Some(claude_dir())
     }
     fn watch_paths(&self) -> super::AgentWatchPaths {
-        super::AgentWatchPaths::transcripts("projects", Some(2))
+        claude_family::watch_paths()
     }
     fn watch_locations(&self) -> Vec<(PathBuf, super::AgentWatchPaths)> {
         distinct_project_roots().filter_map(|(_, root)| {
@@ -97,7 +98,7 @@ impl AgentSource for ClaudeSource {
             let mut sessions = claude_family::catalog_items(&root, OPTS, filter.include_empty, &mut warnings, cancelled)?;
             if index > 0 {
                 for (meta, _) in &mut sessions {
-                    meta.project_dir = format!("{}/{}", root.display(), meta.project_dir);
+                    meta.relocate(format!("{}/{}", root.display(), meta.project_dir));
                 }
             }
             items.extend(sessions);
@@ -109,20 +110,23 @@ impl AgentSource for ClaudeSource {
     fn read_session(&self, project_dir: &str, session_id: &str) -> Result<SessionDetail, String> {
         let (root, name) = project_location(project_dir)?;
         let mut detail = claude_family::read_session(&root, name, session_id, OPTS)?;
-        detail.meta.project_dir = project_dir.to_owned();
+        detail.meta.relocate(project_dir.to_owned());
         Ok(detail)
     }
-    fn delete_session(&self, project_dir: &str, session_id: &str) -> Result<(), String> {
-        let (root, name) = project_location(project_dir)?;
-        claude_family::delete_session(&root, name, session_id)
+    fn search_events(&self, meta: &super::SessionMeta) -> Result<Vec<serde_json::Value>, String> {
+        let (root, name) = project_location(&meta.project_dir)?;
+        claude_family::search_events(&root, name, meta, OPTS)
     }
-    fn deletion_targets(
+    fn delete_sessions(
         &self,
-        project_dir: &str,
-        session_id: &str,
-    ) -> Result<Option<Vec<PathBuf>>, String> {
-        let (root, name) = project_location(project_dir)?;
-        claude_family::deletion_targets(&root, name, session_id).map(Some)
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        super::deletion::trash(sessions, |session| {
+            let (root, name) = project_location(&session.project_dir)?;
+            claude_family::trash_plan(&root, name, &session.session_id)
+        }, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         Some(format!(

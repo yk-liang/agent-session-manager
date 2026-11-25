@@ -1,11 +1,8 @@
 import type { SessionEvent } from "./types";
+import { isMessageEvent } from "./sessionContent.ts";
 
 export function eventTextParts(event: SessionEvent): string[] {
-  if (
-    (event.type !== "user" && event.type !== "assistant") ||
-    (event.type === "user" && event.isMeta)
-  )
-    return [];
+  if (!isMessageEvent(event)) return [];
   const content = event.message?.content;
   const parts =
     typeof content === "string"

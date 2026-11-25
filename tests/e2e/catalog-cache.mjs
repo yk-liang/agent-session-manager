@@ -27,7 +27,8 @@ try {
     };
     state.add = () => state.rows.qoder.push(row("q2", "New Qoder question", "mode-id"));
     window.__CACHE_TEST__ = state;
-    window.__TAURI_INTERNALS__ = { transformCallback: cb => cb, invoke: async (command, args = {}) => {
+    let callbacks = 0;
+    window.__TAURI_INTERNALS__ = { transformCallback: () => ++callbacks, invoke: async (command, args = {}) => {
       state.calls.push({ command, args: structuredClone(args) });
       if (command === "list_agents") return [
         { id: "qoder", displayName: "Qoder", installed: true, supportsFork: true, deletePolicy: "trash" },
@@ -51,8 +52,10 @@ try {
         events: [{ type: "user", message: { content: "Read-only fixture question" } }] };
       if (command === "resume_command") return `qoder --resume ${args.sessionId}`;
       if (command === "plugin:clipboard-manager|write_text") { state.copied = args.text; return null; }
-      if (command === "delete_session") {
-        state.deleted.push(args.sessionId); state.rows[args.agent] = state.rows[args.agent].filter(s => s.sessionId !== args.sessionId); return null;
+      if (command === "delete_sessions") {
+        const ids = args.sessions.map(s => s.sessionId);
+        state.deleted.push(...ids); state.rows[args.agent] = state.rows[args.agent].filter(s => !ids.includes(s.sessionId));
+        return { removed: args.sessions, failures: [] };
       }
       if (command === "search_conversations") return { hits: [], skipped: 0, cancelled: false };
       return null;

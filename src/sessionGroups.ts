@@ -12,7 +12,7 @@ function buildCatalogGroups(catalog: Catalog) {
   const projectlessIds = new Set(catalog.projectlessSessionIds);
   const hints = new Map(catalog.sessionGroupHints?.map(hint => [sessionKey(hint), hint.root]));
   const tree = sessionTree(catalog.sessions);
-  const regroup = projectlessIds.size > 0 || hints.size > 0 || catalog.sessions.some(session => session.codex?.subagent);
+  const regroup = projectlessIds.size > 0 || hints.size > 0 || catalog.sessions.some(session => session.subagent);
   const paths = new Map(catalog.projects.map(project => [project.dirName, project.displayPath]));
   const missingPaths = new Set(catalog.missingProjectPaths);
   const byGroup = new Map<string, SessionMeta[]>();
@@ -21,7 +21,7 @@ function buildCatalogGroups(catalog: Catalog) {
 
   for (const session of catalog.sessions) {
     const key = sessionKey(session);
-    const projectOwner = session.codex?.projectOwner ?? tree.owner(session);
+    const projectOwner = session.subagent?.projectOwner ?? session;
     const root = hints.get(sessionKey(projectOwner));
     const projectless = root === null || root === undefined && projectlessIds.has(projectOwner.sessionId);
     const dirName = projectless ? PROJECTLESS_GROUP : root === undefined ? projectOwner.projectDir : `group:root:${root}`;

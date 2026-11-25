@@ -100,7 +100,7 @@ pub(super) fn apply(catalog: &mut super::super::Catalog, home: &Path, warnings: 
         .filter(|session| ownership.projectless.contains(&session.session_id))
         .map(|session| session.session_id.clone())
         .collect();
-    for owner in catalog.sessions.iter().filter_map(|session| session.codex.as_ref()?.project_owner.as_ref()) {
+    for owner in catalog.sessions.iter().filter_map(|session| session.subagent.as_ref()?.project_owner.as_ref()) {
         if ownership.projectless.contains(&owner.session_id) && !catalog.projectless_session_ids.contains(&owner.session_id) {
             catalog.projectless_session_ids.push(owner.session_id.clone());
         }

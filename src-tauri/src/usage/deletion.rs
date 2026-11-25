@@ -1,18 +1,22 @@
-//! 删除前仅保存本次会被移除的日志；不把其他活跃会话的同步放进删除等待链路。
+//! 删除前只保存会被移除的日志；不把其他活跃会话的同步放进删除等待链路。
 use super::{source, source_error, Store};
+use crate::agents::deletion::{PreserveUsage, Unchanged};
 use crate::agents::{verify_within_root, TargetKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
+    sync::MutexGuard,
 };
+
+type Snapshot = BTreeMap<PathBuf, Vec<source::Stamp>>;
 
 /// 保留正常扫描使用的路径键，避免 /var 与 /private/var 等别名产生另一份用量缓存。
 fn snapshot(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
-) -> Result<BTreeMap<PathBuf, Vec<source::Stamp>>, String> {
+) -> Result<Snapshot, String> {
     if targets.is_empty() {
         return Err("缺少待删会话文件，已中止删除".into());
     }
@@ -44,7 +48,12 @@ fn snapshot(
                 TargetKind::File
             },
         )?;
-        let path = root.join(canonical.strip_prefix(canonical_root).unwrap());
+        let relative = canonical.strip_prefix(canonical_root).unwrap();
+        let path = if relative.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(relative)
+        };
         if is_dir {
             paths.extend(super::discover(agent, &[path], &|| false)?);
         } else {
@@ -66,59 +75,67 @@ fn snapshot(
         .collect()
 }
 
-pub(super) fn preserve_at(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    targets: &[PathBuf],
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    preserve_validated_at(agent, roots, store, targets, || Ok(()), delete)
+/// 删除期间持有账本写锁，保存的用量先于删除持久化。
+pub(super) struct Preservation {
+    agent: String,
+    roots: Vec<PathBuf>,
+    store: MutexGuard<'static, Store>,
+    _writer: super::ledger::SyncLock,
 }
 
-pub(super) fn preserve_validated_at(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    targets: &[PathBuf],
-    validate: impl FnOnce() -> Result<(), String>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    preserve_with_sync(
-        agent,
-        roots,
-        targets,
-        |paths| {
-            // 保留原 roots / scope，仅限制本次读取的路径；不能让局部同步清理其他会话缓存，
-            // 也不能把它标记为整个 Agent 已完成首次同步。
-            super::ingest::sync_paths(agent, roots, store, Some(paths), &|| false)?;
-            validate()
-        },
-        delete,
-    )
+impl Preservation {
+    pub(super) fn new(agent: &str, roots: Vec<PathBuf>, writer: super::ledger::SyncLock, store: MutexGuard<'static, Store>) -> Self {
+        Self { agent: agent.to_owned(), roots, store, _writer: writer }
+    }
 }
 
-fn preserve_with_sync(
+impl PreserveUsage for Preservation {
+    fn save(&mut self, targets: &[PathBuf]) -> Result<Unchanged, String> {
+        let saved = save(&self.agent, &self.roots, &mut self.store, targets)?;
+        let (agent, roots, targets) = (self.agent.clone(), self.roots.clone(), targets.to_vec());
+        Ok(Box::new(move || unchanged(&agent, &roots, &targets, &saved)))
+    }
+}
+
+/// 只读取删除目标涉及的日志；同步期间日志变化则不算保存成功。
+pub(super) fn save(agent: &str, roots: &[PathBuf], store: &mut Store, targets: &[PathBuf]) -> Result<Snapshot, String> {
+    save_with(agent, roots, targets, |paths| {
+        // 保留原 roots / scope，仅限制本次读取的路径；不能让局部同步清理其他会话缓存，
+        // 也不能把它标记为整个 Agent 已完成首次同步。
+        super::ingest::sync_paths(agent, roots, store, Some(paths), &|| false).map(drop)
+    })
+}
+
+fn save_with(
     agent: &str,
     roots: &[PathBuf],
     targets: &[PathBuf],
     sync: impl FnOnce(&BTreeSet<PathBuf>) -> Result<(), String>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<Snapshot, String> {
     let before = snapshot(agent, roots, targets)?;
-    let paths = before.keys().cloned().collect();
+    let input = source::Source::for_agent(agent);
+    let paths = before.keys().filter(|path| {
+        roots.iter().any(|root| input.changed_file(root, path).as_ref() == Some(*path))
+    }).cloned().collect();
     sync(&paths).map_err(|e| format!("删除前未能保存累计用量，会话已保留：{e}"))?;
     if snapshot(agent, roots, targets)? != before {
         return Err("会话日志在保存用量期间发生变化，请重试删除".into());
     }
-    delete()
+    Ok(before)
+}
+
+fn unchanged(agent: &str, roots: &[PathBuf], targets: &[PathBuf], saved: &Snapshot) -> Result<(), String> {
+    match snapshot(agent, roots, targets)? == *saved {
+        true => Ok(()),
+        false => Err("会话日志在保存用量后发生变化，请重试删除".into()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{cell::Cell, fs, io::Write, path::Path};
+    use std::{fs, io::Write, path::Path};
 
     fn record(path: &Path, session: &str, request: &str, tokens: u64) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -136,6 +153,28 @@ mod tests {
             .sum()
     }
 
+    fn targets(root: &Path, id: &str) -> Vec<PathBuf> {
+        crate::agents::claude_family::trash_plan(root, "project", id).unwrap().targets
+    }
+
+    #[test]
+    fn deletion_snapshot_includes_codex_history_file_root_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let rollout = sessions.join("rollout.jsonl");
+        let history = temp.path().join("thread_history_1.sqlite");
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&rollout, b"").unwrap();
+        let roots = [sessions, history.clone()];
+
+        let before = snapshot("codex", &roots, std::slice::from_ref(&rollout)).unwrap();
+        assert_eq!(before.into_keys().collect::<Vec<_>>(), [rollout.clone()]);
+
+        fs::write(&history, b"").unwrap();
+        let after = snapshot("codex", &roots, &[rollout.clone(), history.clone()]).unwrap();
+        assert_eq!(after.into_keys().collect::<Vec<_>>(), [rollout, history]);
+    }
+
     #[test]
     fn targeted_deletion_preserves_parent_and_nested_usage_without_syncing_other_sessions() {
         for agent in ["qoder", "claude"] {
@@ -148,14 +187,10 @@ mod tests {
             record(&root.join("other/cccc.jsonl"), "cccc", "unrelated", 990);
             let ledger = temp.path().join("ledger.sqlite3");
             let mut store = Store::open_with_ledger(None, Some(&ledger));
-            let targets =
-                crate::agents::claude_family::deletion_targets(&root, "project", "aaaa").unwrap();
-            preserve_at(agent, &[temp.path().join("missing"), root], &mut store, &targets, || {
-                fs::remove_file(&parent).unwrap();
-                fs::remove_dir_all(&children).unwrap();
-                Ok(())
-            })
-            .unwrap();
+            let targets = targets(&root, "aaaa");
+            save(agent, &[temp.path().join("missing"), root], &mut store, &targets).unwrap();
+            fs::remove_file(&parent).unwrap();
+            fs::remove_dir_all(&children).unwrap();
             drop(store);
             let mut reopened = Store::open_with_ledger(None, Some(&ledger));
             assert_eq!(
@@ -204,13 +239,9 @@ mod tests {
             .unwrap();
         let scope = super::super::scope("qoder", &[root.clone()]);
         let old_other = serde_json::to_value(store.load_file(&scope, &other).unwrap()).unwrap();
-        let targets =
-            crate::agents::claude_family::deletion_targets(&root, "project", "aaaa").unwrap();
-        preserve_at("qoder", &[root.clone()], &mut store, &targets, || {
-            fs::remove_file(&parent).unwrap();
-            Ok(())
-        })
-        .unwrap();
+        let targets = targets(&root, "aaaa");
+        save("qoder", &[root.clone()], &mut store, &targets).unwrap();
+        fs::remove_file(&parent).unwrap();
         assert_eq!(total(&mut store), 110);
         assert_eq!(
             serde_json::to_value(store.load_file(&scope, &other).unwrap()).unwrap(),
@@ -225,97 +256,71 @@ mod tests {
     }
 
     #[test]
-    fn target_read_or_ledger_failure_never_calls_delete() {
+    fn unreadable_targets_or_ledger_fail_only_their_own_save() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("projects");
         let path = root.join("project/aaaa.jsonl");
+        let other = root.join("project/bbbb.jsonl");
         record(&path, "aaaa", "first", 11);
+        record(&other, "bbbb", "other", 22);
         let bad = temp.path().join("broken-ledger.sqlite3");
         fs::write(&bad, "not a database").unwrap();
-        let called = Cell::new(false);
-        let mut store = Store::open_with_ledger(None, Some(&bad));
-        assert!(preserve_at(
-            "qoder",
-            &[root.clone()],
-            &mut store,
-            &[path.clone()],
-            || {
-                called.set(true);
-                Ok(())
-            }
-        )
-        .is_err());
-        assert!(!called.get());
-        assert!(path.exists());
+        let mut broken = Store::open_with_ledger(None, Some(&bad));
+        assert!(save("qoder", &[root.clone()], &mut broken, &[path.clone()]).is_err());
         assert_eq!(fs::read_to_string(&bad).unwrap(), "not a database");
+
         let child_dir = root.join("project/aaaa");
         fs::create_dir(&child_dir).unwrap();
         std::os::unix::fs::symlink(temp.path().join("missing"), child_dir.join("child.jsonl"))
             .unwrap();
         let mut store = Store::open(None);
-        assert!(preserve_at(
-            "qoder",
-            &[root],
-            &mut store,
-            &[path.clone(), child_dir],
-            || {
-                called.set(true);
-                Ok(())
-            }
-        )
-        .is_err());
-        assert!(!called.get());
-        assert!(path.exists());
+        assert!(save("qoder", &[root.clone()], &mut store, &[path, child_dir]).is_err());
+        save("qoder", &[root], &mut store, &[other]).unwrap();
+        assert_eq!(total(&mut store), 22);
+
+        let rollouts = temp.path().join("sessions");
+        let corrupt = rollouts.join("rollout-broken.jsonl.zst");
+        fs::create_dir(&rollouts).unwrap();
+        fs::write(&corrupt, b"not a zstd stream").unwrap();
+        let error = save("codex", &[rollouts], &mut store, &[corrupt]).unwrap_err();
+        assert!(error.contains("rollout-broken.jsonl.zst"), "{error}");
     }
 
     #[test]
-    fn writes_replacements_and_new_children_during_preservation_abort_deletion() {
-        for change in ["append", "replace", "child"] {
-            let temp = tempfile::tempdir().unwrap();
-            let root = temp.path().join("projects");
-            let path = root.join("project/aaaa.jsonl");
-            let children = root.join("project/aaaa");
-            record(&path, "aaaa", "first", 11);
-            fs::create_dir(&children).unwrap();
-            let called = Cell::new(false);
-            let mut store = Store::open(None);
-            let result = preserve_with_sync(
-                "qoder",
-                &[root.clone()],
-                &[path.clone(), children.clone()],
-                |paths| {
-                    super::super::ingest::sync_paths(
-                        "qoder",
-                        &[root.clone()],
-                        &mut store,
-                        Some(paths),
-                        &|| false,
-                    )?;
-                    match change {
-                        "append" => {
-                            fs::OpenOptions::new()
-                                .append(true)
-                                .open(&path)
-                                .unwrap()
-                                .write_all(b"\n")
-                                .unwrap();
-                        }
-                        "replace" => {
-                            fs::rename(&path, temp.path().join("original")).unwrap();
-                            record(&path, "aaaa", "replacement", 22);
-                        }
-                        _ => record(&children.join("new.jsonl"), "bbbb", "child", 33),
+    fn writes_replacements_and_new_children_during_or_after_saving_abort_deletion() {
+        let change = |change: &str, path: &Path, children: &Path, temp: &Path| match change {
+            "append" => fs::OpenOptions::new().append(true).open(path).unwrap().write_all(b"\n").unwrap(),
+            "replace" => {
+                fs::rename(path, temp.join("original")).unwrap();
+                record(path, "aaaa", "replacement", 22);
+            }
+            _ => record(&children.join("new.jsonl"), "bbbb", "child", 33),
+        };
+        for kind in ["append", "replace", "child"] {
+            for after_saving in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("projects");
+                let path = root.join("project/aaaa.jsonl");
+                let children = root.join("project/aaaa");
+                record(&path, "aaaa", "first", 11);
+                fs::create_dir(&children).unwrap();
+                let targets = [path.clone(), children.clone()];
+                let mut store = Store::open(None);
+                let saved = save_with("qoder", &[root.clone()], &targets, |paths| {
+                    super::super::ingest::sync_paths("qoder", &[root.clone()], &mut store, Some(paths), &|| false)?;
+                    if !after_saving {
+                        change(kind, &path, &children, temp.path());
                     }
                     Ok(())
-                },
-                || {
-                    called.set(true);
-                    Ok(())
-                },
-            );
-            assert!(result.unwrap_err().contains("发生变化"), "{change}");
-            assert!(!called.get());
-            assert!(path.exists());
+                });
+                let error = if after_saving {
+                    change(kind, &path, &children, temp.path());
+                    unchanged("qoder", &[root], &targets, &saved.unwrap()).unwrap_err()
+                } else {
+                    saved.unwrap_err()
+                };
+                assert!(error.contains("发生变化"), "{kind} {after_saving}");
+            }
         }
     }
 
@@ -327,82 +332,12 @@ mod tests {
         fs::create_dir_all(&children).unwrap();
         record(&root.join("project/bbbb.jsonl"), "bbbb", "unrelated", 99);
         let mut store = Store::open(None);
-        let targets =
-            crate::agents::claude_family::deletion_targets(&root, "project", "aaaa").unwrap();
-        preserve_at("qoder", &[root.clone()], &mut store, &targets, || Ok(())).unwrap();
+        let targets = targets(&root, "aaaa");
+        save("qoder", &[root.clone()], &mut store, &targets).unwrap();
         assert_eq!(total(&mut store), 0);
         let outside = temp.path().join("outside.jsonl");
         record(&outside, "cccc", "outside", 100);
-        assert!(
-            preserve_at("qoder", &[root.clone()], &mut store, &[outside], || panic!(
-                "Must not delete outside roots"
-            ))
-            .is_err()
-        );
-        assert!(preserve_at("qoder", &[root], &mut store, &[], || panic!(
-            "Must not accept empty targets"
-        ))
-        .is_err());
-    }
-
-    #[test]
-    #[ignore = "Requires isolated SQLite backups and an explicitly selected real Qoder session"]
-    fn real_qoder_deletion_preservation_benchmark() {
-        use std::time::Instant;
-        let backup = PathBuf::from(
-            std::env::var("ASM_DELETE_PROBE_STORE")
-                .expect("Missing isolated store backup directory"),
-        );
-        let project = std::env::var("ASM_DELETE_PROBE_PROJECT")
-            .expect("Missing source project directory key");
-        let session = std::env::var("ASM_DELETE_PROBE_SESSION").expect("Missing source session ID");
-        let source = crate::agents::find_source("qoder").unwrap();
-        let targets = source
-            .deletion_targets(&project, &session)
-            .unwrap()
-            .expect("Source did not supply deletion targets");
-        let roots = super::super::roots("qoder").unwrap();
-        let selected = snapshot("qoder", &roots, &targets).unwrap();
-        assert!(
-            !selected.is_empty(),
-            "Requested session has no usage source files"
-        );
-        let full_count = super::super::discover("qoder", &roots, &|| false)
-            .unwrap()
-            .len();
-        for round in 0..3 {
-            for targeted in if round % 2 == 0 {
-                [false, true]
-            } else {
-                [true, false]
-            } {
-                // 只在已关闭的备份上分出独立副本；实际日志只读，绝不调用删除动作。
-                let temp = tempfile::tempdir().unwrap();
-                for name in ["cache.sqlite3", "ledger.sqlite3"] {
-                    fs::copy(backup.join(name), temp.path().join(name)).unwrap();
-                }
-                let mut store = Store::open_with_ledger(
-                    Some(&temp.path().join("cache.sqlite3")),
-                    Some(&temp.path().join("ledger.sqlite3")),
-                );
-                let started = Instant::now();
-                if targeted {
-                    preserve_at("qoder", &roots, &mut store, &targets, || Ok(())).unwrap();
-                } else {
-                    super::super::preserve_before_delete_at("qoder", &roots, &mut store, || Ok(()))
-                        .unwrap();
-                }
-                println!(
-                    "{}",
-                    json!({"round":round,"targeted":targeted,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,
-                    "selected_sources":selected.len(),"all_sources":full_count})
-                );
-            }
-        }
-        assert_eq!(
-            snapshot("qoder", &roots, &targets).unwrap(),
-            selected,
-            "Selected source changed during benchmark"
-        );
+        assert!(save("qoder", &[root.clone()], &mut store, &[outside]).is_err(), "Outside targets must never be deleted");
+        assert!(save("qoder", &[root], &mut store, &[]).is_err(), "Empty targets must never be deleted");
     }
 }

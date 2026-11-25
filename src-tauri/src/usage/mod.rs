@@ -33,7 +33,6 @@ mod tests;
 mod types;
 
 pub(crate) use cache::Store;
-pub(crate) use codex::failures::database as codex_failure_database;
 #[cfg(test)]
 use chrono::{Local, TimeZone, Utc};
 use sha2::{Digest, Sha256};
@@ -127,7 +126,7 @@ pub fn roots(agent: &str) -> Result<Vec<PathBuf>, String> {
         "codex" => vec![
             root.join("sessions"),
             root.join("archived_sessions"),
-            codex::failures::database(&root),
+            crate::agents::codex::history_database(&root),
         ],
         "pi" => vec![root.join("sessions")],
         _ => vec![root],
@@ -156,41 +155,12 @@ fn store(agent: &str) -> &'static Mutex<Store> {
     })
 }
 
-/// 删除动作必须晚于账本的持久化提交；失败时保留会话，不能静默丢掉最后一轮用量。
-pub fn preserve_before_delete(
-    agent: &str,
-    targets: Option<&[PathBuf]>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+/// 删除动作必须晚于账本的持久化提交；整批删除期间持有账本写锁。
+pub fn preserve_for_deletion(agent: &str) -> Result<impl crate::agents::deletion::PreserveUsage, String> {
     let roots = roots(agent)?;
-    let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
-    let mut store = store(agent).lock().unwrap_or_else(|e| e.into_inner());
-    match targets {
-        Some(targets) => deletion::preserve_at(agent, &roots, &mut store, targets, delete),
-        None => preserve_before_delete_at(agent, &roots, &mut store, delete),
-    }
-}
-
-pub(crate) fn preserve_codex_deletion(
-    targets: &[PathBuf],
-    validate: impl FnOnce() -> Result<(), String>,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let roots = roots("codex")?;
-    let _writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
-    let mut store = store("codex").lock().unwrap_or_else(|e| e.into_inner());
-    deletion::preserve_validated_at("codex", &roots, &mut store, targets, validate, delete)
-}
-
-fn preserve_before_delete_at(
-    agent: &str,
-    roots: &[PathBuf],
-    store: &mut Store,
-    delete: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    ingest::sync_at(agent, roots, store, &|| false)
-        .map_err(|e| format!("删除前未能保存累计用量，会话已保留：{e}"))?;
-    delete()
+    let writer = ledger::SyncLock::acquire(&ledger::path()?, &|| false)?;
+    let store = store(agent).lock().unwrap_or_else(|e| e.into_inner());
+    Ok(deletion::Preservation::new(agent, roots, writer, store))
 }
 
 fn source_error(path: &std::path::Path, cause: impl std::fmt::Display) -> String {

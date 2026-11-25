@@ -599,11 +599,12 @@
 :is(.request-client, .request-project) > :is(span, small) { overflow: hidden; text-overflow: ellipsis; }
 .request-table > tbody > tr:not(.request-detail-row) > td:last-child { max-width: 220px; }
 .tip-trigger:has(.request-result[data-tone="error"]) { cursor: help; }
-.request-session-id { display: flex; align-items: center; gap: 6px; }
+.request-session-id { display: flex; align-items: center; }
 
 .request-session-id code {
   display: block;
   min-width: 0;
+  margin-inline-end: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

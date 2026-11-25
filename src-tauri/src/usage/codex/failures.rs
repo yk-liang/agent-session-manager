@@ -1,5 +1,6 @@
 //! 已结束的模型调用失败。SQLite 历史在 rollout 未保存终止事件时补充记录。
 use super::{FileCache, RequestError, RequestMeta, RequestOutcome, Sample};
+use crate::agents::codex::HISTORY_DB;
 use crate::agents::scanning::sqlite_snapshot;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -8,14 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(in crate::usage) const DATABASE: &str = "thread_history_1.sqlite";
 pub(in crate::usage) const PARSER_VERSION: u8 = 1;
 const TURN_KEY: &str = "codex-turn-failure:";
-
-pub(crate) fn database(codex_home: &Path) -> PathBuf {
-    crate::agents::codex::sqlite_home(codex_home)
-        .join(DATABASE)
-}
 
 fn turn_key(session: &str, turn: &str) -> String {
     if turn.len() == 36 && turn.bytes().enumerate().all(|(i, byte)| {
@@ -148,7 +143,7 @@ pub(in crate::usage) fn reconcile(files: &BTreeMap<PathBuf, FileCache>) -> Vec<S
     let mut retained = Vec::new();
     for (path, file) in files {
         let origin = file.origin_path.as_deref().unwrap_or(path);
-        let rollout = origin.file_name().is_none_or(|name| name != DATABASE);
+        let rollout = origin.file_name().is_none_or(|name| name != HISTORY_DB);
         for sample in &file.failures {
             let Some(turn) = sample.request_identities.keys.iter().find(|key| key.starts_with(TURN_KEY)) else {
                 retained.push(sample.clone());

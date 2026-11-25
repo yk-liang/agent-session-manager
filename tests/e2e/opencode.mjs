@@ -53,14 +53,14 @@ try {
   assert.ok(ids.indexOf(1)<ids.indexOf(2)&&ids.indexOf(2)<ids.indexOf(3)&&ids.indexOf(3)<ids.indexOf(5));
   assert.ok((await page.locator('#ev-0').textContent()).includes('First request\ncontinued request'));
   assert.equal(await page.evaluate(()=>window.__OPENCODE__.calls.filter(c=>c.cmd==='read_tool_payload').length),0);
-  assert.equal(await page.locator('#ev-1').getAttribute('title'),'模型：fixture/model-a');
+  assert.equal(await page.locator('#ev-1').getAttribute('title'),null);
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
   const info=page.getByRole('group',{name:'会话信息',exact:true});
   assert.equal(await info.locator('dt').first().textContent(),'最近使用的模型');
   assert.equal(await info.locator('.model-label').first().textContent(),'fixture/model-b');
   assert.equal(await info.locator('.session-model-history .model-label').textContent(),'fixture/model-a');
   await page.getByRole('button',{name:'更多信息',exact:true}).click();
-  console.log(`PASS: latest model badge, provider-scoped history and per-message model hints (${engine})`);
+  console.log(`PASS: latest model badge and provider-scoped history without message hover hints (${engine})`);
   console.log(`PASS: source part order, grouped user prompt and folded tools/reasoning (${engine})`);
 
   assert.equal(await readCard.locator('.op-name').getAttribute('title'),'/tmp/example');
@@ -72,12 +72,12 @@ try {
   console.log(`PASS: file reads show the path up front and load only their content on expansion; stored reasoning expands (${engine})`);
 
   await page.locator('.detail-body').evaluate(el=>el.scrollTo(0,el.scrollHeight));
-  await page.getByRole('button',{name:/^工具调用 bash.*失败 exit 1$/}).click();
+  await page.getByRole('button',{name:/^工具调用.*失败 exit 1.*bash$/}).click();
   await page.getByText('Exit code 1',{exact:true}).waitFor();
-  assert.ok(await page.getByRole('button',{name:/^工具调用 queued.*等待中$/}).count());
-  await page.getByRole('button',{name:/^工具调用 streaming.*进行中$/}).click();
+  assert.ok(await page.getByRole('button',{name:/^工具调用.*等待中.*queued$/}).count());
+  await page.getByRole('button',{name:/^工具调用.*进行中.*streaming$/}).click();
   await page.getByText('partial output',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:/^工具调用 streaming.*已完成$/}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/^工具调用.*已完成.*streaming$/}).count(),0);
   await page.getByRole('checkbox',{name:'工具调用',exact:true}).uncheck();
   assert.equal(await page.locator('.collapsible.tool').count(),0);
   await page.getByRole('checkbox',{name:'思考过程',exact:true}).uncheck();

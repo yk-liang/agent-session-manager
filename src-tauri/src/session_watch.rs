@@ -341,7 +341,16 @@ mod tests {
         assert!(qoder.relevant(&change(root.join("projects/project/a.jsonl"))));
         assert!(!qoder.relevant(&change(root.join("logs/runs/run/qodercli.log"))));
         assert!(!qoder.relevant(&change(root.join("settings.json"))));
-        assert!(!qoder.relevant(&change(root.join("projects/project/subagents/a.jsonl"))));
+        for agent in ["claude", "qoder"] {
+            let family = WatchSpec::new(agent, root.clone());
+            for path in [
+                "projects/project/aaaa/subagents/agent-bbbb.jsonl",
+                "projects/project/aaaa/subagents/agent-bbbb.meta.json",
+            ] {
+                assert!(family.relevant(&change(root.join(path))));
+            }
+            assert!(!family.relevant(&change(root.join("projects/project/aaaa/subagents/private.json"))));
+        }
         let codex = WatchSpec::new("codex", root.clone());
         for path in [
             "sessions/2099/01/01/a.jsonl",
@@ -367,6 +376,7 @@ mod tests {
             &Event::new(notify::EventKind::Create(CreateKind::File))
                 .add_path(root.join("sessions/project/a.jsonl"))
         ));
+        assert!(pi.relevant(&change(root.join("sessions/project/a/run-id/run-0/session.jsonl"))));
     }
 
     #[test]

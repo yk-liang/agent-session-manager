@@ -17,14 +17,14 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import ResizableLayout from "./components/ResizableLayout";
 import ReadDiagnostics from "./components/ReadDiagnostics";
 import * as api from "./api";
-import { isEmptySession, sessionKey } from "./utils";
+import { displaySessionId, isEmptySession, sessionKey } from "./utils";
 import { useConversationSearch } from "./useConversationSearch";
 import { catalogGroups } from "./sessionGroups";
 import { useSessionCatalog, useSessionCounts } from "./useSessionCatalog";
 import { catalogFilterFor, DEFAULT_CATALOG_FILTER } from "./catalogCache";
 import { useUiPreference } from "./useUiPreference";
 import type { SessionReading } from "./sessionContent";
-import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta, SessionRef } from "./types";
+import type { AgentInfo, CatalogFilter, ConfigActivity, ConversationSearchTarget, SessionDeleteFailure, SessionDetail, SessionMeta } from "./types";
 
 const NO_SESSIONS: SessionMeta[] = [];
 const NO_AGENTS: AgentInfo[] = [];
@@ -64,7 +64,8 @@ export default function App() {
   const [operation, setOperation] = useState<SessionOperation | null>(null);
   const [batchFailures, setBatchFailures] = useState<SessionDeleteFailure[]>([]);
   const mutationRunning = useRef(false);
-  const batchDeleting = useRef(false);
+  const deleting = useRef(false);
+  const deleteRun = useRef(0);
   const batchDeleteProgress = operation?.kind === "delete" ? operation.progress : null;
   const sessionActionsBusy = operation !== null;
   const [toast, setToast] = useState<{ msg: string; error: boolean } | null>(null);
@@ -97,13 +98,13 @@ export default function App() {
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (batchDeleting.current || configActivityRef.current.dirty || configActivityRef.current.busy) {
+      if (deleting.current || configActivityRef.current.dirty || configActivityRef.current.busy) {
         event.preventDefault(); event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", beforeUnload);
     const unlisten = isTauri() ? listen("config-exit-requested", () => {
-      if (batchDeleting.current) return;
+      if (deleting.current) return;
       const activity = configActivityRef.current;
       if (activity.busy) { showToast("配置操作仍在进行，请稍后退出。", true); return; }
       const exit = () => { void api.confirmConfigExit().catch((e) => showToast(String(e), true)); };
@@ -217,7 +218,7 @@ export default function App() {
     const q = query.toLowerCase();
     if (!q) return scopedSessions;
     return scopedSessions.filter((s) => {
-      return contentSearch.hits.has(sessionKey(s)) || [s.title, s.sessionId, s.cwd, s.model, s.codex?.source, s.codex?.threadSource]
+      return contentSearch.hits.has(sessionKey(s)) || [s.title, displaySessionId(s), s.cwd, s.model, s.codex?.source, s.codex?.threadSource]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
@@ -246,8 +247,7 @@ export default function App() {
   const hidingSessionKey = !query && selectedSessionKey && scopeKeys.has(selectedSessionKey)
     ? tree.ancestors(selectedSessionKey, scopeKeys).reverse().find(key => !expanded.has(key))
     : undefined;
-  const selectedThread = selectedDetail?.meta.codex;
-  const parent = selectedThread?.parentId && !selectedThread.orphan ? tree.byId.get(selectedThread.parentId) : undefined;
+  const parent = selectedDetail ? tree.parent(selectedDetail.meta) : undefined;
 
   const toggleChildren = (key: string) => {
     setRevealKey(null);
@@ -262,8 +262,7 @@ export default function App() {
     setRevealKey(key => key === activeRevealKey ? null : key);
   }, [activeRevealKey, expanded]);
 
-  function openParentSession(id: string) {
-    const parent = tree.byId.get(id);
+  function openParentSession() {
     if (!parent || !selectedAgent || sessionActionsBusy || mutationRunning.current) return;
     const key = sessionKey(parent);
     if (!scopeKeys.has(key)) selectSessionScope(null);
@@ -290,7 +289,7 @@ export default function App() {
 
   const openSession = (session: SessionMeta, toggleSelection = false) => {
     if (!selectedAgent || sessionActionsBusy || mutationRunning.current || (toggleSelection && batchBusy)) return;
-    setRevealKey(query && session.codex?.subagent ? sessionKey(session) : null);
+    setRevealKey(query && session.subagent ? sessionKey(session) : null);
     if (toggleSelection) {
       const key = sessionKey(session);
       setCheckedSessionKeys(current => {
@@ -374,7 +373,7 @@ export default function App() {
       setSearch("");
       setRequestReveal({ includeEmpty: !session.statsPending && isEmptySession(session), includeArchived: !!session.archived });
       if (agent.id !== selectedAgent) setExpandedSessions(new Set());
-      if (session.codex?.subagent) setRevealKey(sessionKey(session));
+      if (session.subagent) setRevealKey(sessionKey(session));
       setPreferredAgents(current => ({ ...current, local: agent.id }));
       changeTab("sessions");
       void loadSession(agent.id, session);
@@ -463,31 +462,29 @@ export default function App() {
     const { agent, sessions: targets, mode } = operation.request;
     const batch = mode === "batch";
     const total = targets.length;
-    const guardDeletion = batch || agent.id === "codex";
-    const useNativeGuard = guardDeletion && isTauri();
+    const useNativeGuard = isTauri();
     mutationRunning.current = true;
-    batchDeleting.current = guardDeletion;
+    deleting.current = true;
+    const run = ++deleteRun.current;
     setOperation({ kind: "delete", progress: batch ? { completed: 0, total } : null });
-    const removed = new Map<string, SessionRef>();
-    const failures: SessionDeleteFailure[] = [];
     try {
       if (useNativeGuard) {
-        try { await api.setBatchDeleteGuard(true); }
+        try { await api.setDeleteGuard(true); }
         catch (error) { showToast(`无法启用${batch ? "批量" : ""}删除保护：${String(error)}`, true); return; }
       }
       if (batch) setBatchFailures([]);
-      for (const [index, session] of targets.entries()) {
-        try {
-          if (!removed.has(sessionKey(session))) {
-            const result = await api.deleteSession(agent.id, session.projectDir, session.sessionId);
-            for (const target of result?.removed ?? [session]) removed.set(sessionKey(target), target);
-            if (result?.error) failures.push({ session, error: result.error });
-          }
-        } catch (error) {
-          failures.push({ session, error: String(error) });
+      // 进度经通道推送，可能晚于删除结果到达，只更新本次仍在进行的删除。
+      const result = await api.deleteSessions(agent.id, targets, completed => {
+        if (batch && run === deleteRun.current) {
+          setOperation(current => current?.kind === "delete" ? { kind: "delete", progress: { completed, total } } : current);
         }
-        if (batch) setOperation({ kind: "delete", progress: { completed: index + 1, total } });
-      }
+      }).catch(error => ({ removed: [], failures: targets.map(session => ({ session, error: String(error) })) }));
+      const requested = new Map(targets.map(session => [sessionKey(session), session]));
+      const failures = result.failures.flatMap(({ session, error }) => {
+        const meta = requested.get(sessionKey(session));
+        return meta ? [{ session: meta, error }] : [];
+      });
+      const removed = new Map(result.removed.map(session => [sessionKey(session), session]));
       if (removed.size) {
         if (selectedSessionKey && removed.has(selectedSessionKey)) closeSessionDetail();
         catalogCache.remove(agent.id, [...removed.values()]);
@@ -508,9 +505,9 @@ export default function App() {
       }
       refreshCatalog();
     } finally {
-      if (useNativeGuard) await api.setBatchDeleteGuard(false)
+      if (useNativeGuard) await api.setDeleteGuard(false)
         .catch(error => showToast(`无法解除删除保护：${String(error)}`, true));
-      batchDeleting.current = false;
+      deleting.current = false;
       setOperation(null);
       mutationRunning.current = false;
     }

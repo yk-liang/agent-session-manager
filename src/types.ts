@@ -18,11 +18,15 @@ export interface SessionRef {
 export interface CodexThread {
   source?: string;
   threadSource?: string;
-  parentId?: string;
-  subagent: boolean;
   canResume: boolean;
   empty?: boolean;
-  orphan?: boolean;
+}
+
+export interface Subagent {
+  id?: string;
+  parentId?: string;
+  parent?: SessionRef;
+  orphan: boolean;
   projectOwner?: SessionRef & { cwd: string | null };
 }
 
@@ -35,6 +39,7 @@ export interface SessionMeta extends SessionRef {
   gitBranch: string | null;
   entrypoint: string | null;
   codex?: CodexThread;
+  subagent?: Subagent;
   firstTs: string | null;
   lastTs: string | null;
   userCount: number;
@@ -66,7 +71,7 @@ export interface ConversationSearchHit {
   projectDir: string;
   eventIndex: number;
   eventId: string | null;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "agent";
   snippet: string;
 }
 
@@ -107,13 +112,17 @@ export interface SessionGroupHint {
 export interface SessionDetail {
   meta: SessionMeta;
   events: SessionEvent[];
+  /** 开头这些事件是子会话分叉时继承自父会话的上下文。 */
+  inherited: number;
   warnings?: string[];
 }
 
 export interface SessionEvent {
-  type: "user" | "assistant" | "system" | "context";
+  type: "user" | "assistant" | "system" | "context" | "agent";
   /** 自动注入的运行上下文；保留原文，但不属于用户或助手对话。 */
   context?: { kind: string; label: string; summary?: string | null };
+  /** 其他智能体发给本会话的消息；正文加密时内容为空。 */
+  agent?: AgentEnvelope;
   uuid?: string;
   timestamp?: string;
   isMeta?: boolean;
@@ -126,9 +135,17 @@ export interface SessionEvent {
   };
 }
 
+export interface AgentEnvelope {
+  kind: "task" | "message" | "result";
+  /** 发送方与接收方在智能体树中的路径，例如 `/root` 与 `/root/review`。 */
+  from: string;
+  to: string;
+  encrypted?: boolean;
+}
+
 export interface ContentBlock {
   /** 数据源保存的工具状态；有部分输出不代表已经完成。 */
-  status?: "pending" | "running" | "completed" | "error";
+  status?: "pending" | "running" | "completed" | "error" | "cancelled";
   /** 已确认日志行的引用；展开时向后端取正文。 */
   deferred?: string;
   type: string;
@@ -139,12 +156,19 @@ export interface ContentBlock {
   source?: unknown;
   url?: string;
   image_url?: string;
+  uri?: string;
   filename?: string;
   id?: string;
   input?: unknown;
   tool_use_id?: string;
   content?: unknown;
   is_error?: boolean;
+  error_summary?: string;
+  command_output_kind?: "empty" | "diff";
+  /** 去掉工具回执、尾注和占位文字后的输出正文；原始结果仍在 `content`。 */
+  output?: string;
+  /** 工具把过长的输出另存到这个文件，结果里只有预览。 */
+  output_file?: string;
   exit_code?: number;
   script_result?: ContentBlock;
   /** 后端给出的操作描述；延迟加载时只带标题所需字段，正文随原始数据一起读取。 */
@@ -166,7 +190,7 @@ export interface SearchHits {
 
 export type BrowseOp =
   | { kind: "read"; path: string; start?: number; end?: number; total?: number; tail?: number }
-  | { kind: "search"; pattern: string; paths?: string[]; in_file?: boolean; matches?: number; files?: number; hits?: SearchHits[] }
+  | { kind: "search"; pattern: string; paths?: string[]; in_file?: boolean; matches?: number; files?: number; hits?: SearchHits[]; truncated?: boolean }
   | { kind: "find"; pattern?: string; paths?: string[]; count?: number }
   | { kind: "list"; paths?: string[]; count?: number };
 
@@ -182,12 +206,15 @@ export type ShellFilter =
 
 export type ShellIntent =
   | "read" | "search" | "find" | "list" | "write" | "modify" | "script" | "run"
-  | "git_diff" | "git_log" | "git_commit" | "git" | "github"
-  | "test" | "build" | "install" | "remote" | "http" | "browser" | "database"
-  | "mkdir" | "remove" | "copy" | "move" | "process" | "kill" | "wait" | "open" | "count" | "other";
+  | "diff" | "git_diff" | "git_log" | "git_commit" | "git_stage" | "git_push" | "git_change" | "git_read" | "git" | "github"
+  | "test" | "build" | "install" | "remote" | "http" | "download" | "browser" | "database" | "agent" | "agent_manage"
+  | "mkdir" | "remove" | "copy" | "move" | "link" | "sign" | "archive" | "permissions" | "process" | "kill" | "wait" | "open" | "count" | "inspect" | "transform" | "other";
+
+type CommandOutcome = "no_match" | "differences";
+type CommandExitOne = CommandOutcome | "silent_differences";
 
 /** heredoc、`-c`/`-e` 参数或脚本工具的代码；`first` 是第一行有意义的代码。 */
-export interface ScriptInfo {
+interface ScriptInfo {
   lang?: string;
   title?: string;
   lines: number;
@@ -195,50 +222,69 @@ export interface ScriptInfo {
   body?: string;
 }
 
-/** 只读、搜、找、列的命令带 `steps`，按文件操作展示；其余命令按第一步的意图展示。 */
 export interface ShellOp {
   kind: "shell";
   command?: string;
   description?: string;
   exit_code?: number;
-  no_match?: boolean;
-  cwd?: string;
+  outcome?: CommandOutcome;
+  exit_one?: CommandExitOne;
   intent: ShellIntent;
   head?: string;
-  filters?: ShellFilter[];
   more?: number;
   looped?: boolean;
   target?: string;
   append?: boolean;
   script?: ScriptInfo;
-  steps?: (BrowseOp & { program: string; filters?: ShellFilter[] })[];
+  steps?: (BrowseOp & { filters?: ShellFilter[] })[];
+  actions?: { command: string; intent: ShellIntent; target?: string }[];
+  related?: ShellIntent[];
+  conditional?: boolean;
 }
 
-export interface AskQuestion {
+interface AskQuestion {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
   answer?: string;
 }
 
+/** exec 脚本里的一次工具调用；`ops` 与同名工具单独调用时的描述相同，求不出参数时为空。 */
+export interface ExecCall {
+  tool: string;
+  ops?: ToolOp[];
+  cwd?: string;
+  target?: string;
+  input?: unknown;
+  expression?: string;
+}
+
+type ExecFeature = "parallel" | "loop" | "conditional" | "state" | "invalid";
+
 export type ToolOp =
   | BrowseOp
   | ChangeOp
   | ShellOp
   | ({ kind: "script" } & ScriptInfo)
-  | { kind: "skill"; name: string; args?: string; path?: string; description?: string; body?: string }
-  | { kind: "web_search"; query: string; domain?: string; results?: number }
-  | { kind: "web_fetch"; url: string; prompt?: string }
+  | { kind: "exec"; calls: ExecCall[]; lines: number; lead?: [number, number]; features?: ExecFeature[] }
+  | { kind: "skill"; name: string; args?: string; path?: string; body?: string }
+  | { kind: "web_search"; queries: string[]; domain?: string; results?: number }
+  | { kind: "web_fetch"; url: string; prompt?: string; find?: boolean }
   | { kind: "ask"; questions: AskQuestion[] }
-  | { kind: "agent"; agent?: string; task: string; background?: boolean }
-  | { kind: "message"; to: string; summary?: string }
+  | { kind: "agent"; agent?: string; task: string; background?: boolean; encrypted?: boolean }
+  | { kind: "message"; to: string; summary?: string; encrypted?: boolean }
   | { kind: "wait"; seconds?: number; target?: string }
   | { kind: "wake"; seconds: number; reason?: string }
   | { kind: "stop"; task: string; detail?: string }
+  | { kind: "task_status"; task: string }
+  | { kind: "terminal_input"; session: number; action: "poll" | "send" | "interrupt" }
+  | { kind: "agent_list" }
   | { kind: "monitor"; description: string; minutes?: number }
   | { kind: "load_tools"; names: string[] }
   | { kind: "todo"; items: { text: string; status: string }[] }
   | { kind: "image"; path: string }
+  | { kind: "generate_image"; path?: string }
+  | { kind: "report"; title: string; summary?: string }
   | { kind: "mcp"; server: string; tool: string; title?: string };
 
 export interface FilePresence {

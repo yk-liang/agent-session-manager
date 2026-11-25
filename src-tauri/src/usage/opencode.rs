@@ -73,7 +73,7 @@ pub(super) fn read(
         }
     };
     // 只取请求元数据，不读取 part/对话正文。原始 time.created 早于会话创建说明是继承历史，
-    // 不能只靠 tokens/时间相等合并，否则会丢掉两次确实发生的相同请求。
+    // 不能只靠 Token/时间相等合并，否则会丢掉两次确实发生的相同请求。
     let fork_boundaries = fork_boundaries(&conn).map_err(|e| e.to_string())?;
     let seq_column = if conn
         .prepare("SELECT sort_order FROM message LIMIT 0")

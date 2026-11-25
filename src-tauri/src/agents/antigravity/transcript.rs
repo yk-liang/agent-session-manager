@@ -9,13 +9,20 @@ use crate::agents::{context, escape_path_id, ms_to_iso, SessionDetail, SessionMe
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, HashMap}, path::Path};
 
-fn generation_models(
+#[derive(Default)]
+struct Generations {
+    models: BTreeMap<i64, Model>,
+    /// 只有最近一次生成请求保留完整系统提示词，较早的记录会被精简。
+    system_prompt: Option<String>,
+}
+
+fn generations(
     connection: &rusqlite::Connection,
     warnings: &mut Vec<String>,
-) -> storage::ReadResult<BTreeMap<i64, Model>> {
+) -> storage::ReadResult<Generations> {
     let mut stmt = connection.prepare("SELECT idx,data FROM gen_metadata ORDER BY idx")?;
     let mut rows = stmt.query([])?;
-    let mut models = BTreeMap::new();
+    let mut generations = Generations::default();
     while let Some(row) = rows.next()? {
         let index = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
@@ -23,13 +30,16 @@ fn generation_models(
             Ok(request) => {
                 let model = Model::generation(&request);
                 if model.is_recorded() {
-                    models.insert(index, model);
+                    generations.models.insert(index, model);
+                }
+                if let Some(prompt) = request.text(1).filter(|prompt| !prompt.trim().is_empty()) {
+                    generations.system_prompt = Some(prompt.to_owned());
                 }
             }
             Err(error) => warnings.push(format!("Antigravity 生成记录 {index} 的模型无法读取：{error}")),
         }
     }
-    Ok(models)
+    Ok(generations)
 }
 
 fn count_message(meta: &mut SessionMeta, kind: i64, blocks: &[Value]) {
@@ -58,9 +68,10 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         let session_id = storage::session_id(path)?;
         let wal = crate::agents::scanning::sqlite_wal_path(path);
         let size = storage::database_size(connection)?;
-        let (trajectory, _) = storage::trajectory(connection)?;
-        let cwd = trajectory.cwd;
-        let created = trajectory.created;
+        let (storage::Trajectory { cwd, created, parent, role }, _) = storage::trajectory(connection)?;
+        // agy 以 `<会话>/<名称>` 为会话内的后台任务寻址，子智能体在智能体树中的路径沿用这一形式。
+        let address = parent.zip(role.as_ref())
+            .map_or_else(|| session_id.to_owned(), |(parent, role)| format!("{parent}/{role}"));
         let mut meta = SessionMeta {
             session_id: session_id.into(),
             project_dir: cwd.as_deref().map(escape_path_id).unwrap_or_else(|| "-unknown".into()),
@@ -72,6 +83,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             git_branch: None,
             entrypoint: Some(if is_cli(path) { "cli" } else { "antigravity" }.into()),
             codex: None,
+            subagent: None,
             first_ts: created.and_then(ms_to_iso),
             last_ts: None,
             user_count: 0,
@@ -86,14 +98,19 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         };
         let mut detail_events = Vec::new();
         let mut warnings = Vec::new();
-        let generation = if schema.generations {
-            generation_models(connection, &mut warnings).unwrap_or_else(|error| {
+        let Generations { models: generation, system_prompt } = if schema.generations {
+            generations(connection, &mut warnings).unwrap_or_else(|error| {
                 warnings.push(format!("Antigravity 会话模型无法读取：{error}"));
-                BTreeMap::new()
+                Generations::default()
             })
         } else {
-            BTreeMap::new()
+            Generations::default()
         };
+        if let Some(prompt) = system_prompt.filter(|_| events) {
+            detail_events.push(json!({"uuid":format!("{session_id}:system-prompt"),"type":"context",
+                "context":{"kind":"instructions","label":"系统提示词"},
+                "message":{"role":"system","content":prompt}}));
+        }
         let mut names = HashMap::new();
         for model in generation.values() {
             model.remember(&mut names);
@@ -166,14 +183,18 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
                             detail_events.push(event);
                         }
                     }
+                    Some(Content::Agent { kind, from, text }) => {
+                        let content: Vec<_> = text.into_iter().map(|text| json!({"type":"text","text":text})).collect();
+                        detail_events.push(json!({"uuid":id,"type":"agent","timestamp":timestamp,
+                            "agent":{"kind":kind,"from":from,"to":address},
+                            "message":{"content":content}}));
+                    }
                     Some(Content::Context { kind, label, text }) => {
-                        meta.has_transcript = true;
                         detail_events.push(json!({"uuid":id,"type":"context","timestamp":timestamp,
                             "context":{"kind":kind,"label":label},
                             "message":{"role":"system","content":text}}));
                     }
                     Some(Content::System(text)) => {
-                        meta.has_transcript = true;
                         detail_events.push(json!({"uuid":id,"type":"system","timestamp":timestamp,"content":text}));
                     }
                     None => count_message(&mut meta, kind, &[]),
@@ -181,6 +202,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
             }
         }
         meta.last_ts = last_time.and_then(ms_to_iso);
+        meta.title = meta.title.or(role);
         if let Some((index, model)) = generation.last_key_value() {
             if latest_model_index.is_none_or(|latest| *index > latest) {
                 current_model = Some(model.resolve(None, &names).0);
@@ -188,7 +210,7 @@ pub(super) fn read(path: &Path, events: bool) -> Result<SessionDetail, String> {
         }
         meta.model = current_model.filter(|name| name != "unknown");
         crate::agents::tool_ops::describe_tools(&mut detail_events, super::tools::describe);
-        Ok(SessionDetail { meta, events: detail_events, warnings })
+        Ok(SessionDetail { meta, events: detail_events, inherited: 0, warnings })
     })
 }
 
@@ -197,6 +219,51 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::fs;
+
+    fn field(number: u64, value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for mut n in [number << 3 | 2, value.len() as u64] {
+            while n >= 0x80 {
+                out.push(n as u8 | 0x80);
+                n >>= 7;
+            }
+            out.push(n as u8);
+        }
+        [out, value.to_vec()].concat()
+    }
+
+    #[test]
+    fn subagent_shows_role_title_and_messages_from_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);
+                 CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, step_payload BLOB);",
+            )
+            .unwrap();
+        let descriptor = [field(1, b"research"), field(2, b"Build/Release Auditor")].concat();
+        let trajectory = [field(5, b"parent"), field(8, &descriptor)].concat();
+        connection.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)", [trajectory]).unwrap();
+        let message = |tool: &str, text: &str| {
+            let source = field(12, &field(1, &field(3, &field(2, tool.as_bytes()))));
+            let message = [field(3, b"parent"), field(4, text.as_bytes()), source].concat();
+            field(114, &[field(3, b"agent_message"), field(4, &message)].concat())
+        };
+        for (index, payload) in [(0, message("invoke_subagent", "审查任务")), (1, message("send_message", "补充说明"))] {
+            connection
+                .execute("INSERT INTO steps VALUES (?1, 101, X'', ?2)", rusqlite::params![index, payload])
+                .unwrap();
+        }
+
+        let detail = read(&path, true).unwrap();
+
+        assert_eq!(detail.meta.title.as_deref(), Some("Build/Release Auditor"));
+        assert_eq!(detail.events[0]["agent"], json!({"kind": "task", "from": "parent", "to": "parent/Build/Release Auditor"}));
+        assert_eq!(detail.events[0]["message"]["content"], json!([{"type": "text", "text": "审查任务"}]));
+        assert_eq!(detail.events[1]["agent"]["kind"], "message");
+    }
 
     #[test]
     fn size_uses_logical_pages_instead_of_bloated_wal() {

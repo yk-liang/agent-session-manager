@@ -21,6 +21,27 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
+/// 多智能体之间的消息：信封写明类型和收发方，正文可能只有密文。
+fn agent_message(payload: &Value, ts: Option<&str>, cwd: Option<&str>) -> Value {
+    let items = payload["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let text = text_of_content(items);
+    let (kind, body) = match text.strip_prefix("Message Type: ").and_then(|rest| rest.split_once("\nPayload:")) {
+        Some((envelope, body)) => (envelope.lines().next(), body),
+        None => (None, text.as_str()),
+    };
+    let body = body.trim();
+    let mut agent = json!({
+        "kind": match kind { Some("NEW_TASK") => "task", Some("FINAL_ANSWER") => "result", _ => "message" },
+        "from": payload["author"].as_str().unwrap_or_default(),
+        "to": payload["recipient"].as_str().unwrap_or_default(),
+    });
+    if items.iter().any(|item| item["type"] == "encrypted_content") {
+        agent["encrypted"] = json!(true);
+    }
+    let content: Vec<Value> = (!body.is_empty()).then(|| json!({"type": "text", "text": body})).into_iter().collect();
+    json!({"type": "agent", "timestamp": ts, "cwd": cwd, "agent": agent, "message": {"content": content}})
+}
+
 pub(super) fn convert(
     payload: &Value,
     ts: Option<&str>,
@@ -38,7 +59,7 @@ pub(super) fn convert(
         "reasoning" => {
             let thinking = ["summary", "content"].into_iter()
                 .filter_map(|key| payload[key].as_array())
-                .map(|items| text_of_content(items))
+                .map(text_of_content)
                 .filter(|text| !text.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -59,15 +80,17 @@ pub(super) fn convert(
             out.push(context::compaction(payload["summary"].as_str(), ts, cwd));
         }
         "web_search_call" | "tool_search_call" => {
-            let (name, input) = if kind == "web_search_call" {
-                ("web_search", &payload["action"])
+            let (name, input, op) = if kind == "web_search_call" {
+                let action = &payload["action"];
+                let (name, op) = tools::web_action(action, None, None);
+                (name, action, op)
             } else {
-                ("tool_search", &payload["arguments"])
+                ("tool_search", &payload["arguments"], None)
             };
             out.push(json!({"type":"assistant","timestamp":ts,"cwd":cwd,
                 "message":{"role":"assistant","content":[{
                     "type":"tool_use","id":payload["call_id"].as_str().or_else(|| payload["id"].as_str()),
-                    "name":name,"input":input,"status":match payload["status"].as_str() {
+                    "name":name,"input":input,"ops":op.into_iter().collect::<Vec<_>>(),"status":match payload["status"].as_str() {
                         Some("completed") => Some("completed"),
                         Some("in_progress" | "searching") => Some("running"),
                         Some("failed" | "error") => Some("error"),
@@ -75,6 +98,7 @@ pub(super) fn convert(
                     }
                 }]}}));
         }
+        "agent_message" => out.push(agent_message(payload, ts, cwd)),
         "tool_search_output" => {
             out.push(json!({"type":"user","timestamp":ts,"cwd":cwd,
                 "message":{"role":"user","content":[{
@@ -96,8 +120,9 @@ pub(super) fn convert(
                 json!(payload.get("input").and_then(Value::as_str).unwrap_or(""))
             };
             let mut block = json!({ "type": "tool_use", "id": call_id, "name": name, "input": input });
-            if let Some(op) = tools::describe(name, &input) {
-                block["ops"] = json!([op]);
+            let ops = tools::describe(name, &input);
+            if !ops.is_empty() {
+                block["ops"] = json!(ops);
             }
             out.push(json!({
                 "type": "assistant",
@@ -110,11 +135,8 @@ pub(super) fn convert(
             let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
             let output = &payload["output"];
             let status = tool_output::status(output);
-            let mut result = json!({"type":"tool_result", "tool_use_id":call_id,
-                "content":tool_output::content(output), "is_error":status.failed});
-            if let Some(exit) = status.exit_code.filter(|_| payload["type"] == "function_call_output") {
-                result["exit_code"] = json!(exit);
-            }
+            let mut result = json!({"type":"tool_result", "tool_use_id":call_id, "content":tool_output::content(output)});
+            status.annotate(&mut result, kind == "function_call_output");
             out.push(json!({
                 "type": "user",
                 "timestamp": ts,

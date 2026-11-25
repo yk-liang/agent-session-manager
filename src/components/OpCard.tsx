@@ -1,24 +1,33 @@
-import { useContext, useState, type ReactNode } from "react";
-import { Folder, SquareCode, type LucideIcon } from "lucide-react";
-import { compactPath, displayPath, errorSummary, itemStatus, type ToolItem } from "../activity";
-import type { ContentBlock, ShellOp, ToolOp } from "../types";
-import { shortPath } from "../utils";
+import type { ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
+import { errorSummary, itemStatus, type ToolItem } from "../activity";
+import { compactPath, displayPath, splitPath } from "../utils";
 import Collapsible from "./Collapsible";
-import { DetailState } from "./DetailState";
-import { Payload, ToolInput, ToolResult, ToolSection } from "./ToolPayload";
+import { ExpandableFrame } from "./ToolContent";
 import UiIcon from "./UiIcon";
 
-export type Tone = "dim" | "accent" | "success" | "warning" | "danger" | "violet";
+export type Tone = "dim" | "success" | "warning" | "danger" | "violet";
 
-const statusLabels: Record<string, string> = { pending: "等待中", running: "进行中", error: "失败" };
+const statusLabels = new Map<string, string>([
+  ["pending", "等待中"], ["running", "进行中"], ["error", "失败"], ["denied", "已拒绝"], ["cancelled", "已取消"],
+]);
 
-/** 完成是常态，只标出等待、进行中和失败。 */
-export function Status({ status, exit }: { status?: string; exit?: number }) {
-  return status && statusLabels[status] ? <span className={`tool-status ${status}`}>
-    {statusLabels[status]}{status === "error" && exit !== undefined ? ` exit ${exit}` : ""}
+/** 完成是常态，只标出等待、进行中、失败、已拒绝和已取消；原因放在悬停提示里。 */
+export function Status({ status, exit, reason }: { status?: string; exit?: number; reason?: string }) {
+  const label = status ? statusLabels.get(status) : undefined;
+  return label ? <span className={`tool-status ${status}`} title={reason}>
+    {label}{status === "error" && exit !== undefined ? ` exit ${exit}` : ""}
   </span> : null;
 }
 
+/** 文件名突出、目录缩写，悬停显示完整路径。 */
+export function PathName({ path, cwd }: { path: string; cwd: string | null }) {
+  const { dir, name } = splitPath(displayPath(path, cwd));
+  return <>
+    <code className="op-name" title={path}>{name}</code>
+    {dir && <span className="op-dir" title={path}>{compactPath(dir)}</span>}
+  </>;
+}
 export function TypeIcon({ icon, label, tone }: { icon: LucideIcon; label: string; tone?: Tone }) {
   return <span className={`collapsible-type op-icon${tone ? ` ${tone}` : ""}`} title={label}>
     <UiIcon icon={icon} size={16} />
@@ -30,91 +39,55 @@ export function Chip({ children, tone }: { children: ReactNode; tone?: "created"
   return <span className={`op-chip${tone ? ` ${tone}` : ""}`} title={typeof children === "string" ? children : undefined}>{children}</span>;
 }
 
-/** 命令在别的目录执行时标出目录。 */
-export function CwdTag({ dir }: { dir?: string }) {
-  const { cwd } = useContext(DetailState);
-  if (!dir || (cwd && (dir === cwd || dir === shortPath(cwd) || displayPath(dir, cwd) === "."))) return null;
-  return <span className="op-cwd" title={`在 ${dir} 中执行`}><UiIcon icon={Folder} size={12} />{compactPath(displayPath(dir, cwd), 28)}</span>;
+/** 标题里的统计标签（步数、行数、匹配数）：短且完整显示，空值不渲染。 */
+export function Stats({ items }: { items: Badges }) {
+  const shown = [...new Set(items.filter((text): text is string => !!text))];
+  return shown.length ? <span className="op-meta">{shown.map(text => <Chip key={text} tone="sans">{text}</Chip>)}</span> : null;
 }
 
-/** 工具卡片外框：图标、标题、状态和工具名；命令失败标出退出码，其余失败把原因显示在标题下方。 */
-export function OpCard({ item, className, icon, label, tone, tag, open = false, head, children }: {
+/** 卡片标题：类型图标和标题行内容。组合卡片借用同类卡片的标题时，用 `Badges` 追加自己的标签。 */
+export type Head = { icon: LucideIcon; label: string; tone?: Tone; head: ReactNode };
+export type Badges = (string | false | undefined)[];
+
+export type StepRow = { icon: LucideIcon; label: string; text: ReactNode; title?: string; detail?: string; pattern?: boolean };
+
+/** 多步调用的「步骤」：每步一行，依次是图标、动作、目标和补充说明。 */
+export function StepList({ rows }: { rows: StepRow[] }) {
+  return <ExpandableFrame lines={rows.length} label="步骤">{() => <ol className="op-steps">{rows.map((row, i) =>
+    <li key={i} title={row.title}>
+      <UiIcon icon={row.icon} size={12} /><span className="op-step-label">{row.label}</span>
+      <code className={row.pattern ? "pattern" : undefined}>{row.text}</code>
+      {row.detail && <span className="op-step-detail">{row.detail}</span>}
+    </li>)}</ol>}</ExpandableFrame>;
+}
+
+/** 工具卡片外框：标题始终一行，内容区可收缩，右侧的状态和工具名固定。 */
+export function OpCard({ item, className, icon, label, tone, head, children }: {
   item: ToolItem;
   className: string;
   icon: LucideIcon;
   label: string;
   tone?: Tone;
-  tag?: string;
-  open?: boolean;
   head: ReactNode;
   children: ReactNode;
 }) {
-  const status = itemStatus(item);
-  const failed = status === "error";
-  const summary = failed ? errorSummary(item.part.result) : undefined;
-  const exitLine = summary?.match(/^(?:Exit code\s*[:：]?|Process exited with code|退出码\s*[:：]?)\s*(-?\d+)$/i);
-  const recordedExit = item.op?.kind === "shell" ? item.op.exit_code : undefined;
-  const exit = recordedExit || item.part.result?.exit_code || (exitLine && Number(exitLine[1])) || undefined;
-  const reason = exit === undefined ? summary : undefined;
-  const shownTag = tag ?? item.part.content.name;
-  const scriptResult = item.index === 0 ? item.part.content.script_result : undefined;
-  return <Collapsible id={item.key} className={`tool op ${className}${failed ? " error" : ""}`} defaultOpen={open && !failed}
-    head={<>
-      <TypeIcon icon={icon} label={label} tone={tone} />
-      {head}
-      <span className="collapsible-status">
-        <Status status={status} exit={exit} />
-        {shownTag && <span className="tool-tag">{shownTag}</span>}
-      </span>
-    </>}
-    note={reason && <div className="op-error" title={reason}>{reason}</div>}>
-    {children}
-    {scriptResult && <Collapsible id={`${item.key}.script`} className="tool"
-      head={<><TypeIcon icon={SquareCode} label="脚本" /><span className="op-title">脚本输出</span></>}>
-      <Payload block={scriptResult} kind="output">{loaded => <ToolResult result={loaded} start={null} />}</Payload>
-    </Collapsible>}
-  </Collapsible>;
-}
-
-/** 卡片正文的完整操作描述：延迟加载的调用在展开时读取。 */
-export function FullOp<T extends ToolOp>({ item, actions, children }: { item: ToolItem; actions?: ReactNode; children: (op: T, call: ContentBlock) => ReactNode }) {
-  return <Payload block={item.part.content} kind="input" actions={actions}>
-    {loaded => children((loaded.ops?.[item.index] ?? item.op) as T, loaded)}
-  </Payload>;
-}
-
-/** 原始输入与结果；命令按 shell 形式展示，输出不编号。 */
-export function ToolBody({ item, actions }: { item: ToolItem; actions?: ReactNode }) {
-  const { part } = item;
-  const failed = itemStatus(item) === "error";
-  const shell = item.op?.kind === "shell";
-  return <>
-    <Payload block={part.content} kind="input" actions={actions}>{loaded => <ToolInput value={loaded.input} actions={actions}
-      command={shell ? (loaded.ops?.[item.index] as ShellOp | undefined)?.command : undefined} />}</Payload>
-    {part.result && <Payload block={part.result} kind={failed ? "error" : "output"}>
-      {loaded => <ToolResult result={loaded} failed={failed} start={shell ? null : 1} />}
-    </Payload>}
-  </>;
-}
-
-/** 语义视图与原始数据之间切换；按钮放在正文第一节的操作区。 */
-export function useRawView() {
-  const [raw, setRaw] = useState(false);
-  const toggle = <button type="button" className="content-action btn-ghost btn-sm" aria-pressed={raw} onClick={() => setRaw(!raw)}>原始数据</button>;
-  return { raw, toggle };
-}
-
-/** 结果正文；尚无结果时说明在等待。 */
-export function ResultOutput({ item, title, start = null, actions }: { item: ToolItem; title?: string; start?: number | null; actions?: ReactNode }) {
   const { result } = item.part;
   const status = itemStatus(item);
-  const failed = status === "error";
-  if (!result) {
-    return <ToolSection kind={failed ? "error" : "output"} title={title} actions={actions}><p className="tool-loading tool-payload-message">
-      {status === "completed" || failed ? "无输出" : "等待结果"}
-    </p></ToolSection>;
-  }
-  return <Payload block={result} kind={failed ? "error" : "output"} actions={actions}>
-    {loaded => <ToolResult result={loaded} failed={failed} title={title} start={start} actions={actions} />}
-  </Payload>;
+  const failed = status === "error" || status === "denied";
+  const reason = failed || status === "cancelled" ? errorSummary(result) : undefined;
+  const exitLine = reason?.match(/^(?:Exit code\s*[:：]?|Process exited with code|退出码\s*[:：]?)\s*(-?\d+)$/i);
+  const recordedExit = item.op?.kind === "shell" ? item.op.exit_code : undefined;
+  const exit = recordedExit || result?.exit_code || (exitLine && Number(exitLine[1])) || undefined;
+  const tool = item.part.content.name;
+  return <Collapsible id={item.key} className={`tool op ${className}${failed ? " error" : ""}`}
+    head={<>
+      <TypeIcon icon={icon} label={label} tone={tone} />
+      <span className="op-main">{head}</span>
+      <span className="collapsible-status">
+        <Status status={status} exit={exit} reason={exitLine ? undefined : reason} />
+        {tool && <span className="tool-tag" title={tool}>{tool}</span>}
+      </span>
+    </>}>
+    {children}
+  </Collapsible>;
 }

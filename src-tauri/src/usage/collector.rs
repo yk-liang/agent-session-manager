@@ -728,7 +728,7 @@ mod tests {
             relevant("pi", &[root.clone()], &event("subagent-artifacts/a.jsonl")),
             Changes::Empty
         ));
-        let history = root.join(crate::usage::codex::failures::DATABASE);
+        let history = root.join(crate::agents::codex::HISTORY_DB);
         assert!(matches!(
             relevant("codex", &[history.clone()], &event("thread_history_1.sqlite-wal")),
             Changes::Paths(paths) if paths == BTreeSet::from([history.clone()])

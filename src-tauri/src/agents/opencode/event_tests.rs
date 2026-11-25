@@ -360,6 +360,14 @@ fn status_errors_and_missing_call_ids_do_not_fake_completion_or_cross_pair_resul
     assert_eq!(results[1]["content"], "Exit code 1");
     assert_eq!(results[2]["content"], "partial output");
     assert!(!detail.warnings.is_empty(), "状态缺失应提示数据不完整");
+
+    let (_, raw_bash) = super::events::tool_blocks(
+        &json!({"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"git status"},"output":"clean\n\nExited with code 0"}}),
+        "cleaned",
+        true,
+    );
+    let raw_bash = raw_bash.unwrap();
+    assert_eq!((raw_bash["content"].clone(), raw_bash["output"].clone()), (json!("clean\n\nExited with code 0"), json!("clean")));
 }
 
 #[test]
@@ -478,9 +486,6 @@ fn search_positions_stay_aligned_after_reasoning_and_tool_parts_are_inserted() {
         }
         fn read_session_view(&self, _: &str, id: &str) -> Result<SessionDetail, String> {
             read_session_mode_at(&self.0, id, true)
-        }
-        fn delete_session(&self, _: &str, _: &str) -> Result<(), String> {
-            Err("Read-only fixture".into())
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {
             None

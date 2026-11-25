@@ -15,7 +15,7 @@ pub fn present(path: &std::path::Path) -> Result<bool, String> {
 
 /// 删除目标的预期类型
 pub enum TargetKind {
-    /// 普通文件（JSONL 转录等）
+    /// 普通文件（JSONL 会话日志等）
     File,
     /// 目录（会话状态目录等）
     Dir,

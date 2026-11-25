@@ -4,6 +4,8 @@ import UiIcon from "./UiIcon";
 import useDismiss from "./useDismiss";
 
 type Entry = { idx: number; text: string };
+/** 子会话的分叉点：`at` 位于继承事件与子会话事件之间，导览在这里画分叉线。 */
+type Fork = { at: number; title?: string };
 
 function outlineSnippet(text: string) {
   const line = text.replace(/\s+/g, " ").trim();
@@ -15,6 +17,7 @@ export function useSessionOutline(
   session: string,
   { current, progress }: { current: number; progress: number },
   onJump: (index: number, options?: { focus?: boolean }) => void,
+  fork?: Fork,
 ) {
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -51,20 +54,30 @@ export function useSessionOutline(
     if (overlay) setOpen(false);
     onJump(index, { focus: overlay || focus });
   }, [onJump]);
-  const items = useMemo(() => entries.map(({ idx }, index) => (
-    <li key={idx}>
-      <button ref={active === idx ? currentItem : undefined} type="button" className="toc-item btn-ghost"
-        title={snippets[index]} aria-label={`第 ${index + 1} 条提问：${snippets[index]}`}
-        aria-current={active === idx ? "location" : undefined} data-passed={index < current}
-        onClick={() => jump(idx)}>
-        <span className="toc-node" aria-hidden="true" />
-        <span className="toc-entry">
-          <span className="toc-num">#{String(index + 1).padStart(2, "0")}</span>
-          <span className="toc-text">{snippets[index]}</span>
-        </span>
-      </button>
-    </li>
-  )), [active, current, entries, jump, snippets]);
+  // 分叉前的提问不编号，子会话自己的提问从 #01 开始。
+  const ownStart = fork ? entries.filter(({ idx }) => idx < fork.at).length : 0;
+  const items = useMemo(() => {
+    const list = entries.map(({ idx }, index) => {
+      const number = index - ownStart + 1;
+      const inherited = number < 1;
+      return <li key={idx}>
+        <button ref={active === idx ? currentItem : undefined} type="button" className={`toc-item btn-ghost${inherited ? " inherited" : ""}`}
+          title={snippets[index]} aria-label={inherited ? `分叉前的提问：${snippets[index]}` : `第 ${number} 条提问：${snippets[index]}`}
+          aria-current={active === idx ? "location" : undefined} data-passed={index < current}
+          onClick={() => jump(idx)}>
+          <span className="toc-node" aria-hidden="true" />
+          <span className="toc-entry">
+            {!inherited && <span className="toc-num">#{String(number).padStart(2, "0")}</span>}
+            <span className="toc-text">{snippets[index]}</span>
+          </span>
+        </button>
+      </li>;
+    });
+    if (fork) list.splice(ownStart, 0, <li key="fork" className="toc-fork">
+      <button type="button" title={fork.title} aria-label="跳到分叉点" onClick={() => jump(fork.at)}><span>分叉点</span></button>
+    </li>);
+    return list;
+  }, [active, current, entries, fork, jump, ownStart, snippets]);
   const onKeyDown = (event: KeyboardEvent) => {
     if (!entries.length || event.defaultPrevented || event.nativeEvent.isComposing) return;
     if (event.metaKey || event.ctrlKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -76,7 +89,7 @@ export function useSessionOutline(
         event.preventDefault();
         jump(target.idx);
       }
-    } else if (element.matches(".toc-item")) {
+    } else if (element.matches(".toc-list button")) {
       const item = element.parentElement;
       const sibling = backwards ? item?.previousElementSibling : item?.nextElementSibling;
       event.preventDefault();
@@ -84,7 +97,7 @@ export function useSessionOutline(
     }
   };
 
-  if (!entries.length) return { trigger: null, navigation: null, onKeyDown };
+  if (!entries.length && !fork) return { trigger: null, navigation: null, onKeyDown };
   const toggleLabel = collapsed ? "展开导览" : "收起导览";
   return {
     onKeyDown,
@@ -95,7 +108,7 @@ export function useSessionOutline(
     navigation: <nav className="toc" id={id} ref={panel} aria-label="对话导览" data-open={open} data-collapsed={collapsed}>
       <div className="toc-head">
         <div className="toc-heading">
-          <div className="toc-title"><strong>对话导览</strong><span className="status-tag">{entries.length} 条提问</span></div>
+          <div className="toc-title"><strong>对话导览</strong><span className="status-tag">{entries.length - ownStart} 条提问</span></div>
           <div className="toc-controls">
             <button type="button" className="btn-icon btn-ghost" title="上一条提问（Alt + ↑）" aria-label="上一条提问" disabled={!previous} onClick={() => previous && jump(previous.idx, false)}><UiIcon icon={ArrowUp} /></button>
             <button type="button" className="btn-icon btn-ghost" title="下一条提问（Alt + ↓）" aria-label="下一条提问" disabled={!next} onClick={() => next && jump(next.idx, false)}><UiIcon icon={ArrowDown} /></button>

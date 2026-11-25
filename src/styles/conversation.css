@@ -62,9 +62,6 @@
   font: 11px/1.5 var(--font-mono);
   overflow-wrap: anywhere;
 }
-.parent-session { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
-.parent-session > span { flex-shrink: 0; }
-.parent-session code { overflow-wrap: anywhere; }
 
 .copy-id-icon { align-self: center; opacity: 0.6; }
 .session-id:hover { border-color: var(--border); background: var(--bg-hover); }
@@ -182,6 +179,22 @@
   gap: 8px;
 }
 
+/* 子会话的分叉线：虚线中间的按钮显示或收起分叉前继承的父会话内容。 */
+.virtual-events > .event-group.fork-line { flex-direction: row; align-items: center; gap: 10px; }
+.fork-line::before,
+.fork-line::after { content: ""; flex: 1; border-top: 1px dashed var(--border-raised); }
+.fork-line > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: var(--border-raised);
+  border-radius: var(--radius-pill);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+.fork-line > button:hover:not(:disabled) { color: var(--text); }
+.fork-line > button[aria-expanded="true"] .fork-chevron { transform: rotate(180deg); }
+
 .content-action {
   display: inline-flex;
   align-items: center;
@@ -191,7 +204,6 @@
 
 .content-expand { display: flex; width: fit-content; margin: 7px auto 0; }
 .tool-payload > .notice { margin-block: 4px; }
-.tool-loading { color: var(--text-dim); font-size: 12px; }
 
 /* 导览跳转会把焦点移到消息行，以闪烁背景标示位置。 */
 .event-group:focus { outline: none; }
@@ -215,7 +227,7 @@
 
 .event-group > :is(.message, .collapsible) { max-width: 85%; min-width: 0; }
 .event-group > .collapsible { align-self: flex-start; width: 100%; }
-.message.user { align-self: flex-end; }
+.message:is(.user, .agent) { align-self: flex-end; }
 .message.assistant { align-self: flex-start; }
 
 .event-group > :is(.collapsible, .system-line) + .message,
@@ -256,6 +268,19 @@
   border-bottom-left-radius: var(--radius-sm);
 }
 
+/* 其他智能体发来的消息与用户提问同侧，以描边区分。 */
+.msg.agent {
+  margin-left: auto;
+  border: 1px solid var(--info-border);
+  border-bottom-right-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel));
+}
+.agent-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: var(--text-dim); font-size: var(--text-meta); }
+.agent-head strong { color: var(--info); font-weight: 600; }
+.agent-head code { color: var(--text); font: 11.5px var(--font-mono); }
+.agent-encrypted { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.agent-head + .msg-text { margin-top: 6px; }
+
 .message-actions {
   display: flex;
   align-items: center;
@@ -269,7 +294,7 @@
 }
 
 .message-actions time { white-space: nowrap; }
-.message.user .message-actions { justify-content: flex-end; }
+.message:is(.user, .agent) .message-actions { justify-content: flex-end; }
 
 .message:hover .message-actions,
 .message-actions:has(:focus-visible, [data-copied="true"]) {
@@ -494,6 +519,31 @@
 
 .toc-item[aria-current] .toc-text { color: var(--text); }
 
+/* 分叉前的提问用灰色，蓝色只留给子会话自己的提问。 */
+.toc-item.inherited .toc-text { color: var(--text-muted); }
+.toc-item.inherited .toc-node,
+.toc-item.inherited[data-passed="true"] .toc-node { border-color: var(--text-muted); background: var(--bg-panel); }
+.toc-item.inherited[aria-current] { background: var(--bg-hover); }
+.toc-item.inherited[aria-current] .toc-node { border-color: var(--text-dim); background: var(--text-dim); box-shadow: none; }
+.toc-item.inherited[aria-current] .toc-text { color: var(--text); }
+
+.toc-fork > button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  padding: 6px 4px;
+  border: 0;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.toc-fork > button::before,
+.toc-fork > button::after { content: ""; flex: 1; border-top: 1px dashed var(--border-raised); }
+.toc-fork > button:hover:not(:disabled) { color: var(--text); }
+
 .toc-footer {
   display: flex;
   align-items: center;
@@ -521,6 +571,7 @@
   .toc[data-collapsed="true"] .toc-heading { justify-content: center; }
   .toc[data-collapsed="true"] .toc-item { padding-inline: 0; justify-content: center; }
   .toc[data-collapsed="true"] .toc-list::before { left: 50%; }
+  .toc[data-collapsed="true"] .toc-fork span { display: none; }
 }
 
 @container (max-width: 560px) {

@@ -8,7 +8,8 @@ mod context;
 #[cfg(test)]
 mod context_tests;
 pub(crate) mod deferred;
-pub(crate) mod deletion;
+mod deletion;
+mod exec;
 mod history;
 #[cfg(test)]
 mod history_tests;
@@ -18,6 +19,7 @@ mod storage;
 mod thread;
 mod tool_output;
 mod tools;
+mod wrappers;
 
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
@@ -27,7 +29,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::{AgentSource, CatalogFilter, ConfigFile, DeletePolicy, SessionDetail, SessionMeta};
+use super::deletion::{DeletePolicy, Outcome, PreserveUsage};
+use super::{AgentSource, CatalogFilter, ConfigFile, SessionDetail, SessionMeta};
 use app_server::ThreadAction;
 pub use thread::ThreadMeta;
 use thread::ThreadHeader;
@@ -43,6 +46,13 @@ fn codex_home() -> PathBuf {
 
 fn sessions_root() -> PathBuf {
     codex_home().join("sessions")
+}
+
+/// 只读的线程历史库，用量统计从中补充 rollout 未记录的模型调用失败。
+pub(crate) const HISTORY_DB: &str = "thread_history_1.sqlite";
+
+pub(crate) fn history_database(home: &Path) -> PathBuf {
+    sqlite_home(home).join(HISTORY_DB)
 }
 
 pub(crate) fn sqlite_home(home: &Path) -> PathBuf {
@@ -78,6 +88,10 @@ struct ParsedRollout {
     history_base: Option<history::HistoryBase>,
     forked_from: Option<String>,
     attached_thread: bool,
+    /// 子智能体分叉时，序号小于该值的记录是复制来的父会话上下文。
+    fork_start: Option<u64>,
+    /// 父会话上下文生成的事件数；仅读取正文时统计。
+    inherited: usize,
     first_ts: Option<String>,
     last_ts: Option<String>,
     user_count: u32,
@@ -108,7 +122,7 @@ struct ReadLimit {
 
 #[cfg(test)]
 fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<ParsedRollout> {
-    let mut activity = tools::Activity::default();
+    let mut activity = wrappers::Activity::default();
     let mut parsed = read_rollout(
         path,
         if collect_events {
@@ -122,7 +136,7 @@ fn parse_rollout(path: &Path, collect_events: bool) -> super::ParseOutcome<Parse
     );
     match &mut parsed {
         super::ParseOutcome::Ok(rollout) | super::ParseOutcome::Degraded(rollout, _) => {
-            activity.remove_redundant_scripts(&mut rollout.events);
+            activity.remove_redundant_scripts(&mut rollout.events, &mut rollout.inherited);
         }
         super::ParseOutcome::Failed(_) => {}
     }
@@ -155,6 +169,11 @@ struct ToolHeader<'a> {
     input: Option<&'a RawValue>,
     #[serde(borrow)]
     internal_chat_message_metadata_passthrough: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ThreadId {
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,7 +221,7 @@ fn read_rollout(
     mode: ReadMode,
     limit: ReadLimit,
     mut dedup: Option<&mut history::EventDedup>,
-    activity: &mut tools::Activity,
+    activity: &mut wrappers::Activity,
 ) -> super::ParseOutcome<ParsedRollout> {
     let file = match storage::Reader::open(path) {
         Ok(f) => f,
@@ -229,6 +248,8 @@ fn read_rollout(
         history_base: None,
         forked_from: None,
         attached_thread: false,
+        fork_start: None,
+        inherited: 0,
         first_ts: None,
         last_ts: None,
         user_count: 0,
@@ -244,6 +265,8 @@ fn read_rollout(
 
     let mut bad_lines = 0;
     let mut seen_meta = false;
+    let mut copies_parent = false;
+    let mut in_fork_copy = false;
     let mut line = Vec::new();
     let mut offset = 0u64;
     loop {
@@ -281,6 +304,14 @@ fn read_rollout(
             .is_some_and(|end| ordinal.is_some_and(|n| n >= end))
         {
             continue;
+        }
+        if let (Some(start), Some(n), true) = (parsed.fork_start, ordinal, copies_parent) {
+            if n < start {
+                in_fork_copy = true;
+            } else if in_fork_copy {
+                in_fork_copy = false;
+                parsed.inherited = parsed.events.len();
+            }
         }
         let kind = envelope
             .kind
@@ -377,7 +408,12 @@ fn read_rollout(
                 }
                 continue;
             }
-            "session_meta" if seen_meta => continue,
+            "session_meta" if seen_meta => {
+                // 分叉副本以父会话的 session_meta 开头；Guardian 等子智能体只有预置任务，没有父会话副本。
+                copies_parent |= parsed.forked_from.is_some()
+                    && serde_json::from_str::<ThreadId>(raw_payload).is_ok_and(|meta| meta.id == parsed.forked_from);
+                continue;
+            }
             "session_meta" => seen_meta = true,
             "response_item" if mode != ReadMode::Header => {}
             _ => continue,
@@ -413,7 +449,7 @@ fn read_rollout(
                             .and_then(|raw| serde_json::from_str::<ExecMetadata>(raw.get()).ok());
                         let input = shallow.input.and_then(|input| serde_json::from_str::<String>(input.get()).ok());
                         if let (Some(metadata), Some(at), Some(input)) = (metadata, super::timestamp(ts), input) {
-                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input);
+                            activity.start_exec(id, metadata.turn_id, at.timestamp_millis(), &input, parsed.cwd.as_deref());
                         }
                     }
                 }
@@ -484,6 +520,7 @@ fn read_rollout(
                         .and_then(Value::as_str)
                         .map(str::to_string);
                     parsed.attached_thread = p.get("attached_thread").and_then(Value::as_bool).unwrap_or(false);
+                    parsed.fork_start = p.get("subagent_history_start_ordinal").and_then(Value::as_u64);
                     if mode == ReadMode::Header {
                         break;
                     }
@@ -507,16 +544,15 @@ fn read_rollout(
                                 (None, Some(input)) => serde_json::from_str::<Value>(input.get()).ok(),
                                 _ => None,
                             };
-                            if let Some(op) = input.and_then(|input| tools::describe(&name, &input)) {
-                                block["ops"] = json!([op.summary()]);
+                            let ops = input.map(|input| tools::describe(&name, &input)).unwrap_or_default();
+                            if !ops.is_empty() {
+                                block["ops"] = json!(ops.into_iter().map(super::tool_ops::Op::summary).collect::<Vec<_>>());
                             }
                             block
                         } else {
                             let status = shallow.output.map(tool_output::raw_status).unwrap_or_default();
-                            let mut block = json!({"type":"tool_result","is_error":status.failed,"tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
-                            if let Some(exit) = status.exit_code.filter(|_| shallow.kind.as_deref() == Some("function_call_output")) {
-                                block["exit_code"] = json!(exit);
-                            }
+                            let mut block = json!({"type":"tool_result","tool_use_id":shallow.call_id.unwrap_or_default(),"deferred":token});
+                            status.annotate(&mut block, shallow.kind.as_deref() == Some("function_call_output"));
                             block
                         };
                         let role = if call { "assistant" } else { "user" };
@@ -540,6 +576,10 @@ fn read_rollout(
                     }
                     for ev in &mut new_events {
                         match ev.get("type").and_then(Value::as_str) {
+                            Some("agent") => {
+                                parsed.user_count += 1;
+                                parsed.real_user_count += 1;
+                            }
                             Some("user") => {
                                 let content = &ev["message"]["content"];
                                 if super::context::has_user_content(content) {
@@ -579,6 +619,9 @@ fn read_rollout(
         }
     }
 
+    if in_fork_copy {
+        parsed.inherited = parsed.events.len();
+    }
     if mode != ReadMode::Header {
         if limit.bytes.is_some_and(|end| offset < end) {
             return super::ParseOutcome::Failed(format!(
@@ -612,7 +655,7 @@ fn load_thread_names_in(
 ) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let path = home.join("session_index.jsonl");
-    // 与转录读取同一套 FIFO 防护：非阻塞打开 + 普通文件复核，
+    // 与会话日志读取同一套 FIFO 防护：非阻塞打开 + 普通文件复核，
     // 避免 session_index.jsonl 被换成 FIFO 时 read_to_string 永久阻塞
     let mut file = match super::open_jsonl(&path) {
         Ok(f) => f,
@@ -671,6 +714,7 @@ fn to_meta(p: &ParsedRollout, thread_name: Option<&String>) -> SessionMeta {
         git_branch: p.git_branch.clone(),
         entrypoint: None,
         codex: Some(p.thread.meta.clone()),
+        subagent: None,
         first_ts: p.first_ts.clone(),
         last_ts: p.last_ts.clone(),
         user_count: p.user_count,
@@ -709,7 +753,16 @@ fn read_session_mode(
     let pages = groups.get(session_id).ok_or("未找到该 Codex 会话")?;
     let (mut detail, ws) = history::read(pages, mode)?;
     thread::Relations::new(&groups, thread::spawn_edges_warned(root, &mut warnings))
-        .apply(session_id, detail.meta.codex.as_mut().unwrap());
+        .apply(session_id, &mut detail.meta);
+    if detail.inherited > 0 {
+        let parent = pages[0].header.forked_from.as_ref().and_then(|id| groups.get(id));
+        // 父会话缺少分页时可能只剩部分历史，此时保留子会话自带的副本。
+        if let Some(Ok((parent, ws))) = parent.map(|pages| history::read(pages, mode)) {
+            if ws.is_empty() {
+                history::adopt_parent_history(&mut detail, parent.events);
+            }
+        }
+    }
     detail.meta.archived = storage::is_archived(root, &pages.last().unwrap().path);
     detail.warnings = ws;
     let names = root
@@ -850,11 +903,11 @@ impl AgentSource for CodexSource {
         {
             return Err("会话来源已变化，请刷新后重试".into());
         }
-        let (detail, ws) = history::read(&pages, ReadMode::Events)?;
+        let (mut detail, ws) = history::read(&pages, ReadMode::Events)?;
         if !ws.is_empty() || detail.meta.project_dir != meta.project_dir {
             return Err("会话来源已变化，请刷新后重试".into());
         }
-        Ok(detail.events)
+        Ok(detail.events.split_off(detail.inherited))
     }
     fn delete_policy(&self) -> DeletePolicy {
         DeletePolicy::Permanent
@@ -869,7 +922,15 @@ impl AgentSource for CodexSource {
         archived: bool,
     ) -> Result<(), String> {
         let action = if archived { ThreadAction::Archive } else { ThreadAction::Unarchive };
-        app_server::update(action, project_dir, session_id)
+        app_server::update(&codex_home(), action, project_dir, session_id)
+    }
+    fn delete_sessions(
+        &self,
+        sessions: &[super::search::SessionRef],
+        preserve: &mut dyn PreserveUsage,
+        outcome: &mut Outcome<'_>,
+    ) -> Result<(), String> {
+        deletion::delete(&codex_home(), sessions, preserve, outcome)
     }
     fn resume_command(&self, session_id: &str, _fork: bool) -> Option<String> {
         if !valid_thread_id(session_id) {
@@ -881,10 +942,9 @@ impl AgentSource for CodexSource {
         let groups = history::group_pages(history::read_headers(&paths, &mut warnings, &|| false).ok()?);
         let pages = groups.get(session_id)?;
         let latest = pages.last()?;
-        let mut thread = thread::metadata(&latest.header, pages);
-        thread::Relations::new(&groups, thread::spawn_edges(root.parent()?).ok()?)
-            .apply(session_id, &mut thread);
-        if !thread.can_resume || storage::is_archived(&root, &latest.path) {
+        let relations = thread::Relations::new(&groups, thread::spawn_edges(root.parent()?).ok()?);
+        if !latest.header.thread.meta.can_resume || relations.is_subagent(session_id)
+            || storage::is_archived(&root, &latest.path) {
             return None;
         }
         Some(format!(
@@ -971,10 +1031,10 @@ mod tests {
             (json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}), Some("subagent"), true, false),
             (json!({"thread_source":"subagent"}), None, true, false),
         ] {
-            let meta = ThreadHeader::read(&payload).meta;
-            assert_eq!(meta.source.as_deref(), source);
-            assert_eq!(meta.subagent, subagent);
-            assert_eq!(meta.can_resume, can_resume);
+            let header = ThreadHeader::read(&payload);
+            assert_eq!(header.meta.source.as_deref(), source);
+            assert_eq!(header.subagent, subagent);
+            assert_eq!(header.meta.can_resume, can_resume);
         }
     }
 
@@ -1137,6 +1197,7 @@ mod tests {
         assert_eq!(p.events[2]["message"]["content"][0]["thinking"], "先分析需求\n\n核对正文");
         assert_eq!(p.events[2]["message"]["model"], "fixture-model");
         assert_eq!(p.events[6]["message"]["content"][0]["name"], "web_search");
+        assert_eq!(p.events[6]["message"]["content"][0]["ops"][0]["queries"], json!(["fixture"]));
         assert_eq!(p.events[7]["message"]["content"], "压缩正文");
         assert_eq!(p.events[8]["content"], "轮次已中断");
 
@@ -1169,8 +1230,8 @@ mod tests {
 
         let main_content = [
             format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","type":"session_meta","payload":{{"id":"{id_main}","cwd":"/tmp/codex-it","cli_version":"0.30.0","originator":"codex_cli","source":"cli","thread_source":"user"}}}}"#),
-            r#"{"timestamp":"2099-12-31T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"集成测试消息"}]}}"#.to_string(),
-            r#"{"timestamp":"2099-12-31T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"收到"}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:01Z","type":"response_item","payload":{"type":"message","id":"msg-task","role":"user","content":[{"type":"input_text","text":"集成测试消息"}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:02Z","type":"response_item","payload":{"type":"message","id":"msg-reply","role":"assistant","content":[{"type":"output_text","text":"收到"}]}}"#.to_string(),
         ]
         .join("\n");
         let main_file = day_dir.join("rollout-2099-12-31T00-00-00-it-a.jsonl");
@@ -1187,9 +1248,15 @@ mod tests {
         )
         .unwrap();
 
+        // 分叉副本只保留精简后的父会话历史；详情改用父会话的完整记录。
         let sub_content = [
-            format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","type":"session_meta","payload":{{"id":"{id_sub}","cwd":"/tmp/codex-it","originator":"Codex Desktop","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{id_main}","depth":1}}}}}},"thread_source":"subagent"}}}}"#),
-            r#"{"timestamp":"2099-12-31T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"子代理任务"}]}}"#.to_string(),
+            format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","ordinal":0,"type":"session_meta","payload":{{"id":"{id_sub}","cwd":"/tmp/codex-it","originator":"Codex Desktop","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{id_main}","depth":1}}}}}},"thread_source":"subagent","forked_from_id":"{id_main}","subagent_history_start_ordinal":3}}}}"#),
+            format!(r#"{{"timestamp":"2099-12-31T00:00:00Z","ordinal":1,"type":"session_meta","payload":{{"id":"{id_main}","cwd":"/tmp/codex-it"}}}}"#),
+            r#"{"timestamp":"2099-12-31T00:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg-reply","role":"assistant","content":[{"type":"output_text","text":"收到"}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"agent_message","id":"amsg-task","author":"/root","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/sub\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw=="}]}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:04Z","ordinal":4,"type":"response_item","payload":{"type":"function_call","name":"send_message","call_id":"call-report","arguments":"{\"target\":\"/root\",\"message\":\"gAAAAABrAAXIAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw==\"}"}}"#.to_string(),
+            r#"{"timestamp":"2099-12-31T00:00:05Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg-done","author":"/root/sub/leaf","recipient":"/root/sub","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/sub\nSender: /root/sub/leaf\nPayload:\n子智能体完成"}]}}"#.to_string(),
+            format!(r#"{{"timestamp":"2099-12-31T00:00:06Z","ordinal":6,"type":"response_item","payload":{{"type":"function_call","name":"send_message","call_id":"call-plain","arguments":"{{\"target\":\"/root\",\"message\":\"gAAAAA{}==\"}}"}}}}"#, "B".repeat(92)),
         ]
         .join("\n");
         fs::write(
@@ -1220,16 +1287,26 @@ mod tests {
 
         let detail = read_session_in(&root, &id_main).unwrap();
         assert_eq!(detail.events.len(), 2);
-        let sub = read_session_in(&root, &id_sub).unwrap().meta.codex.unwrap();
-        assert!(sub.subagent && !sub.can_resume);
-        assert_eq!(sub.parent_id.as_deref(), Some(id_main.as_str()));
+        let sub = read_session_in(&root, &id_sub).unwrap();
+        assert_eq!((sub.events.len(), sub.inherited), (6, 2));
+        assert_eq!(sub.events[..2], detail.events[..]);
+        assert_eq!(sub.events[2]["agent"], json!({"kind": "task", "from": "/root", "to": "/root/sub", "encrypted": true}));
+        assert_eq!(sub.events[2]["message"]["content"], json!([]));
+        assert_eq!(sub.events[3]["message"]["content"][0]["ops"][0]["encrypted"], true);
+        assert_eq!(sub.events[4]["agent"]["kind"], "result");
+        assert_eq!(sub.events[4]["message"]["content"][0]["text"], "子智能体完成");
+        assert!(sub.events[5]["message"]["content"][0]["ops"][0].get("encrypted").is_none(), "非规范补位的明文不能当成密文");
+        let sub_meta = ours.iter().find(|meta| meta.session_id == id_sub).unwrap();
+        assert_eq!(CodexSource.search_events(sub_meta).unwrap(), sub.events[2..]);
+        assert!(!sub.meta.codex.unwrap().can_resume);
+        assert_eq!(sub.meta.subagent.unwrap().parent_id.as_deref(), Some(id_main.as_str()));
 
         let archived = storage::archived_root(&root);
         fs::create_dir(&archived).unwrap();
         fs::rename(&main_file, archived.join(main_file.file_name().unwrap())).unwrap();
         let active = catalog_in(&root, false).unwrap();
         assert_eq!(active.sessions.len(), 2);
-        assert_eq!(active.sessions.iter().find(|s| s.session_id == id_sub).unwrap().codex.as_ref().unwrap().orphan, Some(false));
+        assert!(!active.sessions.iter().find(|s| s.session_id == id_sub).unwrap().subagent.as_ref().unwrap().orphan);
 
         let filter = CatalogFilter { include_archived: true, ..Default::default() };
         let scan = catalog::Scan::new(&root, filter, &|| false).unwrap();

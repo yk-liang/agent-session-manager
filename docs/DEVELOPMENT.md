@@ -151,9 +151,9 @@ Codex 压缩历史回归：`cd src-tauri && cargo test --offline --locked --lib 
 
 真实会话只读核验：在 `src-tauri/` 运行 `cargo run --release --offline --locked --example qoder_metadata -- '<会话ID>' '<预期会话名>' '<预期模型标识>'`。只输出所选会话的标题、模型标识和告警数；同时检查列表与详情一致。后两个参数可省略，指定的会话不存在、重复或与预期不符时必须失败。
 
-删除前用量保存的回归：在 `src-tauri/` 运行 `cargo test --release --offline --locked --lib usage::deletion -- --test-threads=1`。覆盖主日志与嵌套子会话、最后一轮增量、重启后持久化、无关来源隔离、缓存保留、读取/账本失败和同步期间日志变化。
+删除前用量保存的回归：在 `src-tauri/` 运行 `cargo test --release --offline --locked --lib usage::deletion -- --test-threads=1`。覆盖主日志与嵌套子会话、最后一轮增量、重启后持久化、无关来源隔离、缓存保留、读取/账本失败只影响所在会话，以及保存期间或保存后日志变化时中止删除。
 
-真实数据性能复测使用 `usage::deletion::tests::real_qoder_deletion_preservation_benchmark`，必须显式加 `--ignored --exact --nocapture --test-threads=1`，并提供 `ASM_DELETE_PROBE_SESSION`（真实会话 ID）、`ASM_DELETE_PROBE_PROJECT`（源项目目录键）和 `ASM_DELETE_PROBE_STORE`。后者必须是独立目录，包含用 SQLite backup API 从应用数据库生成的 `cache.sqlite3` 与 `ledger.sqlite3`，不要直接复制运行中数据库的主文件。测试分别复制这份已关闭的备份，交替测量全量与局部保存，输出耗时和日志数量；实际日志只读，删除回调为空操作。目标缺失或检查失败必须报错，不能静默跳过。此测量不包含 GUI 调度、共享账本锁等待或 Finder 移入废纸篓耗时。
+批量删除整批执行，每个会话删除前都复核保存用量后来源未再变化：Claude Code、Qoder 和 Pi 比对全部日志版本后一次调用 Finder 移入废纸篓；OpenCode 只探测一次 CLI 选项，每棵会话树执行官方删除命令前比对成员与原始行，首条命令成功前逐条执行，之后有限并行；Codex 在同一个 App Server 连接上依次删除，确认线程后、发出删除前复核子树、用量记录和日志。要用本机 Codex 核验归档、取消归档和批量删除，运行 `cargo test --offline --locked --lib local_app_server_moves_and_deletes_a_temporary_rollout -- --ignored --nocapture`，测试只操作临时 `CODEX_HOME`。
 
 ### 项目分组与文件监听
 

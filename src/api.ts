@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AgentInfo,
   Catalog,
@@ -76,11 +76,13 @@ export const searchConversations = (agent: string, query: string, sessions: Sess
 
 export const cancelConversationSearch = () => invoke<void>("cancel_conversation_search");
 
-export const deleteSession = (
-  agent: string,
-  projectDir: string,
-  sessionId: string,
-) => invoke<{ removed: SessionRef[]; error: string | null } | null>("delete_session", { agent, projectDir, sessionId });
+/** 整批删除；每确定一个会话的结果，onProgress 收到已处理的会话数。 */
+export const deleteSessions = (agent: string, sessions: SessionRef[], onProgress: (settled: number) => void) =>
+  invoke<{ removed: SessionRef[]; failures: { session: SessionRef; error: string }[] }>("delete_sessions", {
+    agent,
+    sessions: sessions.map(({ projectDir, sessionId }) => ({ projectDir, sessionId })),
+    progress: new Channel<number>(onProgress),
+  });
 
 export const setSessionArchived = (agent: string, session: SessionMeta, archived: boolean) =>
   invoke<{ changed: { session: SessionRef; archived: boolean }[]; error: string | null } | null>("set_session_archived",
@@ -160,4 +162,4 @@ export const setConfigGuard = (activity: ConfigActivity) =>
     busy: activity.busy,
   });
 export const confirmConfigExit = () => invoke<void>("confirm_config_exit");
-export const setBatchDeleteGuard = (active: boolean) => invoke<void>("set_batch_delete_guard", { active });
+export const setDeleteGuard = (active: boolean) => invoke<void>("set_delete_guard", { active });

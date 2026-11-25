@@ -53,7 +53,7 @@ pub(super) fn read_header(path: &PathBuf) -> Result<(Option<ParsedRollout>, Vec<
     HEADERS.get_or_init(|| FileCache::new(4096)).load(
         "codex-header",
         std::slice::from_ref(path),
-        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::tools::Activity::default()).split()),
+        || Ok(read_rollout(path, ReadMode::Header, ReadLimit::default(), None, &mut super::wrappers::Activity::default()).split()),
         |(header, warnings)| header.is_some() && warnings.is_empty(),
     )
 }
@@ -287,15 +287,15 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         warnings.clear();
     }
     let mut meta = to_meta(&latest.header, None);
-    meta.codex = Some(super::thread::metadata(&latest.header, pages));
     meta.first_ts = None;
     meta.last_ts = None;
     meta.size_bytes = Some(pages.iter().map(|p| p.header.size_bytes).sum());
     meta.source_files = pages.iter().map(|p| p.path.clone()).collect();
     let mut events = Vec::new();
+    let mut inherited = 0;
     let mut has_activity = false;
     let mut dedup = EventDedup::default();
-    let mut activity = super::tools::Activity::default();
+    let mut activity = super::wrappers::Activity::default();
     let multiple_pages = chain.iter().filter(|(_, l)| l.bytes != Some(0)).count() > 1;
     for (index, limit) in chain {
         if limit.bytes == Some(0) {
@@ -348,17 +348,40 @@ pub(super) fn read(pages: &[Page], mode: ReadMode) -> Result<(SessionDetail, Vec
         meta.real_user_count += p.real_user_count;
         meta.assistant_text_count += p.assistant_text_count;
         has_activity |= p.has_activity;
+        if events.is_empty() {
+            inherited = p.inherited;
+        }
         events.extend(p.events);
     }
     let thread = meta.codex.as_mut().unwrap();
     thread.empty = Some(!has_activity && meta.real_user_count == 0);
-    activity.remove_redundant_scripts(&mut events);
+    activity.remove_redundant_scripts(&mut events, &mut inherited);
     Ok((
         SessionDetail {
             meta,
             events,
+            inherited,
             warnings: Vec::new(),
         },
         warnings,
     ))
+}
+
+/// 子智能体分叉时 Codex 只复制精简后的父会话历史，执行记录等事件不会随副本保留。
+/// 副本中的响应项沿用父会话的 ID：最后一个对应得上的位置之前改用父会话的完整记录，之后的副本原样保留。
+pub(super) fn adopt_parent_history(detail: &mut SessionDetail, parent: Vec<Value>) {
+    let item = |event: &Value| event["uuid"].as_str()?.split_once('@').map(|(id, _)| id.to_owned());
+    let positions: HashMap<String, usize> = parent.iter().enumerate()
+        .filter_map(|(index, event)| Some((item(event)?, index)))
+        .collect();
+    let Some((copy_end, parent_end)) = detail.events[..detail.inherited].iter().enumerate().rev()
+        .find_map(|(index, event)| Some((index, *positions.get(&item(event)?)?)))
+    else {
+        return;
+    };
+    let mut events = parent;
+    events.truncate(parent_end + 1);
+    detail.inherited = events.len() + detail.inherited - copy_end - 1;
+    events.extend(detail.events.drain(copy_end + 1..));
+    detail.events = events;
 }

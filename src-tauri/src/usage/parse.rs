@@ -91,7 +91,7 @@ pub(super) fn recorded_fields(usage: &Value, agent: &str) -> RecordedFields {
         reasoning_recorded: reason,
     }
 }
-/// source.total 可能包含未提供分项的 token，保留差额而不伪造输出。
+/// source.total 可能包含未提供分项的 Token，保留差额而不伪造输出。
 pub(super) fn normalize(usage: &Value, agent: &str) -> Option<(Tokens, bool)> {
     if !usage.is_object() {
         return None;

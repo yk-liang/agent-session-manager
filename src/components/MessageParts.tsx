@@ -8,7 +8,7 @@ function attachmentUrl(block: ContentBlock) {
   const source = block.source && typeof block.source === "object" ? block.source as Record<string, unknown> : {};
   const url = source.type === "base64" && typeof source.data === "string"
     ? `data:${source.media_type};base64,${source.data}`
-    : block.image_url ?? block.url;
+    : block.image_url ?? block.url ?? block.uri;
   return url && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(url) ? url : undefined;
 }
 

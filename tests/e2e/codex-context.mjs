@@ -35,7 +35,8 @@ try {
           const original = catalog.sessions[0];
           const row = (sessionId, title, parentId, options = {}) => ({
             ...original, sessionId, title, archived: false,
-            codex: { source: parentId ? 'subagent' : 'exec', subagent: !!parentId, parentId, canResume: !parentId, empty: false, ...options },
+            codex: { source: options.source ?? (parentId ? 'subagent' : 'exec'), canResume: !parentId, empty: false },
+            subagent: parentId ? { parentId, parent: { sessionId: parentId, projectDir: original.projectDir }, orphan: options.orphan ?? false } : undefined,
           });
           catalog.sessions = [
             row('main', '父任务', undefined, { source: 'cli' }),
@@ -57,17 +58,25 @@ try {
       if (cmd === 'read_session') {
         if (window.__HIERARCHY__) return {
           meta: window.__HIERARCHY_ROWS__.find(row => row.sessionId === args.sessionId),
-          events: [{ type: 'assistant', message: { content: '子会话正文样例' } }],
+          events: [
+            ...(args.sessionId === 'leaf' ? [
+              { type: 'user', message: { content: '父会话的提问' } },
+              { type: 'assistant', message: { content: '父会话的回答' } },
+              { type: 'agent', agent: { kind: 'task', from: '/root/child', to: '/root/child/leaf', encrypted: true }, message: { content: [] } },
+            ] : []),
+            { type: 'assistant', message: { content: '子会话正文样例' } },
+          ],
+          inherited: args.sessionId === 'leaf' ? 2 : 0,
         };
         const detail = structuredClone(fixture.details.find(d => d.meta.sessionId === args.sessionId));
         detail.meta.archived = archived.has(args.sessionId);
         return detail;
       }
-      if (cmd === 'delete_session' && window.__HIERARCHY__) {
+      if (cmd === 'delete_sessions' && window.__HIERARCHY__) {
         deleted = new Set(['main', 'child', 'leaf']);
         const removed = window.__HIERARCHY_ROWS__.filter(row => deleted.has(row.sessionId))
           .map(({ sessionId, projectDir }) => ({ sessionId, projectDir }));
-        return { removed, error: null };
+        return { removed, failures: [] };
       }
       if (cmd === 'set_session_archived') {
         if (args.archived) archived.add(args.sessionId);
@@ -193,9 +202,32 @@ try {
   await card('二级子任务').locator('.session-card-open').click();
   const header = page.locator('.detail-header');
   await header.getByRole('button', { name: '打开父会话 child' }).waitFor();
-  assert.equal(await header.getByRole('button', { name: '复制会话 ID：leaf' }).count(), 1);
+  const sessionId = header.getByRole('button', { name: '复制会话 ID：leaf' });
+  const parentId = header.getByRole('button', { name: '复制父会话 ID：child' });
+  await parentId.waitFor();
+  assert.equal(await parentId.getAttribute('class'), await sessionId.getAttribute('class'));
+  assert.equal(await parentId.locator('code').textContent(), 'child');
+  assert.equal(await parentId.locator('.copy-id-icon').count(), 1);
   assert.equal(await header.getByRole('button', { name: '在终端恢复' }).count(), 0);
   assert.equal(await header.getByRole('button', { name: '归档', exact: true }).count(), 1);
+  const forkLine = page.locator('.fork-line');
+  await forkLine.getByRole('button', { name: '显示分叉前的 2 条消息' }).waitFor();
+  await page.getByText('子会话正文样例', { exact: true }).waitFor();
+  assert.equal(await page.getByText('父会话的回答', { exact: true }).count(), 0);
+  const task = page.locator('.msg.agent');
+  assert.equal(await task.locator('.agent-head').textContent(), '任务leaf来自 /root/child正文已加密');
+  const toc = page.locator('nav.toc');
+  assert.deepEqual(await toc.locator('.toc-list > li').allTextContents(), ['分叉点', '#01任务 leaf']);
+  await forkLine.getByRole('button').click();
+  await page.getByText('父会话的回答', { exact: true }).waitFor();
+  assert.deepEqual(await toc.locator('.toc-list > li').allTextContents(), ['父会话的提问', '分叉点', '#01任务 leaf']);
+  await header.getByRole('button', { name: '对话导览' }).click();
+  await toc.getByRole('button', { name: '分叉前的提问：父会话的提问' }).waitFor();
+  await toc.getByRole('button', { name: '分叉点' }).click();
+  await page.locator('.fork-line.flash').waitFor();
+  await forkLine.getByRole('button', { name: '收起分叉前的消息' }).click();
+  await page.getByText('父会话的回答', { exact: true }).waitFor({ state: 'detached' });
+  assert.equal(await forkLine.getByRole('button').getAttribute('aria-expanded'), 'false');
   await card('父任务').getByRole('button', { name: '收起 父任务 的 1 个子会话' }).click();
   await header.getByRole('button', { name: '在列表定位' }).click();
   await card('二级子任务').locator('.session-card-open').waitFor();
@@ -206,7 +238,7 @@ try {
   await page.locator('.sidebar-project-list .project-meta').getByText('2 个会话', { exact: true }).waitFor();
   assert.equal(await page.locator('.session-card').count(), 2);
   assert.deepEqual(errors, []);
-  console.log(`PASS: nested Codex sessions, orphans, all-session counts, and cascade deletion (${engine})`);
+  console.log(`PASS: nested Codex sessions, fork line and outline, agent tasks, orphans, all-session counts, and cascade deletion (${engine})`);
 } finally {
   await browser?.close();
   rmSync(dir, { recursive: true, force: true });

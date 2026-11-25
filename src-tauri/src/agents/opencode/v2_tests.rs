@@ -152,12 +152,34 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
             params![id, kind, seq, value.to_string()],
         ).unwrap();
     }
+    db.execute_batch(r#"INSERT INTO session_v2
+        (id,title,directory,version,parent_id,time_created,time_updated)
+        VALUES ('ses_worker','Worker','/tmp/worker','2.0','ses_v2',3000000,3000000),
+               ('ses_reviewer','Reviewer','/tmp/worker','2.0','ses_worker',4000000,4000000),
+               ('ses_orphan','Orphan','/tmp/worker','2.0','ses_missing',5000000,5000000);
+        INSERT INTO session_message VALUES
+          ('msg_worker','ses_worker','assistant',1,3000000,3000000,'{"content":[{"type":"text","text":"Worker result"}]}'),
+          ('msg_reviewer','ses_reviewer','assistant',1,4000000,4000000,'{"content":[{"type":"text","text":"Review result"}]}'),
+          ('msg_orphan','ses_orphan','assistant',1,5000000,5000000,'{"content":[{"type":"text","text":"Orphan result"}]}');"#).unwrap();
     drop(db);
     let before = std::fs::read(&path).unwrap();
     let catalog = catalog_at(&path, false).unwrap();
     assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
-    assert_eq!(catalog.sessions.len(), 1);
-    let meta = &catalog.sessions[0];
+    assert_eq!(catalog.sessions.len(), 4);
+    let meta = catalog.sessions.iter().find(|row| row.session_id == "ses_v2").unwrap();
+    let worker = catalog.sessions.iter().find(|row| row.session_id == "ses_worker").unwrap();
+    let relation = worker.subagent.as_ref().unwrap();
+    assert_eq!(relation.parent_id.as_deref(), Some("ses_v2"));
+    assert_eq!(relation.parent.as_ref(), Some(&crate::agents::search::SessionRef::from(meta)));
+    assert!(!relation.orphan);
+    let review = read_session_at(&path, "ses_reviewer").unwrap();
+    assert_eq!(review.meta.subagent.as_ref().unwrap().parent_id.as_deref(), Some("ses_worker"));
+    assert_eq!(review.events.len(), 1);
+    assert!(catalog.sessions.iter().find(|row| row.session_id == "ses_orphan").unwrap().subagent.as_ref().unwrap().orphan);
+    let db = open_db(&path).unwrap();
+    let root = crate::agents::search::SessionRef::from(meta);
+    let ids: Vec<_> = super::deletion::read_tree(&db, &root).unwrap().members.into_iter().map(|row| row.session_id).collect();
+    assert_eq!(ids, ["ses_v2", "ses_worker", "ses_reviewer"]);
     assert_eq!(meta.title.as_deref(), Some("First v2 prompt"));
     assert_eq!((meta.real_user_count, meta.assistant_text_count), (2, 2));
     assert_eq!(meta.model.as_deref(), Some("fixture/latest"));
@@ -198,7 +220,7 @@ fn v2_only_database_supports_catalog_order_models_search_and_read_only_access() 
         .execute("DELETE FROM main.session_v2", [])
         .is_err());
     let with_empty = catalog_at(&path, true).unwrap();
-    assert_eq!(with_empty.sessions.len(), 2);
+    assert_eq!(with_empty.sessions.len(), 5);
     let empty = with_empty
         .sessions
         .iter()

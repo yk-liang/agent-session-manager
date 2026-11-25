@@ -40,7 +40,7 @@ Apple has not notarized the release. If macOS blocks the first launch, verify th
 ## Using the app
 
 - Select an agent to browse its local sessions. Turn on **已归档 (Archived)** to see archived Codex and OpenCode sessions. The app can archive and unarchive Codex sessions. Resuming in Terminal requires the agent’s command-line tool.
-- Codex execution sessions appear alongside ordinary sessions. Use the child-session count on a card to expand its children. Deleting a Codex session also deletes its descendants.
+- Codex execution sessions appear alongside ordinary sessions. Child sessions of every agent nest under their parent; use the child-session count on a card to expand them. Deleting a session also deletes its descendants. When a child session was forked from its parent, a dashed fork line hides the inherited context until you click it, and the conversation outline marks the fork point.
 - Deleting a Codex or OpenCode session is permanent. Other deletable sessions go to the Trash. Antigravity sessions are read-only.
 - The app syncs usage while it is open. The first sync may take a few minutes. Synced usage remains available after a session is deleted.
 

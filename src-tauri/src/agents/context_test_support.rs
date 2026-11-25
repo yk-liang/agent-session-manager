@@ -31,11 +31,9 @@ pub(super) fn check_and_export(
             Ok(SessionDetail {
                 meta: self.0.meta.clone(),
                 events: self.0.events.clone(),
+                inherited: 0,
                 warnings: vec![],
             })
-        }
-        fn delete_session(&self, _: &str, _: &str) -> Result<(), String> {
-            panic!("read-only test")
         }
         fn resume_command(&self, _: &str, _: bool) -> Option<String> {
             None

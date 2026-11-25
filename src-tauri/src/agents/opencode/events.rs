@@ -35,7 +35,7 @@ pub(super) fn tool_blocks(
     };
     let name = part.get("tool").or_else(|| part.get("name")).and_then(Value::as_str).unwrap_or("?");
     let mut call = json!({"type":"tool_use", "id":identity, "name":name});
-    let (ops, content) = super::tools::describe(name, state);
+    let (ops, body) = super::tools::describe(name, state);
     if !ops.is_empty() {
         call["ops"] = if include_content { json!(ops) } else { json!(ops.into_iter().map(Op::summary).collect::<Vec<_>>()) };
     }
@@ -63,21 +63,19 @@ pub(super) fn tool_blocks(
     let result = if matches!(status, Some("completed" | "error")) || output.is_some() || failed {
         let mut result = json!({"type":"tool_result", "tool_use_id":identity, "is_error":failed});
         if failed && matches!(name, "bash" | "shell") {
-            let exit = state["metadata"]["exit"].as_i64().or_else(|| {
-                error_text(&state["error"])?.trim().strip_prefix("Exit code ")?.parse::<i64>().ok()
-            });
-            if let Some(exit) = exit {
+            if let Some(exit) = super::tools::bash_exit(state) {
                 result["exit_code"] = json!(exit);
             }
         }
         if include_content {
-            result["content"] = if let Some(error) = error_text(&state["error"]) {
-                with_error(error, output)
-            } else if let Some(text) = content {
-                json!(text)
+            if let Some(error) = error_text(&state["error"]) {
+                result["content"] = with_error(error, output);
             } else {
-                output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }))
-            };
+                result["content"] = output.cloned().unwrap_or_else(|| json!(if failed { "工具执行失败" } else { "" }));
+                if let Some(body) = body {
+                    result["output"] = json!(body);
+                }
+            }
         }
         Some(result)
     } else {
@@ -120,12 +118,13 @@ pub(super) fn read(
     path: &Path,
     session_id: &str,
     view: bool,
+    mut instructions: Option<super::instructions::Baseline>,
 ) -> Result<(Vec<Value>, Vec<String>), String> {
     // 同毫秒写入依靠 OpenCode 的单调 ID 稳定排序，不能按类型分组后再拼接。
     let order = storage::order_column(conn);
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT m.id,m.data,p.id,p.data,COALESCE(p.time_created,m.time_created)
+            "SELECT m.id,m.data,p.id,p.data,COALESCE(p.time_created,m.time_created),m.{order}
         FROM message m LEFT JOIN part p ON p.message_id=m.id WHERE m.session_id=?1
         ORDER BY m.{order},m.id,p.time_created,p.id"
         ))
@@ -138,6 +137,7 @@ pub(super) fn read(
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -152,7 +152,7 @@ pub(super) fn read(
     let mut current_model = None;
     let mut message_error = None;
     for row in rows {
-        let (msg_id, msg_data, part_id, part_data, created) = match row {
+        let (msg_id, msg_data, part_id, part_data, created, position) = match row {
             Ok(row) => row,
             Err(_) => {
                 bad += 1;
@@ -161,6 +161,9 @@ pub(super) fn read(
         };
         if msg_id != current_msg {
             events.extend(message_error.take());
+            if let Some(baseline) = instructions.take_if(|baseline| position.is_some_and(|position| position > baseline.epoch)) {
+                events.push(instruction_event(session_id, baseline.text));
+            }
             user_index = None;
             current_msg = msg_id;
             let message = serde_json::from_str::<Value>(&msg_data).unwrap_or(Value::Null);
@@ -334,10 +337,16 @@ pub(super) fn read(
         }
     }
     events.extend(message_error);
+    events.extend(instructions.map(|baseline| instruction_event(session_id, baseline.text)));
     if bad > 0 {
         warnings.push(format!(
             "OpenCode 会话有 {bad} 处消息或分段无法解析，当前显示可读取内容"
         ));
     }
     Ok((events, warnings))
+}
+
+fn instruction_event(session_id: &str, text: String) -> Value {
+    let source = event("system", &format!("{session_id}:instructions"), None, Value::Null);
+    super::super::context::record(&source, "instructions", "系统指令", &json!(text))
 }

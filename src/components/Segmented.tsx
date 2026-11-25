@@ -7,10 +7,12 @@ interface Props<T extends string> {
   onChange: (value: T) => void;
   compact?: boolean;
   tabs?: boolean;
+  panelId?: string;
+  className?: string;
   disabled?: boolean;
 }
 
-export default function Segmented<T extends string>({ label, options, value, onChange, compact, tabs, disabled }: Props<T>) {
+export default function Segmented<T extends string>({ label, options, value, onChange, compact, tabs, panelId, className, disabled }: Props<T>) {
   const moveTab = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const last = options.length - 1;
     const next = event.key === "ArrowRight" ? (index + 1) % options.length
@@ -21,9 +23,10 @@ export default function Segmented<T extends string>({ label, options, value, onC
     onChange(options[next][0]);
     event.currentTarget.parentElement?.querySelectorAll("button")[next]?.focus();
   };
-  return <div className={compact ? "segmented compact" : "segmented"} role={tabs ? "tablist" : "group"} aria-label={label}>
+  return <div className={["segmented", compact && "compact", className].filter(Boolean).join(" ")} role={tabs ? "tablist" : "group"} aria-label={label}>
     {options.map(([id, content], index) => <button key={id} type="button" className="btn-ghost"
       role={tabs ? "tab" : undefined} aria-selected={tabs ? value === id : undefined}
+      id={panelId ? `${panelId}-${index}` : undefined} aria-controls={panelId}
       aria-pressed={tabs ? undefined : value === id} tabIndex={tabs && value !== id ? -1 : undefined}
       onKeyDown={tabs ? event => moveTab(event, index) : undefined}
       disabled={disabled} onClick={() => onChange(id)}>{content}</button>)}

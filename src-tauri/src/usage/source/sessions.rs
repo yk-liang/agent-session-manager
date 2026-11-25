@@ -60,7 +60,7 @@ impl SessionInventory {
     }
 
     pub fn contains(&self, session: &str, parent: Option<&str>, source: Option<&str>) -> bool {
-        // Claude 和 Qoder 的子代理可能只记录在父会话或嵌套日志中。
+        // Claude 和 Qoder 的子智能体可能只记录在父会话或嵌套日志中。
         self.ids.contains(session)
             || self.transcripts.contains(Path::new(session))
             || self.claude_family
